@@ -1,0 +1,626 @@
+#!/usr/bin/env bash
+#
+# shale's test harness.  One file, no dependencies beyond shale's own.
+#
+# usage: tests/run [SUBSTRING]
+#
+# Cases are functions named test_<area>_<claim>.  Each runs in its own subshell
+# with HOME pointed at a fresh sandbox, and reaches shale only through the
+# shale() wrapper below, which refuses to run outside such a sandbox.
+
+if [ -z "${BASH_VERSION-}" ]; then
+  printf 'tests: this script requires bash\n' >&2
+  exit 1
+fi
+
+set -uo pipefail
+
+TESTS_DIR=$(cd "$(dirname "$0")" && pwd -P) || exit 1
+REPO_ROOT=$(cd "$TESTS_DIR/.." && pwd -P) || exit 1
+SHALE=$REPO_ROOT/shale
+
+# The real home, captured before anything redirects HOME.
+REAL_HOME=$HOME
+if [ -d "$HOME" ]; then
+  REAL_HOME=$(cd "$HOME" && pwd -P) || exit 1
+fi
+
+FILTER=${1-}
+if [ $# -gt 1 ]; then
+  printf 'usage: tests/run [SUBSTRING]\n' >&2
+  exit 2
+fi
+
+# ---------------------------------------------------------------- prerequisites
+
+# git, stow and chkstow are the product, not the harness's convenience: a suite
+# that skipped without them would report green having tested nothing that
+# matters.  shellcheck is the one legitimate skip; it is not a shale
+# prerequisite.
+missing=0
+for tool in git stow chkstow; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf 'tests: %s is required but was not found on PATH\n' "$tool" >&2
+    missing=$((missing + 1))
+  fi
+done
+if [ ! -f "$SHALE" ]; then
+  printf 'tests: no shale script at %s\n' "$SHALE" >&2
+  missing=$((missing + 1))
+fi
+[ "$missing" -eq 0 ] || exit 1
+
+# --------------------------------------------------------------------- sandbox
+
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/shale-tests.XXXXXX") || exit 1
+# macOS /tmp is a symlink to /private/tmp; stow's relative-link arithmetic is
+# computed against the resolved path, so resolve it here or assertions on link
+# targets will not match.
+TEST_ROOT=$(cd "$TEST_ROOT" && pwd -P) || exit 1
+
+PASSED=0
+FAILED=0
+SKIPPED=0
+CLEANED=0
+
+cleanup() {
+  [ "$CLEANED" -eq 0 ] || return 0
+  CLEANED=1
+  if [ "$FAILED" -gt 0 ]; then
+    printf 'tests: sandbox kept at %s\n' "$TEST_ROOT" >&2
+    return 0
+  fi
+  # Gated on the mktemp template, so an empty or corrupted TEST_ROOT lands in
+  # the refusing branch instead of in rm -rf.
+  case "$TEST_ROOT" in
+    */shale-tests.??????)
+      rm -rf "$TEST_ROOT"
+      ;;
+    *)
+      printf 'tests: refusing to remove %s: it does not match the sandbox template\n' \
+        "${TEST_ROOT:-(empty)}" >&2
+      ;;
+  esac
+}
+
+trap cleanup EXIT
+trap 'cleanup; trap - INT; kill -INT $$' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
+
+# ----------------------------------------------------------- case-side helpers
+#
+# Everything below runs inside a case's subshell.  CASE_DIR is set by run_case.
+
+CASE_DIR=$TEST_ROOT
+SHALE_RUNS=0
+shale_status=0
+shale_out=
+shale_err=
+
+fail() {
+  local line
+  [ $# -gt 0 ] || set -- 'assertion failed'
+  for line in "$@"; do
+    printf '%s\n' "$line" >>"$CASE_DIR/failure"
+  done
+  exit 1
+}
+
+skip() {
+  printf '%s\n' "${1-no reason given}" >"$CASE_DIR/skip"
+  exit 77
+}
+
+# root ignores mode bits, so any case provoking a failure with chmod passes
+# without testing anything when uid is 0.  A skip is not a pass.
+skip_if_root() {
+  [ "$(id -u)" = 0 ] || return 0
+  skip "${1-running as root: mode bits are not enforced}"
+}
+
+guard_trip() {
+  printf 'tests: SANDBOX GUARD TRIPPED: %s\n' "$1" >&2
+  printf 'tests:   HOME      %s\n' "$HOME" >&2
+  printf 'tests:   real home %s\n' "$REAL_HOME" >&2
+  printf 'tests:   test root %s\n' "$TEST_ROOT" >&2
+  exit 99
+}
+
+# Every case reaches shale through this, never through $SHALE directly.  The
+# marker file is the load-bearing check: it is proof that this HOME was created
+# by this run, which matching a path prefix is not.
+shale() {
+  if [ ! -f "$HOME/.shale-test-sandbox" ]; then
+    guard_trip 'HOME holds no .shale-test-sandbox marker'
+  fi
+  if [ "$HOME" = "$REAL_HOME" ]; then
+    guard_trip 'HOME is the real home directory'
+  fi
+  case "$HOME" in
+    "$TEST_ROOT"/*) ;;
+    *) guard_trip 'HOME is not under the test root' ;;
+  esac
+  "$SHALE" ${1+"$@"}
+}
+
+# Runs shale and captures its status, stdout and stderr into shale_status,
+# shale_out and shale_err.  Every invocation is also appended to the case's
+# transcript, which the failure report prints.
+run_shale() {
+  local n out err
+  SHALE_RUNS=$((SHALE_RUNS + 1))
+  n=$SHALE_RUNS
+  out=$CASE_DIR/shale.$n.out
+  err=$CASE_DIR/shale.$n.err
+  shale_status=0
+  shale ${1+"$@"} >"$out" 2>"$err" || shale_status=$?
+  shale_out=$(cat "$out")
+  shale_err=$(cat "$err")
+  {
+    printf -- '--- shale %s -> exit %s\n' "$*" "$shale_status"
+    printf -- '    stdout:\n'
+    sed 's/^/      /' "$out"
+    printf -- '    stderr:\n'
+    sed 's/^/      /' "$err"
+  } >>"$CASE_DIR/transcript"
+}
+
+# ------------------------------------------------------------------- fixtures
+#
+# Inline, because every fixture in this suite is a one-line file and a committed
+# tree would be dotfile content in a repo whose whole point is holding none.
+
+# conf LINE...  - writes $HOME/.dotfiles/shale.conf
+conf() {
+  local line dir
+  dir=$HOME/.dotfiles
+  mkdir -p "$dir" || fail "could not create $dir"
+  : >"$dir/shale.conf" || fail "could not write $dir/shale.conf"
+  for line in "$@"; do
+    printf '%s\n' "$line" >>"$dir/shale.conf" || fail "could not write $dir/shale.conf"
+  done
+}
+
+# mklayer LAYER RELPATH [CONTENT] - LAYER is a path under $HOME/.dotfiles.
+# CONTENT defaults to LAYER/RELPATH, so an assertion pins which layer won
+# without the case having to state it.
+mklayer() {
+  local layer=${1-} rel=${2-} content target
+  [ -n "$layer" ] || fail 'mklayer: no layer given'
+  [ -n "$rel" ] || fail 'mklayer: no relative path given'
+  if [ $# -ge 3 ]; then
+    content=$3
+  else
+    content=$layer/$rel
+  fi
+  target=$HOME/.dotfiles/$layer/$rel
+  mkdir -p "${target%/*}" || fail "could not create ${target%/*}"
+  printf '%s\n' "$content" >"$target" || fail "could not write $target"
+}
+
+# ------------------------------------------------------------------ assertions
+#
+# Assertions print and exit themselves rather than relying on set -e, so a case
+# behaves the same whether or not it sets it.
+
+assert_status() {
+  local expected=$1 actual=$2 label=${3-exit status}
+  if [ "$actual" = "$expected" ]; then
+    return 0
+  fi
+  fail "$label: expected exit $expected, got $actual"
+}
+
+assert_eq() {
+  local expected=$1 actual=$2 label=${3-value}
+  if [ "$actual" = "$expected" ]; then
+    return 0
+  fi
+  fail "$label: expected:" "$expected" "$label: got:" "$actual"
+}
+
+assert_contains() {
+  local haystack=$1 needle=$2 label=${3-output}
+  case "$haystack" in
+    *"$needle"*) return 0 ;;
+  esac
+  fail "$label: expected to contain: $needle" "$label: got:" "$haystack"
+}
+
+assert_not_contains() {
+  local haystack=$1 needle=$2 label=${3-output}
+  case "$haystack" in
+    *"$needle"*)
+      fail "$label: expected not to contain: $needle" "$label: got:" "$haystack"
+      ;;
+  esac
+  return 0
+}
+
+assert_empty() {
+  local value=$1 label=${2-output}
+  if [ -z "$value" ]; then
+    return 0
+  fi
+  fail "$label: expected to be empty, got:" "$value"
+}
+
+assert_exists() {
+  local path=$1 label=${2-path}
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    return 0
+  fi
+  fail "$label: does not exist: $path"
+}
+
+assert_missing() {
+  local path=$1 label=${2-path}
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    fail "$label: exists but should not: $path"
+  fi
+  return 0
+}
+
+# -ef, not a string compare of readlink output: stow emits relative targets and
+# pinning the literal makes the suite brittle against any stow change.
+assert_symlink_to() {
+  local link=$1 target=$2 label=${3-symlink}
+  if [ ! -L "$link" ]; then
+    fail "$label: not a symlink: $link"
+  fi
+  if [ "$link" -ef "$target" ]; then
+    return 0
+  fi
+  fail "$label: $link does not resolve to $target" "readlink: $(readlink "$link")"
+}
+
+# ----------------------------------------------------------------- usage cases
+
+test_usage_bare_prints_usage_on_stdout() {
+  run_shale
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale - layered dotfiles builder' 'stdout'
+  assert_contains "$shale_out" 'shale which PATH' 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+test_usage_bare_creates_nothing() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  run_shale
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/current"
+  assert_missing "$HOME/.dotfiles/current.new"
+  assert_missing "$HOME/.dotfiles/current.old"
+}
+
+test_usage_help_forms_match_bare() {
+  local bare form
+  run_shale
+  bare=$shale_out
+  for form in help -h --help; do
+    run_shale "$form"
+    assert_status 0 "$shale_status" "$form exit status"
+    assert_eq "$bare" "$shale_out" "$form stdout"
+    assert_empty "$shale_err" "$form stderr"
+  done
+}
+
+test_usage_unknown_command_exits_2() {
+  run_shale buld
+  assert_status 2 "$shale_status"
+  assert_contains "$shale_err" "shale: unknown command 'buld'" 'stderr'
+  assert_contains "$shale_err" 'usage:' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+}
+
+test_usage_unknown_option_exits_2() {
+  run_shale -n
+  assert_status 2 "$shale_status"
+  assert_contains "$shale_err" 'shale: unknown option -n' 'stderr'
+  assert_contains "$shale_err" 'shale has no options' 'stderr'
+  assert_contains "$shale_err" 'usage:' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+}
+
+test_usage_extra_argument_exits_2() {
+  run_shale build extra
+  assert_status 2 "$shale_status"
+  assert_contains "$shale_err" 'shale: build takes no arguments' 'stderr'
+  assert_contains "$shale_err" 'usage:' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+}
+
+test_usage_which_without_a_path_exits_2() {
+  run_shale which
+  assert_status 2 "$shale_status"
+  assert_contains "$shale_err" 'shale: which takes exactly one PATH' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+}
+
+# 'shale which -odd-name' must work without a '--' separator, so nothing may
+# reject a leading '-' past the subcommand.
+test_usage_which_accepts_a_dashed_path() {
+  run_shale which -odd-name
+  assert_not_contains "$shale_err" 'unknown option' 'stderr'
+  assert_not_contains "$shale_err" 'usage:' 'stderr'
+}
+
+test_usage_commands_are_stubbed() {
+  local command
+  for command in build apply doctor; do
+    run_shale "$command"
+    assert_status 1 "$shale_status" "$command exit status"
+    assert_contains "$shale_err" "shale: $command is not implemented yet" "$command stderr"
+    assert_empty "$shale_out" "$command stdout"
+  done
+  run_shale which .zshrc
+  assert_status 1 "$shale_status" 'which exit status'
+  assert_contains "$shale_err" 'shale: which is not implemented yet' 'which stderr'
+  assert_empty "$shale_out" 'which stdout'
+}
+
+# ------------------------------------------------------------------ meta cases
+
+test_meta_script_is_syntactically_valid() {
+  local out status
+  out=$(bash -n "$SHALE" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    fail "bash -n rejected $SHALE" "$out"
+  fi
+}
+
+test_meta_script_is_executable() {
+  if [ ! -x "$SHALE" ]; then
+    fail "$SHALE is not executable"
+  fi
+}
+
+test_meta_no_absolute_home_literals() {
+  local hits
+  hits=$(grep -nE '/home/|/Users/' "$SHALE")
+  if [ -n "$hits" ]; then
+    fail 'the script hard-codes a home directory path:' "$hits"
+  fi
+}
+
+# Additive-config conventions belong to the layers a user authors.  shale must
+# know nothing about them.
+test_meta_no_fragment_conventions() {
+  local hits
+  hits=$(grep -nE 'profile\.d|rc\.d|helpers\.sh' "$SHALE")
+  if [ -n "$hits" ]; then
+    fail 'the script references a layer-authoring convention it must not know about:' "$hits"
+  fi
+}
+
+# The bash 3.2 / BSD userland floor is enforced here and by review, never by
+# execution: nothing this suite runs on is that old.
+test_meta_no_banned_constructs() {
+  local i names patterns hits found
+  names=(
+    'declare -A or declare -n'
+    'case-modifying parameter expansion (${var^^}, ${var,,})'
+    'mapfile or readarray'
+    'globstar'
+    'readlink -f'
+    'realpath'
+    'stat'
+    'sed -i'
+    'cp -a'
+    'mktemp with a flag other than -d'
+    'set -e'
+    '((n++)) or ((n--))'
+  )
+  patterns=(
+    '(declare|typeset|local)[[:space:]]+-[A-Za-z]*[An]'
+    '\$\{[A-Za-z_][A-Za-z0-9_]*(\^|,)'
+    '(^|[^[:alnum:]_./-])(mapfile|readarray)([^[:alnum:]_-]|$)'
+    'globstar'
+    'readlink[[:space:]]+-[A-Za-z]*f'
+    '(^|[^[:alnum:]_./-])realpath([^[:alnum:]_-]|$)'
+    '(^|[^[:alnum:]_./-])stat([^[:alnum:]_-]|$)'
+    'sed[[:space:]]+-[A-Za-z]*i'
+    'cp[[:space:]]+(-[A-Za-z]*a|--archive)'
+    'mktemp[[:space:]]+-([^d[:space:]]|d[^[:space:]])'
+    '^[[:space:]]*set[[:space:]]+-[a-z]*e'
+    '\(\([^)]*(\+\+|--)'
+  )
+  found=0
+  i=0
+  while [ "$i" -lt "${#patterns[@]}" ]; do
+    hits=$(grep -nE "${patterns[$i]}" "$SHALE")
+    if [ -n "$hits" ]; then
+      printf 'banned construct: %s\n' "${names[$i]}" >>"$CASE_DIR/failure"
+      printf '%s\n' "$hits" >>"$CASE_DIR/failure"
+      found=$((found + 1))
+    fi
+    i=$((i + 1))
+  done
+  if [ "$found" -gt 0 ]; then
+    fail "$found banned construct(s) in $SHALE"
+  fi
+}
+
+# Not a shale prerequisite, so its absence is a skip and never a pass.
+test_meta_shellcheck_is_clean() {
+  local out status
+  command -v shellcheck >/dev/null 2>&1 || skip 'shellcheck is not installed'
+  # SC2329 (function is never invoked) is excluded: helpers land in the script
+  # before the command that calls them, one issue at a time.
+  out=$(shellcheck --shell=bash --exclude=SC2329 "$SHALE" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    fail "shellcheck reported problems in $SHALE" "$out"
+  fi
+}
+
+# The three guard conditions, each tripped by perturbing one input in an inner
+# subshell.  Nothing here ever points HOME at a real directory: a trip is
+# exit 99, and if the guard did not trip, shale would run for real.
+test_meta_guard_requires_the_marker_file() {
+  local status
+  status=0
+  (
+    HOME=$CASE_DIR/unmarked
+    export HOME
+    mkdir -p "$HOME" || exit 1
+    shale build
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 99 "$status" 'guard'
+}
+
+test_meta_guard_rejects_the_real_home() {
+  local status
+  status=0
+  (
+    REAL_HOME=$HOME
+    shale build
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 99 "$status" 'guard'
+}
+
+test_meta_guard_rejects_a_home_outside_the_test_root() {
+  local status
+  status=0
+  (
+    TEST_ROOT=$CASE_DIR/elsewhere
+    shale build
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 99 "$status" 'guard'
+}
+
+# --------------------------------------------------------------------- runner
+
+report_failure() {
+  local name=$1 case_dir=$2 status=$3
+  printf '\n'
+  printf '=== FAIL %s (exit %s)\n' "$name" "$status"
+  printf -- '--- sandbox: %s\n' "$case_dir"
+  if [ -s "$case_dir/failure" ]; then
+    printf -- '--- assertion:\n'
+    sed 's/^/    /' "$case_dir/failure"
+  fi
+  if [ -s "$case_dir/stdout" ]; then
+    printf -- '--- case stdout:\n'
+    sed 's/^/    /' "$case_dir/stdout"
+  fi
+  if [ -s "$case_dir/stderr" ]; then
+    printf -- '--- case stderr:\n'
+    sed 's/^/    /' "$case_dir/stderr"
+  fi
+  if [ -s "$case_dir/transcript" ]; then
+    printf -- '--- shale invocations:\n'
+    sed 's/^/    /' "$case_dir/transcript"
+  fi
+  printf -- '--- HOME tree:\n'
+  ( cd "$case_dir/home" && find . -print | sort | sed 's/^/    /' )
+  printf -- '--- symlinks:\n'
+  (
+    cd "$case_dir/home" && find . -type l -print | sort |
+      while IFS= read -r link; do
+        printf '    %s -> %s\n' "$link" "$(readlink "$link")"
+      done
+  )
+  printf '\n'
+}
+
+run_case() {
+  local name=$1 case_dir=$2 case_home status reason
+  case_home=$case_dir/home
+  mkdir -p "$case_home" || return 2
+  : >"$case_home/.shale-test-sandbox" || return 2
+  : >"$case_dir/failure" || return 2
+  : >"$case_dir/transcript" || return 2
+
+  status=0
+  (
+    CASE_DIR=$case_dir
+    SHALE_RUNS=0
+    HOME=$case_home
+    export HOME
+    export GIT_CONFIG_GLOBAL=/dev/null
+    export GIT_CONFIG_SYSTEM=/dev/null
+    export GIT_AUTHOR_NAME='shale tests'
+    export GIT_AUTHOR_EMAIL='tests@shale.invalid'
+    export GIT_COMMITTER_NAME='shale tests'
+    export GIT_COMMITTER_EMAIL='tests@shale.invalid'
+    unset STOW_DIR
+    # cd here so no .stowrc from wherever the suite was started is reachable.
+    cd "$case_dir" || exit 1
+    "$name"
+  ) >"$case_dir/stdout" 2>"$case_dir/stderr" || status=$?
+
+  case "$status" in
+    0)
+      PASSED=$((PASSED + 1))
+      printf 'ok    %s\n' "$name"
+      ;;
+    77)
+      SKIPPED=$((SKIPPED + 1))
+      reason=$(cat "$case_dir/skip" 2>/dev/null)
+      printf 'SKIP  %s (%s)\n' "$name" "${reason:-no reason given}"
+      SKIP_LIST="$SKIP_LIST$name: ${reason:-no reason given}
+"
+      ;;
+    99)
+      FAILED=$((FAILED + 1))
+      printf 'GUARD %s\n' "$name"
+      cat "$case_dir/stderr" >&2
+      printf 'tests: the sandbox guard tripped; aborting the run\n' >&2
+      cleanup
+      exit 99
+      ;;
+    *)
+      FAILED=$((FAILED + 1))
+      printf 'FAIL  %s\n' "$name"
+      report_failure "$name" "$case_dir" "$status"
+      ;;
+  esac
+  return 0
+}
+
+SKIP_LIST=
+run_all() {
+  # Function names cannot contain whitespace or glob characters, so splitting
+  # this on IFS is safe.  The sort is not decoration: compgen's order is not
+  # contractually alphabetical, and a suite whose order drifts has
+  # unreproducible failures.
+  local cases name index total
+  cases=$(compgen -A function 'test_' | sort)
+  index=0
+  total=0
+  for name in $cases; do
+    case "$name" in
+      *"$FILTER"*) ;;
+      *) continue ;;
+    esac
+    index=$((index + 1))
+    total=$((total + 1))
+    run_case "$name" "$TEST_ROOT/$(printf '%03d' "$index")-$name" || {
+      printf 'tests: could not set up a sandbox for %s\n' "$name" >&2
+      FAILED=$((FAILED + 1))
+      break
+    }
+  done
+
+  printf '\n'
+  if [ "$total" -eq 0 ]; then
+    printf 'tests: no cases matched %s\n' "$FILTER" >&2
+    return 1
+  fi
+  printf '%d passed, %d failed, %d skipped (%d cases)\n' \
+    "$PASSED" "$FAILED" "$SKIPPED" "$total"
+  if [ "$SKIPPED" -gt 0 ]; then
+    printf 'skipped, not passed:\n'
+    printf '%s' "$SKIP_LIST" | sed 's/^/  /'
+  fi
+  [ "$FAILED" -eq 0 ] || return 1
+  return 0
+}
+
+run_all
+exit $?
