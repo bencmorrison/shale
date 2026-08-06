@@ -250,13 +250,16 @@ require_sandbox() {
 #   failure        loud: victim appended, its content quoted into the report
 #   guard-tripped  loud: victim appended, its content printed to stderr, and the
 #                  fallback at $TEST_ROOT is exposed the same way
-#   transcript     caught by run_shale's re-proof, but report_failure still
-#                  quotes whatever is there into a failure report
+#   transcript     a symlink is caught by run_shale's re-proof, which is the
+#                  weak mode; a hardlink is not caught at all, and is silent -
+#                  every invocation is appended to the victim and the run stays
+#                  green.  report_failure quotes whatever is there either way
 #
-# and a fifo left at any of them blocks the write for ever.  Removing a file the
-# harness created is a deliberate act, and the same one that would let a case
-# write anywhere with a bare printf; nothing short of proving an inode closes
-# it, and no primitive here can do that without stat.
+# Two of the four are therefore silent, and a fifo left at any of them blocks the
+# write for ever.  Removing a file the harness created is a deliberate act, and
+# the same one that would let a case write anywhere with a bare printf; nothing
+# short of proving an inode closes it, and no primitive here can do that without
+# stat.
 #
 # The second is the rigs the guard cases build under $CASE_DIR/trip: they are
 # the input being proven against, so they go in with plain mkdir, ln and printf.
@@ -291,8 +294,19 @@ sandbox_resolve() {
 # With 'new', nothing may exist at LEAF at all.  -e and -L are both needed and
 # neither implies the other: -e is false for a dangling symlink, and -L is false
 # for the hardlink, fifo, socket and regular file that -e catches.
+#
+# LEAF must be a single path component, checked first because the result is
+# built by concatenation: a leaf holding a '/' or a '..' walks straight out of
+# the directory sandbox_resolve just proved, and neither mode can see it - '-L'
+# is false for a regular file outside the root, and '-e' is false for a path
+# outside the root that does not exist yet.
 sandbox_leaf() {
   local dir=$1 leaf=$2 mode=${3-} target
+  case "$leaf" in
+    '' | . | .. | */*)
+      guard_trip "write target is not a single path component: $leaf"
+      ;;
+  esac
   sandbox_resolve "$dir"
   target=$sandbox_dir/$leaf
   case "$mode" in
@@ -1455,6 +1469,60 @@ test_meta_sandbox_leaf_refuses_an_unknown_mode() {
   assert_contains "$(cat "$trip/guard-tripped")" 'unknown mode' 'sentinel'
 }
 
+# The result is built by concatenation, so a leaf that is not a single component
+# walks out of the directory sandbox_resolve just proved, and neither mode can
+# see it happen.  The sentinel text is asserted as well as the status: a trip for
+# some other reason would satisfy the status on its own.
+test_meta_sandbox_leaf_refuses_a_leaf_that_is_not_one_component() {
+  local trip status leaf
+  trip=$CASE_DIR/trip
+  for leaf in '../../decoy/target' 'sub/target' '' '.' '..'; do
+    status=0
+    rm -rf "$trip" || fail "could not clear $trip"
+    mkdir -p "$trip/root/case" "$trip/decoy" || fail 'could not build the rig'
+    printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
+    (
+      CASE_DIR=$trip
+      TEST_ROOT=$trip/root
+      sandbox_leaf "$trip/root/case" "$leaf"
+      printf 'CLOBBERED\n' >"$sandbox_path"
+    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    assert_status 99 "$status" "'$leaf' guard"
+    assert_contains "$(cat "$trip/guard-tripped" 2>/dev/null)" \
+      'single path component' "'$leaf' sentinel"
+    assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "'$leaf': the decoy file"
+  done
+  # 'new' is no help: -e is false for a path outside the root that does not
+  # exist yet, which is exactly what such a leaf names.
+  status=0
+  rm -rf "$trip" || fail "could not clear $trip"
+  mkdir -p "$trip/root/case" "$trip/decoy" || fail 'could not build the rig'
+  (
+    CASE_DIR=$trip
+    TEST_ROOT=$trip/root
+    sandbox_leaf "$trip/root/case" '../../decoy/created' new
+    printf 'CREATED\n' >"$sandbox_path"
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 99 "$status" 'new mode guard'
+  assert_missing "$trip/decoy/created" 'a file created outside the root'
+  # And the whole thing is reachable through the top-level write helper.
+  status=0
+  rm -rf "$trip" || fail "could not clear $trip"
+  mkdir -p "$trip/root/home" "$trip/root/case" "$trip/decoy" ||
+    fail 'could not build the rig'
+  : >"$trip/root/home/.shale-test-sandbox" || fail 'could not plant a marker'
+  printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
+  (
+    CASE_DIR=$trip
+    TEST_ROOT=$trip/root
+    HOME=$trip/root/home
+    export HOME
+    sandbox_write "$trip/root/case" '../../decoy/target' 'CLOBBERED'
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 99 "$status" 'sandbox_write guard'
+  assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" 'sandbox_write: the decoy file'
+}
+
 # The runner creates the case directory itself, so anything already at that name
 # was left by an earlier case: case 001 can name 002's directory, and until this
 # refusal existed mkdir -p followed a symlink planted there and built a tree
@@ -1598,7 +1666,7 @@ test_meta_guard_trip_inside_command_substitution_leaves_a_sentinel() {
 # inner run, because a case cannot abort its own suite and stay a case.
 test_meta_runner_aborts_on_a_swallowed_guard_trip() {
   local extra
-  sandbox_leaf "$CASE_DIR" probe-trip.sh
+  sandbox_leaf "$CASE_DIR" probe-trip.sh new
   extra=$sandbox_path
   cat >"$extra" <<'PROBE' || fail "could not write $extra"
 test_probe_swallowed_trip() {
@@ -1620,7 +1688,7 @@ PROBE
 # run_case treats a written failure file after a zero exit as a failure.
 test_meta_runner_fails_on_a_swallowed_assertion() {
   local extra
-  sandbox_leaf "$CASE_DIR" probe-assertion.sh
+  sandbox_leaf "$CASE_DIR" probe-assertion.sh new
   extra=$sandbox_path
   cat >"$extra" <<'PROBE' || fail "could not write $extra"
 test_probe_swallowed_assertion() {
@@ -1639,7 +1707,7 @@ PROBE
 # the guard's status and nothing else may claim it.
 test_meta_runner_aborts_on_a_bare_99_exit() {
   local extra
-  sandbox_leaf "$CASE_DIR" probe-99.sh
+  sandbox_leaf "$CASE_DIR" probe-99.sh new
   extra=$sandbox_path
   cat >"$extra" <<'PROBE' || fail "could not write $extra"
 test_probe_bare_99() {
@@ -1659,7 +1727,7 @@ PROBE
 # itself is observable, and asserts the record exists by the time it runs.
 test_meta_runner_requires_the_sandbox_before_the_case() {
   local extra
-  sandbox_leaf "$CASE_DIR" probe-require.sh
+  sandbox_leaf "$CASE_DIR" probe-require.sh new
   extra=$sandbox_path
   cat >"$extra" <<'PROBE' || fail "could not write $extra"
 require_sandbox() {
@@ -1682,7 +1750,7 @@ PROBE
 # cannot observe its own cleanup, which happens after its last case.
 test_meta_a_failing_run_keeps_its_sandbox() {
   local extra kept
-  sandbox_leaf "$CASE_DIR" probe-fail.sh
+  sandbox_leaf "$CASE_DIR" probe-fail.sh new
   extra=$sandbox_path
   cat >"$extra" <<'PROBE' || fail "could not write $extra"
 test_probe_deliberate_failure() {
