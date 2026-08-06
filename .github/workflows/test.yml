@@ -1,0 +1,54 @@
+name: tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # chkstow ships with stow.
+      - name: Install stow
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq stow
+
+      # shellcheck is pinned rather than taken from apt, because its findings
+      # change between versions: the archive's build reports SC2317 across every
+      # function this suite dispatches indirectly, which a newer one does not.
+      # An unpinned linter makes the gate non-deterministic - the same commit
+      # passes today and fails after an archive bump.  tests/run skips its
+      # shellcheck cases when the version is not this one, and the job below
+      # fails on any skip, so a broken pin turns the run red rather than quietly
+      # testing less.
+      - name: Install pinned shellcheck
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          url=https://github.com/koalaman/shellcheck/releases/download
+          curl -fsSL -o /tmp/shellcheck.tar.xz \
+            "$url/$SHELLCHECK_VERSION/shellcheck-$SHELLCHECK_VERSION.linux.x86_64.tar.xz"
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install -m 0755 "/tmp/shellcheck-$SHELLCHECK_VERSION/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      # pipefail is not set by default in a run block, so without it a failing
+      # suite would be masked by tee's exit status.  The skip check is the
+      # acceptance criterion from the issue: any skip in CI means a prerequisite
+      # is missing from the runner, not that a case was legitimately skipped.
+      - name: Run the suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tests/run | tee result.txt
+          grep -q ', 0 skipped' result.txt || {
+            echo "::error::the suite skipped cases; a prerequisite is missing from the runner"
+            exit 1
+          }
