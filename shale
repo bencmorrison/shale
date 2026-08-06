@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+#
+# shale - layered dotfiles builder.
+
+# This guard must stay first, and POSIX-parseable: a shell that is not bash
+# reaches it before any bash-only syntax further down.
+if [ -z "${BASH_VERSION-}" ]; then
+  printf 'shale: this script requires bash\n' >&2
+  printf 'shale:   run it as: bash /path/to/shale\n' >&2
+  exit 1
+fi
+
+set -uo pipefail
+
+PROG=shale
+
+# Diagnostics: first line prefixed 'shale: ', continuation lines 'shale:   '.
+emit() {
+  local line prefix
+  prefix="$PROG: "
+  for line in "$@"; do
+    printf '%s%s\n' "$prefix" "$line" >&2
+    prefix="$PROG:   "
+  done
+}
+
+warn() {
+  emit "$@"
+}
+
+die() {
+  emit "$@"
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+shale - layered dotfiles builder
+
+usage:
+  shale build          compose the configured layers into ~/.dotfiles/current
+  shale apply          build, then stow current into your home directory
+  shale doctor         check prerequisites, config, and broken links
+  shale which PATH     show which layer provides PATH, and what it shadows
+
+~/.dotfiles/shale.conf lists one layer per line, lowest precedence first:
+
+  NAME  PATH  [URL]
+
+PATH is relative to ~/.dotfiles.  URL says how to clone PATH's top-level
+directory; give it once per directory and leave it off the other lines.
+EOF
+}
+
+usage_error() {
+  emit "$@"
+  printf '\n' >&2
+  usage >&2
+  exit 2
+}
+
+not_implemented() {
+  die "$1 is not implemented yet"
+}
+
+cmd_build() {
+  not_implemented build
+}
+
+cmd_apply() {
+  not_implemented apply
+}
+
+cmd_doctor() {
+  not_implemented doctor
+}
+
+cmd_which() {
+  not_implemented which
+}
+
+cmd=${1-}
+case "$cmd" in
+  '' | help | -h | --help)
+    usage
+    exit 0
+    ;;
+esac
+shift
+
+# No '-*' rejection past this point, so 'shale which -odd-name' works without
+# a '--' separator.
+case "$cmd" in
+  build)
+    [ $# -eq 0 ] || usage_error "build takes no arguments"
+    cmd_build
+    ;;
+  apply)
+    [ $# -eq 0 ] || usage_error "apply takes no arguments"
+    cmd_apply
+    ;;
+  doctor)
+    [ $# -eq 0 ] || usage_error "doctor takes no arguments"
+    cmd_doctor
+    ;;
+  which)
+    [ $# -eq 1 ] || usage_error "which takes exactly one PATH"
+    cmd_which "$1"
+    ;;
+  -*)
+    usage_error "unknown option $cmd; shale has no options"
+    ;;
+  *)
+    usage_error "unknown command '$cmd'"
+    ;;
+esac
