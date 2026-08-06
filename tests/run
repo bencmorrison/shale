@@ -11,7 +11,9 @@
 # that has not been resolved and proven inside the test root immediately before
 # the write, leaf included, and a case that has had a guard trip swallowed does
 # not go on to run anything.  See "guarded writes" below - every write in this
-# file goes through it.
+# file goes through it except the guard's own diagnostic channel, which cannot
+# guard itself; the comment there names those leaves and says what stands in
+# for the guard on each.
 
 if [ -z "${BASH_VERSION-}" ]; then
   printf 'tests: this script requires bash\n' >&2
@@ -110,12 +112,24 @@ resolved_root=$(cd "$TEST_ROOT" && pwd -P) || exit 1
 [ -n "$resolved_root" ] || exit 1
 TEST_ROOT=$resolved_root
 
+# guard_trip's fallback sentinel, created here because no primitive can prove a
+# leaf at the test root itself - sandbox_resolve proves paths *under* the root -
+# and because mktemp -d has just made this directory, empty, moments ago.  Its
+# emptiness is what the -s tests on it mean, so creating it changes nothing.
+: >"$TEST_ROOT/guard-tripped" || exit 1
+
 # ----------------------------------------------------------- case-side helpers
 #
 # Everything below runs inside a case's subshell.  CASE_DIR is set by run_case.
 
 CASE_DIR=$TEST_ROOT
 SHALE_RUNS=0
+# Set to 1 in the copy run_inner_suite builds, by a line appended after this
+# one.  A plain assignment, not ${INNER_SUITE-}: innerness is a property of the
+# harness file, and anything inherited from the environment would make a
+# developer who happens to export the same name look like an inner suite,
+# failing every case that starts one.
+INNER_SUITE=
 shale_status=0
 shale_out=
 shale_err=
@@ -194,9 +208,10 @@ require_sandbox() {
 
 # ------------------------------------------------------------- guarded writes
 #
-# Every write the harness makes goes through these.  The rule they exist to make
-# true by construction: no path is written unless it has been resolved and
-# proven inside the test root immediately before the write, leaf included.
+# Every write the harness makes goes through these, bar the base case named at
+# the end of this block.  The rule they exist to make true by construction: no
+# path is written unless it has been resolved and proven inside the test root
+# immediately before the write, leaf included.
 # Resolution is cd + pwd -P, so '..' and symlinks are followed before the
 # comparison, and the write then goes through the *resolved* directory rather
 # than the caller's string - which is what makes "the path written to is the
@@ -207,10 +222,16 @@ require_sandbox() {
 # path.
 #
 # The base case, which cannot itself be guarded without regress, is the guard's
-# own diagnostic channel - guard-tripped, failure and skip.  run_case resolves
-# $CASE_DIR and creates those three leaves as regular files before any case body
-# runs, so the directory is proven and the leaves are not symlinks at the point
-# the case starts.
+# own diagnostic channel: guard-tripped, failure, skip and transcript, written
+# unguarded by guard_trip, fail, skip and the guard cases' own
+# 2>>$CASE_DIR/transcript redirections.  run_case resolves $CASE_DIR and creates
+# all four as regular files before any case body runs, so the directory is
+# proven, none of them is a symlink when the case starts, and a case that tries
+# to plant one there finds a regular file in the way.  The fallback sentinel at
+# $TEST_ROOT is created the same way, by the runner, in the empty directory
+# mktemp -d returned.  What is left uncovered is a case that removes one of them
+# first: that is a deliberate act, and the same one that would let a case write
+# anywhere with a bare printf.
 
 sandbox_dir=
 sandbox_path=
@@ -275,11 +296,18 @@ shale() {
 # shale_out and shale_err.  Every invocation is also appended to the case's
 # transcript, which the failure report prints.
 run_shale() {
-  local n out err
+  local n out err transcript
   SHALE_RUNS=$((SHALE_RUNS + 1))
   n=$SHALE_RUNS
-  out=$CASE_DIR/shale.$n.out
-  err=$CASE_DIR/shale.$n.err
+  # All three leaves are proven before shale runs, not one at a time as each is
+  # written: a case that planted a symlink at any of them must stop the run
+  # rather than have the first two writes land and the third refuse.
+  sandbox_leaf "$CASE_DIR" "shale.$n.out"
+  out=$sandbox_path
+  sandbox_leaf "$CASE_DIR" "shale.$n.err"
+  err=$sandbox_path
+  sandbox_leaf "$CASE_DIR" transcript
+  transcript=$sandbox_path
   shale_status=0
   shale ${1+"$@"} >"$out" 2>"$err" || shale_status=$?
   shale_out=$(cat "$out")
@@ -290,7 +318,7 @@ run_shale() {
     sed 's/^/      /' "$out"
     printf -- '    stderr:\n'
     sed 's/^/      /' "$err"
-  } >>"$CASE_DIR/transcript"
+  } >>"$transcript"
 }
 
 # Runs a copy of this harness with extra cases appended, so the runner's own
@@ -302,7 +330,7 @@ run_inner_suite() {
   # An inner probe that starts another suite recurses until the path is too long
   # for the filesystem, after which the outer case reports a pass having
   # asserted nothing.
-  [ -z "${SHALE_TESTS_INNER-}" ] ||
+  [ -z "$INNER_SUITE" ] ||
     fail 'run_inner_suite must not nest: this suite is already an inner one'
   dir=$CASE_DIR/inner
   sandbox_mkdir "$dir/tmp"
@@ -311,6 +339,9 @@ run_inner_suite() {
   sandbox_leaf "$inner_tests" run
   inner_run=$sandbox_path
   sed '/^run_all$/,$d' "$SELF" >"$inner_run" || fail 'could not copy the harness'
+  # After the copy's own INNER_SUITE= line, so it wins; before the probes, so a
+  # probe that starts a suite is refused however it was written.
+  printf 'INNER_SUITE=1\n' >>"$inner_run" || fail 'could not mark the harness copy'
   cat "$extra" >>"$inner_run" || fail 'could not append the probe cases'
   printf 'run_all\nexit $?\n' >>"$inner_run" || fail 'could not close the harness copy'
   chmod 0755 "$inner_run" || fail 'could not make the harness copy executable'
@@ -318,7 +349,7 @@ run_inner_suite() {
   cp "$SHALE" "$sandbox_path" || fail 'could not copy the script'
   chmod 0755 "$sandbox_path" || fail 'could not make the script copy executable'
   inner_status=0
-  inner_out=$(SHALE_TESTS_INNER=1 TMPDIR=$dir/tmp bash "$inner_run" "$filter" 2>&1) ||
+  inner_out=$(TMPDIR=$dir/tmp bash "$inner_run" "$filter" 2>&1) ||
     inner_status=$?
 }
 
@@ -1246,6 +1277,86 @@ test_meta_guard_rejects_a_symlinked_write_target() {
   done
 }
 
+# sandbox_leaf builds its result from the resolved directory, so the leaf that
+# was checked and the leaf that gets written are the same path however the
+# caller spelled the parent.  Here the two spellings differ in text and name the
+# same directory, which is the only way to observe the difference.
+test_meta_sandbox_leaf_returns_the_resolved_path() {
+  sandbox_mkdir "$CASE_DIR/real/sub"
+  ln -s "$CASE_DIR/real" "$CASE_DIR/link" || fail 'could not create the symlink'
+  sandbox_leaf "$CASE_DIR/link/sub/.." target
+  assert_eq "$CASE_DIR/real/target" "$sandbox_path" 'sandbox_path'
+}
+
+# run_shale's capture files and the transcript are written inside the case body,
+# where the case's own working directory is $CASE_DIR and a symlink at any of
+# those names would carry the write out of the sandbox.
+test_meta_guard_rejects_a_symlinked_capture_file() {
+  local trip status leaf
+  trip=$CASE_DIR/trip
+  for leaf in shale.1.out shale.1.err transcript; do
+    status=0
+    rm -rf "$trip" || fail "could not clear $trip"
+    mkdir -p "$trip/decoy" || fail "could not create $trip/decoy"
+    printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
+    ln -s "$trip/decoy/target" "$trip/$leaf" || fail 'could not link the decoy'
+    # SHALE_RUNS is 0 in this subshell, so the run below is shale.1.
+    (
+      CASE_DIR=$trip
+      run_shale build
+    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    assert_status 99 "$status" "$leaf guard"
+    assert_exists "$trip/guard-tripped" "$leaf guard sentinel"
+    assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$leaf: the decoy file"
+  done
+}
+
+# The runner's own capture and diagnostic leaves, all written before the case
+# body runs.  run_case is called here with a rigged case directory and 'true' as
+# the case name: the guard must fire in the prologue, so the name is never run
+# and any name would do.
+test_meta_runner_rejects_a_symlinked_capture_file() {
+  local trip status leaf
+  trip=$CASE_DIR/trip
+  for leaf in stdout stderr failure transcript skip guard-tripped; do
+    status=0
+    rm -rf "$trip" || fail "could not clear $trip"
+    mkdir -p "$trip/rig" "$trip/decoy" || fail 'could not build the rig'
+    printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
+    ln -s "$trip/decoy/target" "$trip/rig/$leaf" || fail 'could not link the decoy'
+    (
+      CASE_DIR=$trip
+      run_case true "$trip/rig"
+    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    assert_status 99 "$status" "$leaf guard"
+    assert_exists "$trip/guard-tripped" "$leaf guard sentinel"
+    assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$leaf: the decoy file"
+  done
+}
+
+# Creating them, not merely proving them, is what protects the unguarded appends
+# in fail, skip and guard_trip: a case body that tries to plant a symlink at one
+# of those names finds a regular file already there and ln refuses.
+test_meta_runner_pre_creates_the_diagnostic_leaves() {
+  local leaf
+  for leaf in failure transcript skip guard-tripped; do
+    [ -f "$CASE_DIR/$leaf" ] || fail "$leaf was not pre-created as a regular file"
+    [ ! -L "$CASE_DIR/$leaf" ] || fail "$leaf is a symlink"
+    if ln -s "$CASE_DIR/decoy" "$CASE_DIR/$leaf" 2>/dev/null; then
+      fail "a symlink could be planted at $leaf"
+    fi
+  done
+  # The fallback sentinel is the same claim one directory up.  The decoy target
+  # is inside this case's directory, so even the planted link a regression would
+  # allow points somewhere the run may write.
+  [ -f "$TEST_ROOT/guard-tripped" ] ||
+    fail 'the fallback sentinel was not pre-created as a regular file'
+  [ ! -L "$TEST_ROOT/guard-tripped" ] || fail 'the fallback sentinel is a symlink'
+  if ln -s "$CASE_DIR/decoy" "$TEST_ROOT/guard-tripped" 2>/dev/null; then
+    fail 'a symlink could be planted at the fallback sentinel'
+  fi
+}
+
 # A trip that was swallowed must stop the case, not just the run: by the time
 # run_case sees the sentinel the case body has already finished, and in #7 what
 # runs in between is stow --delete.
@@ -1387,6 +1498,61 @@ PROBE
   assert_not_contains "$inner_out" 'ok    test_probe_bare_99' 'inner suite output'
 }
 
+# "run_case validates HOME immediately before the case body" is what lets the
+# HOME allow-list case conclude anything, and no case body can observe it from
+# the inside: by the time one runs, a valid HOME and an unvalidated one look
+# alike.  The probe replaces require_sandbox in an inner suite so the call
+# itself is observable, and asserts the record exists by the time it runs.
+test_meta_runner_requires_the_sandbox_before_the_case() {
+  local extra
+  sandbox_leaf "$CASE_DIR" probe-require.sh
+  extra=$sandbox_path
+  cat >"$extra" <<'PROBE' || fail "could not write $extra"
+require_sandbox() {
+  : >"$CASE_DIR/require-sandbox-called"
+}
+
+test_probe_require_sandbox_ran_first() {
+  [ -f "$CASE_DIR/require-sandbox-called" ] ||
+    fail 'run_case did not call require_sandbox before the case body'
+}
+PROBE
+  run_inner_suite probe_require_sandbox_ran_first "$extra"
+  assert_status 0 "$inner_status" 'inner suite'
+  assert_contains "$inner_out" 'ok    test_probe_require_sandbox_ran_first' \
+    'inner suite output'
+}
+
+# A failing run keeps everything it made, because the sandbox is the only
+# evidence of what went wrong.  Asserted against a real inner run: a suite
+# cannot observe its own cleanup, which happens after its last case.
+test_meta_a_failing_run_keeps_its_sandbox() {
+  local extra kept
+  sandbox_leaf "$CASE_DIR" probe-fail.sh
+  extra=$sandbox_path
+  cat >"$extra" <<'PROBE' || fail "could not write $extra"
+test_probe_deliberate_failure() {
+  fail 'this case fails on purpose'
+}
+PROBE
+  run_inner_suite probe_deliberate_failure "$extra"
+  assert_status 1 "$inner_status" 'inner suite'
+  assert_contains "$inner_out" 'tests: sandbox kept at' 'inner suite output'
+  kept=$(find "$CASE_DIR/inner/tmp" -maxdepth 1 -type d -name 'shale-tests.*' -print)
+  assert_contains "$kept" 'shale-tests.' 'the kept sandbox'
+}
+
+# The same gate the other way round: a run that kept its sandbox on every exit
+# would leave one behind per run and satisfy the case above just as well.
+test_meta_a_clean_run_removes_its_sandbox() {
+  local kept
+  run_inner_suite usage_bare_prints /dev/null
+  assert_status 0 "$inner_status" 'inner suite'
+  assert_not_contains "$inner_out" 'sandbox kept at' 'inner suite output'
+  kept=$(find "$CASE_DIR/inner/tmp" -maxdepth 1 -type d -name 'shale-tests.*' -print)
+  assert_empty "$kept" 'sandboxes left behind'
+}
+
 # Without this an inner probe that starts its own suite recurses until the path
 # is too long for the filesystem, and the outer case then reports a pass having
 # asserted nothing.
@@ -1397,12 +1563,25 @@ test_meta_inner_suite_refuses_to_nest() {
   mkdir -p "$nest" || fail "could not create $nest"
   (
     CASE_DIR=$nest
-    SHALE_TESTS_INNER=1
-    export SHALE_TESTS_INNER
+    INNER_SUITE=1
     run_inner_suite usage_bare_prints /dev/null
   ) >/dev/null 2>&1 || status=$?
   assert_status 1 "$status" 'nesting attempt'
   assert_contains "$(cat "$nest/failure" 2>/dev/null)" 'must not nest' 'failure message'
+}
+
+# The other half of that refusal: it must key on the harness copy and not on the
+# environment, or a developer with SHALE_TESTS_INNER exported - the name this
+# marker used to travel under - turns every case that starts an inner suite into
+# a failure.  Any variable of that name is inert, which is what this asserts.
+test_meta_inner_suite_ignores_the_environment() {
+  SHALE_TESTS_INNER=1
+  export SHALE_TESTS_INNER
+  run_inner_suite usage_bare_prints /dev/null
+  assert_status 0 "$inner_status" 'inner suite'
+  assert_contains "$inner_out" 'ok    test_usage_bare_prints_usage_on_stdout' \
+    'inner suite output'
+  assert_not_contains "$inner_out" 'must not nest' 'inner suite output'
 }
 
 # The inner suite's own scaffolding is a harness write like any other.
@@ -1486,11 +1665,11 @@ guard_abort() {
 }
 
 run_case() {
-  local name=$1 case_dir=$2 case_home status reason
+  local name=$1 case_dir=$2 case_home case_out case_err leaf status reason
   case_home=$case_dir/home
   # The runner's own writes go through the same resolution as everything else,
-  # and these three leaves exist as regular files before the case body runs,
-  # which is what lets fail/skip/guard_trip append to them unguarded.
+  # and the four diagnostic leaves exist as regular files before the case body
+  # runs, which is what lets fail/skip/guard_trip append to them unguarded.
   mkdir -p "$case_home" || return 2
   sandbox_resolve "$case_dir"
   case_dir=$sandbox_dir
@@ -1498,10 +1677,16 @@ run_case() {
   case_home=$sandbox_dir
   sandbox_leaf "$case_home" .shale-test-sandbox
   : >"$sandbox_path" || return 2
-  sandbox_leaf "$case_dir" failure
-  : >"$sandbox_path" || return 2
-  sandbox_leaf "$case_dir" transcript
-  : >"$sandbox_path" || return 2
+  for leaf in failure transcript skip guard-tripped; do
+    sandbox_leaf "$case_dir" "$leaf"
+    : >"$sandbox_path" || return 2
+  done
+  # Not pre-created: the redirection below is their only write, and it is the
+  # proven path that is redirected to.
+  sandbox_leaf "$case_dir" stdout
+  case_out=$sandbox_path
+  sandbox_leaf "$case_dir" stderr
+  case_err=$sandbox_path
 
   status=0
   (
@@ -1520,7 +1705,7 @@ run_case() {
     cd "$case_dir" || exit 1
     require_sandbox
     "$name"
-  ) >"$case_dir/stdout" 2>"$case_dir/stderr" || status=$?
+  ) >"$case_out" 2>"$case_err" || status=$?
 
   # Both checks come before the status, because either signal raised inside a
   # command substitution kills only that subshell and leaves the case's own
