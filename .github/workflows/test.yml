@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # chkstow ships with stow.  shellcheck is installed deliberately: it is
+      # the one prerequisite tests/run treats as a legitimate skip, so without
+      # it three cases skip and the job reports green having tested less than a
+      # developer's laptop does.
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq stow shellcheck
+
+      # pipefail is not set by default in a run block, so without it a failing
+      # suite would be masked by tee's exit status.  The skip check is the
+      # acceptance criterion from the issue: any skip in CI means a prerequisite
+      # is missing from the runner, not that a case was legitimately skipped.
+      - name: Run the suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tests/run | tee result.txt
+          grep -q ', 0 skipped' result.txt || {
+            echo "::error::the suite skipped cases; a prerequisite is missing from the runner"
+            exit 1
+          }
