@@ -60,6 +60,14 @@ if [ ! -f "$SHALE" ]; then
 fi
 [ "$missing" -eq 0 ] || exit 1
 
+# The string 'shellcheck --version' prints for the release CI installs; the
+# release tag itself is 'v0.11.0'.  Its findings move between versions - 0.9.0
+# reports SC2317 on every function this suite dispatches indirectly, 0.11.0
+# reports none of it - so the three shellcheck cases assert against this version
+# only and skip against any other.  CI fails on any skip, so a stale pin turns
+# the run red rather than quietly checking less.
+SHELLCHECK_VERSION=0.11.0
+
 # --------------------------------------------------------------------- sandbox
 
 # Initialised before the sandbox exists, so the EXIT trap can be armed on the
@@ -159,6 +167,30 @@ skip() {
 skip_if_root() {
   [ "$(id -u)" = 0 ] || return 0
   skip "${1-running as root: mode bits are not enforced}"
+}
+
+# Every shellcheck case funnels through here, so a mismatch is one skip reason
+# rather than three spellings of it.  '--version' prints a block of lines; the
+# one wanted is 'version: X.Y.Z'.
+require_shellcheck() {
+  local out line found
+  command -v shellcheck >/dev/null 2>&1 || skip 'shellcheck is not installed'
+  out=$(shellcheck --version 2>&1)
+  found=
+  while IFS= read -r line; do
+    case "$line" in
+      'version:'*)
+        found=${line#version:}
+        found=${found#"${found%%[![:space:]]*}"}
+        found=${found%"${found##*[![:space:]]}"}
+        ;;
+    esac
+  done <<EOF
+$out
+EOF
+  [ -n "$found" ] || skip "shellcheck $SHELLCHECK_VERSION is required; 'shellcheck --version' printed no version"
+  [ "$found" = "$SHELLCHECK_VERSION" ] ||
+    skip "shellcheck $SHELLCHECK_VERSION is required; found $found"
 }
 
 # The sentinel is written before the exit, because exit 99 from inside a command
@@ -1094,7 +1126,7 @@ EOF
 # Not a shale prerequisite, so its absence is a skip and never a pass.
 test_meta_shellcheck_is_clean() {
   local out status
-  command -v shellcheck >/dev/null 2>&1 || skip 'shellcheck is not installed'
+  require_shellcheck
   # SC2329 is gated separately, by allow-list, in the case below.
   out=$(shellcheck --shell=bash --exclude=SC2329 "$SHALE" 2>&1)
   status=$?
@@ -1108,7 +1140,7 @@ test_meta_shellcheck_is_clean() {
 # never-invoked function fails here rather than passing under a blanket exclude.
 test_meta_shellcheck_dead_functions_are_expected() {
   local allowed out line rest lineno src name
-  command -v shellcheck >/dev/null 2>&1 || skip 'shellcheck is not installed'
+  require_shellcheck
   allowed=' warn '
   out=$(shellcheck --shell=bash --format=gcc "$SHALE" 2>&1)
   while IFS= read -r line; do
@@ -1138,7 +1170,7 @@ EOF
 
 test_meta_harness_shellcheck_is_clean() {
   local out status
-  command -v shellcheck >/dev/null 2>&1 || skip 'shellcheck is not installed'
+  require_shellcheck
   # SC2329: every function here is invoked by name through compgen dispatch,
   # leaving no call site for a linter to see.
   # SC2030/SC2031: the guard cases override HOME and TEST_ROOT inside subshells
