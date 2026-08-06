@@ -13,6 +13,8 @@ fi
 set -uo pipefail
 
 PROG=shale
+DOTFILES=${HOME-}/.dotfiles
+CONF=$DOTFILES/shale.conf
 
 # Diagnostics: first line prefixed 'shale: ', continuation lines 'shale:   '.
 emit() {
@@ -63,7 +65,194 @@ not_implemented() {
   die "$1 is not implemented yet"
 }
 
+# ------------------------------------------------------------------ the config
+
+config_error() {
+  CONFIG_ERRORS=$((CONFIG_ERRORS + 1))
+  emit "$@"
+}
+
+# A layer name and every component of a layer path share one grammar.
+valid_component() {
+  case "${1-}" in
+    '') return 1 ;;
+    [A-Za-z0-9_]*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# '.', '..', an absolute path, a doubled or trailing '/' all fail as a component
+# that is empty or does not start with a name character.
+valid_path() {
+  local rest=${1-} component
+  while :; do
+    component=${rest%%/*}
+    valid_component "$component" || return 1
+    case "$rest" in
+      */*) rest=${rest#*/} ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+# Fills LAYER_NAMES/LAYER_PATHS/LAYER_LINES in config order - line order is
+# precedence and nothing else determines it - and the clone-root-to-url map in
+# CLONE_ROOTS/CLONE_URLS/CLONE_LINES.  Collects every error into CONFIG_ERRORS
+# and returns non-zero; it must never exit, because doctor calls it bare and
+# goes on to report the rest of its findings.
+parse_config() {
+  local line lineno name path url extra root ok dup found i
+  LAYER_NAMES=()
+  LAYER_PATHS=()
+  LAYER_LINES=()
+  # Parallel indexed arrays: bash 3.2 has no associative arrays.
+  CLONE_ROOTS=()
+  CLONE_URLS=()
+  CLONE_LINES=()
+  CONFIG_ERRORS=0
+
+  if [ ! -e "$CONF" ]; then
+    config_error "no config file at $CONF" \
+      "list one layer per line, lowest precedence first: NAME PATH [URL]"
+    return 1
+  fi
+  if [ ! -f "$CONF" ]; then
+    config_error "$CONF is not a regular file"
+    return 1
+  fi
+  if [ ! -r "$CONF" ]; then
+    config_error "cannot read $CONF: permission denied"
+    return 1
+  fi
+
+  lineno=0
+  # The '|| [ -n "$line" ]' arm is what parses a last line with no newline
+  # after it, which read reports as a failure having still assigned it.
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    name=
+    path=
+    url=
+    extra=
+    # Default IFS: fields split on runs of spaces and tabs, and a fourth field
+    # onwards lands whole in extra.
+    read -r name path url extra <<EOF
+$line
+EOF
+    # '#' opens a comment where it starts a word, so everything from that field
+    # on is comment whatever it holds.
+    case "$path" in
+      '#'*)
+        path=
+        url=
+        extra=
+        ;;
+    esac
+    case "$url" in
+      '#'*)
+        url=
+        extra=
+        ;;
+    esac
+    case "$extra" in
+      '#'*) extra= ;;
+    esac
+    case "$name" in
+      '' | '#'*) continue ;;
+    esac
+
+    if [ -z "$path" ]; then
+      config_error "$CONF:$lineno: expected 'NAME PATH [URL]', got only '$name'" \
+        "PATH is relative to $DOTFILES"
+      continue
+    fi
+    if [ -n "$extra" ]; then
+      config_error "$CONF:$lineno: expected 'NAME PATH [URL]', got extra fields: $extra" \
+        "a name or a path cannot contain whitespace"
+      continue
+    fi
+
+    ok=1
+    if ! valid_component "$name"; then
+      config_error "$CONF:$lineno: invalid layer name '$name'" \
+        "a name starts with a letter, digit or '_' and may also contain '.' and '-'"
+      ok=0
+    fi
+    if ! valid_path "$path"; then
+      config_error "$CONF:$lineno: invalid layer path '$path'" \
+        "a path is one or more names joined by '/', relative to $DOTFILES"
+      ok=0
+    fi
+    [ "$ok" -eq 1 ] || continue
+
+    root=${path%%/*}
+    case "$root" in
+      current | current.new | current.old)
+        config_error "$CONF:$lineno: layer path '$path' starts with the reserved directory '$root'" \
+          "shale builds into $DOTFILES/current"
+        continue
+        ;;
+    esac
+
+    dup=0
+    i=0
+    while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
+      if [ "${LAYER_NAMES[$i]}" = "$name" ]; then
+        config_error "$CONF:$lineno: duplicate layer name '$name', first used on line ${LAYER_LINES[$i]}"
+        dup=1
+      fi
+      if [ "${LAYER_PATHS[$i]}" = "$path" ]; then
+        config_error "$CONF:$lineno: duplicate layer path '$path', first used on line ${LAYER_LINES[$i]}"
+        dup=1
+      fi
+      i=$((i + 1))
+    done
+    [ "$dup" -eq 0 ] || continue
+
+    # A url declares how to obtain the clone root, not the layer: several layers
+    # commonly come from one clone, so it is given once and omitted after.
+    if [ -n "$url" ]; then
+      found=-1
+      i=0
+      while [ "$i" -lt "${#CLONE_ROOTS[@]}" ]; do
+        if [ "${CLONE_ROOTS[$i]}" = "$root" ]; then
+          found=$i
+          break
+        fi
+        i=$((i + 1))
+      done
+      if [ "$found" -lt 0 ]; then
+        CLONE_ROOTS+=("$root")
+        CLONE_URLS+=("$url")
+        CLONE_LINES+=("$lineno")
+      elif [ "${CLONE_URLS[$found]}" != "$url" ]; then
+        config_error "$CONF:$lineno: conflicting urls for clone root '$root'" \
+          "line ${CLONE_LINES[$found]}: ${CLONE_URLS[$found]}" \
+          "line $lineno: $url"
+      fi
+    fi
+
+    LAYER_NAMES+=("$name")
+    LAYER_PATHS+=("$path")
+    LAYER_LINES+=("$lineno")
+  done <"$CONF"
+
+  if [ "$CONFIG_ERRORS" -eq 0 ] && [ "${#LAYER_NAMES[@]}" -eq 0 ]; then
+    config_error "no layers configured in $CONF" \
+      "list one layer per line, lowest precedence first: NAME PATH [URL]"
+  fi
+  [ "$CONFIG_ERRORS" -eq 0 ] || return 1
+  return 0
+}
+
+# ----------------------------------------------------------------- the commands
+
 cmd_build() {
+  parse_config || exit 1
   not_implemented build
 }
 

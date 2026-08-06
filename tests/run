@@ -527,7 +527,10 @@ test_usage_command_surface_is_closed() {
   done
 }
 
+# build parses the config before anything else, so reaching the stub message is
+# itself the claim that a good config parsed clean.
 test_usage_build_is_stubbed() {
+  conf 'base personal/base' 'local local'
   run_shale build
   assert_status 1 "$shale_status"
   assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
@@ -553,6 +556,228 @@ test_usage_which_is_stubbed() {
   assert_status 1 "$shale_status"
   assert_contains "$shale_err" 'shale: which is not implemented yet' 'stderr'
   assert_empty "$shale_out" 'stdout'
+}
+
+# --------------------------------------------------------------- config cases
+#
+# parse_config has no output of its own.  build runs it before reporting itself
+# unimplemented, so a clean parse is observable as the stub message and a broken
+# one as a diagnostic naming the file and line in its place.  The urls here are
+# opaque strings on purpose: shale passes a url to git verbatim and never looks
+# inside it, and no case in this suite may name a host.
+
+test_config_comments_blanks_and_whitespace_are_accepted() {
+  local tab
+  tab=$(printf '\t')
+  conf \
+    '' \
+    '# a whole-line comment' \
+    '   # an indented comment' \
+    "base${tab}${tab}personal/base${tab}url-one   # a trailing comment" \
+    '   wsl     personal/wsl   # a comment where the url would go' \
+    '' \
+    'local  local' \
+    '#'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
+  assert_not_contains "$shale_err" 'shale.conf:' 'stderr'
+}
+
+test_config_two_and_three_column_lines_are_accepted() {
+  conf 'base personal/base url-one' 'wsl personal/wsl' 'local local'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
+  assert_not_contains "$shale_err" 'shale.conf:' 'stderr'
+}
+
+# Two components is the shape every other case uses, and it is the one length at
+# which trimming the first component and trimming all but the last agree.
+test_config_a_deep_layer_path_is_accepted() {
+  conf 'base personal/base' 'deep personal/wsl/nested/deeper'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
+  assert_not_contains "$shale_err" 'shale.conf:' 'stderr'
+}
+
+test_config_conflicting_urls_for_one_root_are_rejected() {
+  conf \
+    'base personal/base url-one' \
+    'wsl personal/wsl' \
+    'work work url-work' \
+    'extra personal/extra url-two'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/shale.conf:4: conflicting urls for clone root 'personal'" 'stderr'
+  assert_contains "$shale_err" 'shale:   line 1: url-one' 'stderr'
+  assert_contains "$shale_err" 'shale:   line 4: url-two' 'stderr'
+  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+test_config_a_repeated_identical_url_is_accepted() {
+  conf 'base personal/base url-one' 'wsl personal/wsl url-one'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
+  assert_not_contains "$shale_err" 'conflicting' 'stderr'
+}
+
+test_config_a_four_column_line_is_rejected() {
+  conf 'base personal/base url-one' 'wsl personal/wsl url-one spare'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:2:" 'stderr'
+  assert_contains "$shale_err" 'extra fields: spare' 'stderr'
+  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+}
+
+test_config_a_line_without_a_path_is_rejected() {
+  local line
+  # The second form is a half-written line, not a path of '#': the comment is
+  # gone by the time the record is judged.
+  for line in 'base' 'base # the path goes here'; do
+    conf "$line"
+    run_shale build
+    assert_status 1 "$shale_status" "'$line' exit status"
+    assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:1:" "'$line' stderr"
+    assert_contains "$shale_err" "got only 'base'" "'$line' stderr"
+    assert_not_contains "$shale_err" 'not implemented' "'$line' stderr"
+  done
+}
+
+# The quoting and escaping forms are here because they are the only way a path
+# with whitespace in it can be written at all: the format cannot represent one,
+# and the quote and the backslash are simply characters a path may not contain.
+test_config_invalid_paths_are_rejected() {
+  local path
+  # SC2088/SC1003: the tilde and the trailing backslash are the literals under
+  # test, not expansions or escapes that got away.
+  # shellcheck disable=SC2088,SC1003
+  for path in \
+    . ./current .. /etc/skel '~/x' personal//base personal/base/ personal/../base \
+    current current.new current.old current/x '"my' 'my\'; do
+    conf "base $path"
+    run_shale build
+    assert_status 1 "$shale_status" "path '$path' exit status"
+    assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:1:" "path '$path' stderr"
+    assert_not_contains "$shale_err" 'not implemented' "path '$path' stderr"
+  done
+}
+
+test_config_invalid_names_are_rejected() {
+  local name
+  # 'ba#se' is a name with a '#' in it, not a comment: '#' opens one only where
+  # it starts a word.
+  for name in .hidden -lead 'bad/name' 'na*me' 'ba#se'; do
+    conf "$name personal/base"
+    run_shale build
+    assert_status 1 "$shale_status" "name '$name' exit status"
+    assert_contains "$shale_err" \
+      "shale: $HOME/.dotfiles/shale.conf:1: invalid layer name '$name'" "name '$name' stderr"
+    assert_not_contains "$shale_err" 'not implemented' "name '$name' stderr"
+  done
+}
+
+test_config_duplicate_names_and_paths_are_rejected() {
+  conf 'base personal/base' 'base other' 'wsl personal/base'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/shale.conf:2: duplicate layer name 'base', first used on line 1" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/shale.conf:3: duplicate layer path 'personal/base', first used on line 1" 'stderr'
+  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+}
+
+# Config errors cluster, and revealing them one run at a time is infuriating.
+# The two lines that are rejected outright come first, so a parser that stopped
+# at either of them would lose everything asserted below it.
+test_config_every_error_is_reported_in_one_run() {
+  conf \
+    'lonely' \
+    'four fields are too many' \
+    '.bad ../nope' \
+    'base personal/base url-one' \
+    'wsl personal/wsl url-two'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:1: expected" 'stderr'
+  assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:2: expected" 'stderr'
+  assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:3: invalid layer name" 'stderr'
+  assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:3: invalid layer path" 'stderr'
+  assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:5: conflicting urls" 'stderr'
+  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+}
+
+test_config_a_missing_config_is_shales_message() {
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: no config file at $HOME/.dotfiles/shale.conf" 'stderr'
+  assert_not_contains "$shale_err" 'No such file' 'stderr'
+  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+}
+
+# Without the regular-file guard the read loop reaches a directory and bash
+# diagnoses it instead of shale, which is the failure this case names.
+test_config_a_config_that_is_a_directory_is_shales_message() {
+  sandbox_mkdir "$HOME/.dotfiles/shale.conf"
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/shale.conf is not a regular file" 'stderr'
+  assert_not_contains "$shale_err" 'read error' 'stderr'
+  assert_not_contains "$shale_err" 'unbound variable' 'stderr'
+  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+}
+
+test_config_an_unreadable_config_reports_permissions() {
+  skip_if_root
+  conf 'base personal/base'
+  chmod 0000 "$HOME/.dotfiles/shale.conf" || fail 'could not remove the read bit'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: cannot read $HOME/.dotfiles/shale.conf: permission denied" 'stderr'
+  assert_not_contains "$shale_err" 'no layers' 'stderr'
+}
+
+test_config_a_config_with_no_records_reports_no_layers() {
+  conf '# nothing here' ''
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: no layers configured in $HOME/.dotfiles/shale.conf" 'stderr'
+  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+}
+
+# The last line is the invalid one, so its diagnostic is proof it was read at
+# all rather than dropped for want of a newline after it.
+test_config_a_missing_trailing_newline_still_parses_the_last_line() {
+  sandbox_target "$HOME/.dotfiles" shale.conf
+  printf 'base personal/base\nlocal ~/oops' >"$sandbox_path" ||
+    fail "could not write $sandbox_path"
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/shale.conf:2: invalid layer path '~/oops'" 'stderr'
+}
+
+test_config_reached_through_a_symlink_parses() {
+  sandbox_write "$HOME/.dotfiles/elsewhere" shale.conf 'base personal/base'
+  sandbox_mkdir "$HOME/.dotfiles"
+  ln -s "$HOME/.dotfiles/elsewhere/shale.conf" "$HOME/.dotfiles/shale.conf" ||
+    fail 'could not link the config'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
+  assert_not_contains "$shale_err" 'shale.conf:' 'stderr'
 }
 
 # ------------------------------------------------------------------ meta cases
