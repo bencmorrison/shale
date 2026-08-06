@@ -5,8 +5,13 @@
 # usage: tests/run [SUBSTRING]
 #
 # Cases are functions named test_<area>_<claim>.  Each runs in its own subshell
-# with HOME pointed at a fresh sandbox, and reaches shale only through the
-# shale() wrapper below, which refuses to run outside such a sandbox.
+# with HOME pointed at a fresh sandbox.
+#
+# The rule the whole safety layer exists to make true: nothing writes to a path
+# that has not been resolved and proven inside the test root immediately before
+# the write, leaf included, and a case that has had a guard trip swallowed does
+# not go on to run anything.  See "guarded writes" below - every write in this
+# file goes through it.
 
 if [ -z "${BASH_VERSION-}" ]; then
   printf 'tests: this script requires bash\n' >&2
@@ -18,11 +23,13 @@ set -uo pipefail
 TESTS_DIR=$(cd "$(dirname "$0")" && pwd -P) || exit 1
 REPO_ROOT=$(cd "$TESTS_DIR/.." && pwd -P) || exit 1
 SHALE=$REPO_ROOT/shale
+SELF=$TESTS_DIR/${0##*/}
 
-# The real home, captured before anything redirects HOME.
-REAL_HOME=$HOME
-if [ -d "$HOME" ]; then
-  REAL_HOME=$(cd "$HOME" && pwd -P) || exit 1
+# The real home, resolved before anything redirects HOME.  Empty if there is no
+# usable HOME, which no resolved sandbox path can equal.
+REAL_HOME=${HOME-}
+if [ -n "$REAL_HOME" ] && [ -d "$REAL_HOME" ]; then
+  REAL_HOME=$(cd "$REAL_HOME" && pwd -P) || exit 1
 fi
 
 FILTER=${1-}
@@ -35,8 +42,7 @@ fi
 
 # git, stow and chkstow are the product, not the harness's convenience: a suite
 # that skipped without them would report green having tested nothing that
-# matters.  shellcheck is the one legitimate skip; it is not a shale
-# prerequisite.
+# matters.  Only shellcheck is a legitimate skip.
 missing=0
 for tool in git stow chkstow; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -52,27 +58,30 @@ fi
 
 # --------------------------------------------------------------------- sandbox
 
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/shale-tests.XXXXXX") || exit 1
-# macOS /tmp is a symlink to /private/tmp; stow's relative-link arithmetic is
-# computed against the resolved path, so resolve it here or assertions on link
-# targets will not match.
-TEST_ROOT=$(cd "$TEST_ROOT" && pwd -P) || exit 1
-
+# Initialised before the sandbox exists, so the EXIT trap can be armed on the
+# line after mktemp and nothing in between can leak the root.
 PASSED=0
 FAILED=0
 SKIPPED=0
 CLEANED=0
+ABORTED=0
+SKIP_LIST=
 
 cleanup() {
   [ "$CLEANED" -eq 0 ] || return 0
   CLEANED=1
-  if [ "$FAILED" -gt 0 ]; then
-    printf 'tests: sandbox kept at %s\n' "$TEST_ROOT" >&2
-    return 0
-  fi
+  # Deletion needs positive proof that the run finished clean.  Anything else -
+  # a failure, an abort, an empty or non-numeric counter - keeps everything.
+  case "${FAILED-}:${ABORTED-}" in
+    0:0) ;;
+    *)
+      printf 'tests: sandbox kept at %s\n' "${TEST_ROOT-(unset)}" >&2
+      return 0
+      ;;
+  esac
   # Gated on the mktemp template, so an empty or corrupted TEST_ROOT lands in
   # the refusing branch instead of in rm -rf.
-  case "$TEST_ROOT" in
+  case "${TEST_ROOT-}" in
     */shale-tests.??????)
       rm -rf "$TEST_ROOT"
       ;;
@@ -83,10 +92,23 @@ cleanup() {
   esac
 }
 
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/shale-tests.XXXXXX") || exit 1
 trap cleanup EXIT
-trap 'cleanup; trap - INT; kill -INT $$' INT
-trap 'cleanup; exit 143' TERM
-trap 'cleanup; exit 129' HUP
+# A run started in the background inherits SIGINT ignored, so this trap is never
+# installed and the run cannot be interrupted at all.  That is POSIX, not
+# something these traps can change.
+trap 'ABORTED=1; cleanup; trap - INT; kill -INT $$' INT
+trap 'ABORTED=1; cleanup; exit 143' TERM
+trap 'ABORTED=1; cleanup; exit 129' HUP
+
+# macOS /tmp is a symlink to /private/tmp; stow's relative-link arithmetic is
+# computed against the resolved path, so resolve it here or assertions on link
+# targets will not match.  Into a scratch variable first: assigning the failed
+# substitution directly would blank TEST_ROOT, and cleanup would then refuse to
+# delete a sandbox it can no longer name.
+resolved_root=$(cd "$TEST_ROOT" && pwd -P) || exit 1
+[ -n "$resolved_root" ] || exit 1
+TEST_ROOT=$resolved_root
 
 # ----------------------------------------------------------- case-side helpers
 #
@@ -97,6 +119,8 @@ SHALE_RUNS=0
 shale_status=0
 shale_out=
 shale_err=
+inner_status=0
+inner_out=
 
 fail() {
   local line
@@ -119,28 +143,131 @@ skip_if_root() {
   skip "${1-running as root: mode bits are not enforced}"
 }
 
+# The sentinel is written before the exit, because exit 99 from inside a command
+# substitution kills only that subshell and would otherwise leave a case that
+# never ran shale reporting a pass.  run_case checks for it whatever the case's
+# exit status was, and require_sandbox refuses to run anything once it exists.
+# The fallback at $TEST_ROOT covers the one situation where the primary sentinel
+# cannot be written: a $CASE_DIR that is not writable.
 guard_trip() {
+  ABORTED=1
+  printf '%s\n' "$1" >>"$CASE_DIR/guard-tripped" ||
+    printf '%s\n' "$1" >>"$TEST_ROOT/guard-tripped" ||
+    printf 'tests: COULD NOT WRITE A GUARD SENTINEL ANYWHERE\n' >&2
   printf 'tests: SANDBOX GUARD TRIPPED: %s\n' "$1" >&2
-  printf 'tests:   HOME      %s\n' "$HOME" >&2
+  printf 'tests:   HOME      %s\n' "${HOME-(unset)}" >&2
   printf 'tests:   real home %s\n' "$REAL_HOME" >&2
   printf 'tests:   test root %s\n' "$TEST_ROOT" >&2
   exit 99
 }
 
-# Every case reaches shale through this, never through $SHALE directly.  The
-# marker file is the load-bearing check: it is proof that this HOME was created
-# by this run, which matching a path prefix is not.
-shale() {
-  if [ ! -f "$HOME/.shale-test-sandbox" ]; then
+# Guards every operation that touches $HOME.  All conditions carry weight -
+# mutation testing kills cases when either the marker check or the containment
+# check is removed - and each is applied to the resolved path, because '..' and
+# a symlink both walk straight past a string prefix test.  The marker proves
+# this HOME was created by this run; containment proves it is somewhere this run
+# may write.
+#
+# What this does *not* constrain is a case writing under $HOME with raw
+# mkdir/printf.  run_case validates HOME immediately before the case body, so a
+# case that does not reassign HOME cannot write outside the sandbox whatever it
+# writes; the meta case on HOME= assignments covers the rest.
+require_sandbox() {
+  local home
+  # A sentinel already written for this case means a trip was swallowed by a
+  # command substitution.  Nothing further may run: this case has already proved
+  # it can reach outside the sandbox.
+  { [ ! -s "$CASE_DIR/guard-tripped" ] && [ ! -s "$TEST_ROOT/guard-tripped" ]; } ||
+    guard_trip 'an earlier guard trip in this case was swallowed'
+  [ -n "${HOME+set}" ] || guard_trip 'HOME is unset'
+  home=$(cd "$HOME" 2>/dev/null && pwd -P) ||
+    guard_trip 'HOME does not resolve to a directory'
+  [ -n "$home" ] || guard_trip 'HOME does not resolve to a directory'
+  [ -f "$home/.shale-test-sandbox" ] ||
     guard_trip 'HOME holds no .shale-test-sandbox marker'
-  fi
-  if [ "$HOME" = "$REAL_HOME" ]; then
-    guard_trip 'HOME is the real home directory'
-  fi
-  case "$HOME" in
+  [ "$home" != "$REAL_HOME" ] || guard_trip 'HOME is the real home directory'
+  case "$home" in
     "$TEST_ROOT"/*) ;;
     *) guard_trip 'HOME is not under the test root' ;;
   esac
+}
+
+# ------------------------------------------------------------- guarded writes
+#
+# Every write the harness makes goes through these.  The rule they exist to make
+# true by construction: no path is written unless it has been resolved and
+# proven inside the test root immediately before the write, leaf included.
+# Resolution is cd + pwd -P, so '..' and symlinks are followed before the
+# comparison, and the write then goes through the *resolved* directory rather
+# than the caller's string - which is what makes "the path written to is the
+# path that was checked" true rather than aspirational.
+#
+# They assign globals rather than printing their result: a guard trip inside
+# $(...) exits only the substitution, and a caller would carry on with an empty
+# path.
+#
+# The base case, which cannot itself be guarded without regress, is the guard's
+# own diagnostic channel - guard-tripped, failure and skip.  run_case resolves
+# $CASE_DIR and creates those three leaves as regular files before any case body
+# runs, so the directory is proven and the leaves are not symlinks at the point
+# the case starts.
+
+sandbox_dir=
+sandbox_path=
+
+# Resolves an existing directory and proves it contained.  No $HOME involved, so
+# the runner can use it for its own writes as well.
+sandbox_resolve() {
+  local dir=$1 resolved
+  resolved=$(cd "$dir" 2>/dev/null && pwd -P) ||
+    guard_trip "path does not resolve to a directory: $dir"
+  [ -n "$resolved" ] || guard_trip "path does not resolve to a directory: $dir"
+  case "$resolved" in
+    "$TEST_ROOT"/*) ;;
+    *) guard_trip "path resolves outside the test root: $dir -> $resolved" ;;
+  esac
+  sandbox_dir=$resolved
+}
+
+# Resolves DIR and proves LEAF is not a symlink, because '>' follows one out of
+# the sandbox as readily as a symlinked directory does.
+sandbox_leaf() {
+  local dir=$1 leaf=$2
+  sandbox_resolve "$dir"
+  [ ! -L "$sandbox_dir/$leaf" ] ||
+    guard_trip "write target is a symlink: $sandbox_dir/$leaf"
+  sandbox_path=$sandbox_dir/$leaf
+}
+
+# Case-side entry points: the sandbox HOME must be valid too.
+sandbox_mkdir() {
+  local dir=$1
+  require_sandbox
+  mkdir -p "$dir" || fail "could not create $dir"
+  sandbox_resolve "$dir"
+}
+
+sandbox_target() {
+  local dir=$1 leaf=$2
+  sandbox_mkdir "$dir"
+  sandbox_leaf "$sandbox_dir" "$leaf"
+}
+
+# sandbox_write DIR LEAF [LINE...] - the whole write, guarded end to end.
+sandbox_write() {
+  local dir=$1 leaf=$2 line
+  shift 2
+  sandbox_target "$dir" "$leaf"
+  : >"$sandbox_path" || fail "could not write $sandbox_path"
+  for line in ${1+"$@"}; do
+    printf '%s\n' "$line" >>"$sandbox_path" || fail "could not write $sandbox_path"
+  done
+}
+
+# Every case reaches shale through this, never through $SHALE or any other path
+# to the script; a meta case enforces that mechanically.
+shale() {
+  require_sandbox
   "$SHALE" ${1+"$@"}
 }
 
@@ -166,6 +293,35 @@ run_shale() {
   } >>"$CASE_DIR/transcript"
 }
 
+# Runs a copy of this harness with extra cases appended, so the runner's own
+# reporting can be asserted rather than assumed.  Sets inner_status and
+# inner_out.  The copy is cut at the line invoking run_all, which is the only
+# coupling here: change that line and these cases fail rather than pass vacuously.
+run_inner_suite() {
+  local filter=$1 extra=$2 dir inner_tests inner_run
+  # An inner probe that starts another suite recurses until the path is too long
+  # for the filesystem, after which the outer case reports a pass having
+  # asserted nothing.
+  [ -z "${SHALE_TESTS_INNER-}" ] ||
+    fail 'run_inner_suite must not nest: this suite is already an inner one'
+  dir=$CASE_DIR/inner
+  sandbox_mkdir "$dir/tmp"
+  sandbox_mkdir "$dir/tests"
+  inner_tests=$sandbox_dir
+  sandbox_leaf "$inner_tests" run
+  inner_run=$sandbox_path
+  sed '/^run_all$/,$d' "$SELF" >"$inner_run" || fail 'could not copy the harness'
+  cat "$extra" >>"$inner_run" || fail 'could not append the probe cases'
+  printf 'run_all\nexit $?\n' >>"$inner_run" || fail 'could not close the harness copy'
+  chmod 0755 "$inner_run" || fail 'could not make the harness copy executable'
+  sandbox_target "$dir" shale
+  cp "$SHALE" "$sandbox_path" || fail 'could not copy the script'
+  chmod 0755 "$sandbox_path" || fail 'could not make the script copy executable'
+  inner_status=0
+  inner_out=$(SHALE_TESTS_INNER=1 TMPDIR=$dir/tmp bash "$inner_run" "$filter" 2>&1) ||
+    inner_status=$?
+}
+
 # ------------------------------------------------------------------- fixtures
 #
 # Inline, because every fixture in this suite is a one-line file and a committed
@@ -173,13 +329,7 @@ run_shale() {
 
 # conf LINE...  - writes $HOME/.dotfiles/shale.conf
 conf() {
-  local line dir
-  dir=$HOME/.dotfiles
-  mkdir -p "$dir" || fail "could not create $dir"
-  : >"$dir/shale.conf" || fail "could not write $dir/shale.conf"
-  for line in "$@"; do
-    printf '%s\n' "$line" >>"$dir/shale.conf" || fail "could not write $dir/shale.conf"
-  done
+  sandbox_write "$HOME/.dotfiles" shale.conf ${1+"$@"}
 }
 
 # mklayer LAYER RELPATH [CONTENT] - LAYER is a path under $HOME/.dotfiles.
@@ -194,9 +344,13 @@ mklayer() {
   else
     content=$layer/$rel
   fi
+  # .dotfiles on its own first, so a symlink there is caught before mkdir -p can
+  # create anything inside whatever it points at.  A symlink deeper in the layer
+  # path still gets empty directories made inside it before the second check
+  # fires; nothing is written there, and the run aborts.
+  sandbox_mkdir "$HOME/.dotfiles"
   target=$HOME/.dotfiles/$layer/$rel
-  mkdir -p "${target%/*}" || fail "could not create ${target%/*}"
-  printf '%s\n' "$content" >"$target" || fail "could not write $target"
+  sandbox_write "${target%/*}" "${target##*/}" "$content"
 }
 
 # ------------------------------------------------------------------ assertions
@@ -316,6 +470,16 @@ test_usage_unknown_command_exits_2() {
   assert_empty "$shale_out" 'stdout'
 }
 
+# A bare invocation is a question and exits 0; an explicitly empty command word
+# is a wrong invocation.
+test_usage_empty_command_exits_2() {
+  run_shale ''
+  assert_status 2 "$shale_status"
+  assert_contains "$shale_err" "shale: unknown command ''" 'stderr'
+  assert_contains "$shale_err" 'usage:' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+}
+
 test_usage_unknown_option_exits_2() {
   run_shale -n
   assert_status 2 "$shale_status"
@@ -348,18 +512,47 @@ test_usage_which_accepts_a_dashed_path() {
   assert_not_contains "$shale_err" 'usage:' 'stderr'
 }
 
-test_usage_commands_are_stubbed() {
+# The command surface is closed.  This claim outlives every stub below it.
+test_usage_command_surface_is_closed() {
   local command
-  for command in build apply doctor; do
+  for command in build apply doctor which; do
+    run_shale "$command" x
+    assert_not_contains "$shale_err" 'unknown command' "$command stderr"
+  done
+  for command in sync list install status rebuild link unlink -; do
     run_shale "$command"
-    assert_status 1 "$shale_status" "$command exit status"
-    assert_contains "$shale_err" "shale: $command is not implemented yet" "$command stderr"
+    assert_status 2 "$shale_status" "$command exit status"
+    assert_contains "$shale_err" 'shale' "$command stderr"
     assert_empty "$shale_out" "$command stdout"
   done
+}
+
+test_usage_build_is_stubbed() {
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+}
+
+test_usage_apply_is_stubbed() {
+  run_shale apply
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: apply is not implemented yet' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+}
+
+test_usage_doctor_is_stubbed() {
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: doctor is not implemented yet' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+}
+
+test_usage_which_is_stubbed() {
   run_shale which .zshrc
-  assert_status 1 "$shale_status" 'which exit status'
-  assert_contains "$shale_err" 'shale: which is not implemented yet' 'which stderr'
-  assert_empty "$shale_out" 'which stdout'
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: which is not implemented yet' 'stderr'
+  assert_empty "$shale_out" 'stdout'
 }
 
 # ------------------------------------------------------------------ meta cases
@@ -376,6 +569,21 @@ test_meta_script_is_syntactically_valid() {
 test_meta_script_is_executable() {
   if [ ! -x "$SHALE" ]; then
     fail "$SHALE is not executable"
+  fi
+}
+
+test_meta_harness_is_syntactically_valid() {
+  local out status
+  out=$(bash -n "$SELF" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    fail "bash -n rejected $SELF" "$out"
+  fi
+}
+
+test_meta_harness_is_executable() {
+  if [ ! -x "$SELF" ]; then
+    fail "$SELF is not executable"
   fi
 }
 
@@ -403,7 +611,7 @@ test_meta_no_banned_constructs() {
   local i names patterns hits found
   names=(
     'declare -A or declare -n'
-    'case-modifying parameter expansion (${var^^}, ${var,,})'
+    'case-modifying parameter expansion'
     'mapfile or readarray'
     'globstar'
     'readlink -f'
@@ -412,27 +620,33 @@ test_meta_no_banned_constructs() {
     'sed -i'
     'cp -a'
     'mktemp with a flag other than -d'
-    'set -e'
+    'set -e or set -o errexit'
     '((n++)) or ((n--))'
+    'let'
   )
   patterns=(
     '(declare|typeset|local)[[:space:]]+-[A-Za-z]*[An]'
     '\$\{[A-Za-z_][A-Za-z0-9_]*(\^|,)'
     '(^|[^[:alnum:]_./-])(mapfile|readarray)([^[:alnum:]_-]|$)'
     'globstar'
-    'readlink[[:space:]]+-[A-Za-z]*f'
+    'readlink([[:space:]]+-[A-Za-z]+)*[[:space:]]+-[A-Za-z]*f'
     '(^|[^[:alnum:]_./-])realpath([^[:alnum:]_-]|$)'
     '(^|[^[:alnum:]_./-])stat([^[:alnum:]_-]|$)'
-    'sed[[:space:]]+-[A-Za-z]*i'
-    'cp[[:space:]]+(-[A-Za-z]*a|--archive)'
+    'sed([[:space:]]+-[A-Za-z]+)*[[:space:]]+-[A-Za-z]*i'
+    'cp([[:space:]]+-[A-Za-z]+)*[[:space:]]+(-[A-Za-z]*a|--archive)'
     'mktemp[[:space:]]+-([^d[:space:]]|d[^[:space:]])'
-    '^[[:space:]]*set[[:space:]]+-[a-z]*e'
+    '^[[:space:]]*set[[:space:]]+(-[a-z]*e|-o[[:space:]]+errexit)'
     '\(\([^)]*(\+\+|--)'
+    '(^[[:space:]]*|[;&|({][[:space:]]*)let[[:space:]]'
   )
   found=0
   i=0
   while [ "$i" -lt "${#patterns[@]}" ]; do
-    hits=$(grep -nE "${patterns[$i]}" "$SHALE")
+    # Full-line comments are blanked rather than dropped, so line numbers still
+    # point at the script.  A banned construct written inside a comment is not
+    # flagged, deliberately: it does not run, and prose like "we must not let
+    # stow decide" otherwise trips the let pattern.
+    hits=$(sed 's/^[[:space:]]*#.*//' "$SHALE" | grep -nE "${patterns[$i]}")
     if [ -n "$hits" ]; then
       printf 'banned construct: %s\n' "${names[$i]}" >>"$CASE_DIR/failure"
       printf '%s\n' "$hits" >>"$CASE_DIR/failure"
@@ -445,12 +659,112 @@ test_meta_no_banned_constructs() {
   fi
 }
 
+# A case that reaches the script by any route other than the wrapper skips
+# require_sandbox entirely.  Every line naming the script - as $SHALE or as
+# $REPO_ROOT/shale - is checked against the shapes that mean "this line can run
+# it": command position, handed to something that executes its argument, or
+# copied into another variable.  Comment lines are skipped; the definition and
+# the wrapper's own invocation are allow-listed.  It claims nothing about a
+# path assembled at runtime, which no grep can see.
+test_meta_cases_reach_shale_only_through_the_wrapper() {
+  local hits line trimmed offenders i shapes
+  # shellcheck disable=SC2016  # literal patterns, not expansions
+  shapes=(
+    # command position, including after a reserved word
+    '(^|[;&|({!]|\$\(|(^|[[:space:]]|[;&|({])(if|elif|while|until|then|else|do|case)[[:space:]]+)[[:space:]]*"?\$\{?SHALE\}?"?'
+    # any shell: 'bash -n' is inspection and is allow-listed by line, every
+    # other shape of it executes.  Only flags, numbers and assignments may sit
+    # between the command and the script - anything else is prose in a message.
+    '(^|[[:space:]]|[;&|({])(\.|source|bash|sh|zsh|dash|ksh)([[:space:]]+(-[^[:space:]]+|[0-9]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*))*[[:space:]]+"?\$\{?SHALE\}?"?'
+    # handed to something whose whole job is to execute its argument
+    '(^|[[:space:]]|[;&|({])(env|exec|command|eval|xargs|nohup|setsid|sudo|timeout|time)([[:space:]]+(-[^[:space:]]+|[0-9]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*))*[[:space:]]+"?\$\{?SHALE\}?"?'
+    # copied into another variable, trailing comment or not
+    '[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*"?\$\{?SHALE\}?"?[[:space:]]*($|[;&#])'
+    # any other route to the same file
+    '\$\{?REPO_ROOT\}?/shale'
+  )
+  offenders=
+  # shellcheck disable=SC2016  # a literal pattern, not an expansion
+  hits=$(grep -nE '\$\{?SHALE\}?([^A-Za-z0-9_]|$)|\$\{?REPO_ROOT\}?/shale' "$SELF")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    trimmed=${line#*:}
+    trimmed=${trimmed#"${trimmed%%[![:space:]]*}"}
+    # Comments cannot run anything.  The other three are allow-listed by exact
+    # text, written so the allow-list entries do not themselves name the script
+    # in a shape they would have to allow: the definition matches on its left
+    # side, and 'bash -n' matches on its prefix.
+    # shellcheck disable=SC2016  # a literal to match, not an expansion
+    case "$trimmed" in
+      '#'*) continue ;;
+      SHALE=*) continue ;;
+      'out=$(bash -n '*) continue ;;
+      '"$SHALE" ${1+"$@"}') continue ;;
+    esac
+    i=0
+    while [ "$i" -lt "${#shapes[@]}" ]; do
+      if printf '%s\n' "$trimmed" | grep -qE "${shapes[$i]}"; then
+        offenders="$offenders$line
+"
+        break
+      fi
+      i=$((i + 1))
+    done
+  done <<EOF
+$hits
+EOF
+  if [ -n "$offenders" ]; then
+    fail 'these lines can run the script outside the wrapper:' "$offenders"
+  fi
+}
+
+# run_case validates $HOME immediately before the case body, so reassigning HOME
+# is the only way a case can write outside the sandbox without going through a
+# guarded helper.  Every site is listed here by hand; adding one is a deliberate
+# act with a visible diff.  The list is assembled from a split variable name so
+# that these lines are not themselves hits.
+test_meta_home_reassignments_are_allow_listed() {
+  local h nl allowed hits line trimmed offenders
+  h=HOME
+  nl='
+'
+  # The last entry lives inside a <<'PROBE' heredoc.  It becomes a case in an
+  # inner suite, so it is subject to exactly this rule and is listed like the
+  # rest rather than being excluded for sitting in a string.
+  allowed="\
+${h}=\$case_home${nl}\
+${h}=\$trip/unmarked${nl}\
+${h}=\$trip/root/home${nl}\
+${h}=\$trip/root/link${nl}\
+${h}=\$trip/root/sub/../../outside${nl}\
+${h}=\$home_ok${nl}\
+${h}=\$CASE_DIR/unmarked${nl}"
+  offenders=
+  hits=$(grep -nE "(^|[^A-Za-z0-9_])${h}=" "$SELF")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    trimmed=${line#*:}
+    trimmed=${trimmed#"${trimmed%%[![:space:]]*}"}
+    case "$trimmed" in
+      '#'*) continue ;;
+    esac
+    case "$nl$allowed" in
+      *"$nl$trimmed$nl"*) continue ;;
+    esac
+    offenders="$offenders$line$nl"
+  done <<EOF
+$hits
+EOF
+  if [ -n "$offenders" ]; then
+    fail 'these lines reassign HOME and are not on the allow-list:' "$offenders"
+  fi
+}
+
 # Not a shale prerequisite, so its absence is a skip and never a pass.
 test_meta_shellcheck_is_clean() {
   local out status
   command -v shellcheck >/dev/null 2>&1 || skip 'shellcheck is not installed'
-  # SC2329 (function is never invoked) is excluded: helpers land in the script
-  # before the command that calls them, one issue at a time.
+  # SC2329 is gated separately, by allow-list, in the case below.
   out=$(shellcheck --shell=bash --exclude=SC2329 "$SHALE" 2>&1)
   status=$?
   if [ "$status" -ne 0 ]; then
@@ -458,39 +772,431 @@ test_meta_shellcheck_is_clean() {
   fi
 }
 
-# The three guard conditions, each tripped by perturbing one input in an inner
-# subshell.  Nothing here ever points HOME at a real directory: a trip is
-# exit 99, and if the guard did not trip, shale would run for real.
+# SC2329 (function is never invoked) is expected only for helpers whose caller
+# has not landed yet.  This allow-list must shrink as commands land, and a new
+# never-invoked function fails here rather than passing under a blanket exclude.
+test_meta_shellcheck_dead_functions_are_expected() {
+  local allowed out line rest lineno src name
+  command -v shellcheck >/dev/null 2>&1 || skip 'shellcheck is not installed'
+  allowed=' warn '
+  out=$(shellcheck --shell=bash --format=gcc "$SHALE" 2>&1)
+  while IFS= read -r line; do
+    case "$line" in
+      *'[SC2329]'*) ;;
+      *) continue ;;
+    esac
+    rest=${line#"$SHALE":}
+    lineno=${rest%%:*}
+    src=$(sed -n "${lineno}p" "$SHALE")
+    name=${src%%(*}
+    # 'orphan () {' would otherwise name the function 'orphan '.
+    name=${name#"${name%%[![:space:]]*}"}
+    name=${name%"${name##*[![:space:]]}"}
+    case "$allowed" in
+      *" $name "*) ;;
+      *)
+        fail "$SHALE:$lineno defines '$name', which nothing invokes" \
+          "add its caller, delete it, or add it to this case's allow-list" \
+          "$line"
+        ;;
+    esac
+  done <<EOF
+$out
+EOF
+}
+
+test_meta_harness_shellcheck_is_clean() {
+  local out status
+  command -v shellcheck >/dev/null 2>&1 || skip 'shellcheck is not installed'
+  # SC2329: every function here is invoked by name through compgen dispatch,
+  # leaving no call site for a linter to see.
+  # SC2030/SC2031: the guard cases override HOME and TEST_ROOT inside subshells
+  # on purpose, which is exactly the pattern those two warn about.
+  out=$(shellcheck --shell=bash --exclude=SC2329,SC2030,SC2031 "$SELF" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    fail "shellcheck reported problems in $SELF" "$out"
+  fi
+}
+
+# ----------------------------------------------------------------- guard cases
+#
+# Each perturbs exactly one input inside an inner subshell whose CASE_DIR is a
+# scratch directory, so the sentinel a trip writes does not abort the run.
+# Nothing here ever points HOME at a directory outside the sandbox: if the guard
+# failed to fire, the worst that runs is shale against a temp directory.
+
 test_meta_guard_requires_the_marker_file() {
-  local status
+  local trip status
+  trip=$CASE_DIR/trip
   status=0
+  mkdir -p "$trip/unmarked" || fail "could not create $trip/unmarked"
   (
-    HOME=$CASE_DIR/unmarked
+    CASE_DIR=$trip
+    HOME=$trip/unmarked
     export HOME
-    mkdir -p "$HOME" || exit 1
     shale build
   ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
   assert_status 99 "$status" 'guard'
+  assert_exists "$trip/guard-tripped" 'guard sentinel'
+}
+
+test_meta_guard_rejects_an_unset_home() {
+  local trip status
+  trip=$CASE_DIR/trip
+  status=0
+  mkdir -p "$trip" || fail "could not create $trip"
+  (
+    CASE_DIR=$trip
+    unset HOME
+    shale build
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 99 "$status" 'guard'
+  assert_exists "$trip/guard-tripped" 'guard sentinel'
 }
 
 test_meta_guard_rejects_the_real_home() {
-  local status
+  local trip status
+  trip=$CASE_DIR/trip
   status=0
+  mkdir -p "$trip" || fail "could not create $trip"
   (
+    CASE_DIR=$trip
     REAL_HOME=$HOME
     shale build
   ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
   assert_status 99 "$status" 'guard'
+  assert_exists "$trip/guard-tripped" 'guard sentinel'
 }
 
 test_meta_guard_rejects_a_home_outside_the_test_root() {
-  local status
+  local trip status
+  trip=$CASE_DIR/trip
   status=0
+  mkdir -p "$trip" || fail "could not create $trip"
   (
-    TEST_ROOT=$CASE_DIR/elsewhere
+    CASE_DIR=$trip
+    TEST_ROOT=$trip/elsewhere
     shale build
   ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
   assert_status 99 "$status" 'guard'
+  assert_exists "$trip/guard-tripped" 'guard sentinel'
+}
+
+# '..' walks straight past a string prefix test: this HOME string-matches the
+# test root and resolves outside it.
+test_meta_guard_resolves_dot_dot_before_comparing() {
+  local trip status
+  trip=$CASE_DIR/trip
+  status=0
+  mkdir -p "$trip/root/sub" || fail "could not create $trip/root/sub"
+  mkdir -p "$trip/outside" || fail "could not create $trip/outside"
+  : >"$trip/outside/.shale-test-sandbox" || fail 'could not plant a marker'
+  (
+    CASE_DIR=$trip
+    TEST_ROOT=$trip/root
+    HOME=$trip/root/sub/../../outside
+    export HOME
+    shale build
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 99 "$status" 'guard'
+  assert_exists "$trip/guard-tripped" 'guard sentinel'
+}
+
+# Same attack through a symlink rather than '..'.
+test_meta_guard_resolves_symlinks_before_comparing() {
+  local trip status
+  trip=$CASE_DIR/trip
+  status=0
+  mkdir -p "$trip/root" || fail "could not create $trip/root"
+  mkdir -p "$trip/outside" || fail "could not create $trip/outside"
+  : >"$trip/outside/.shale-test-sandbox" || fail 'could not plant a marker'
+  ln -s "$trip/outside" "$trip/root/link" || fail 'could not create the symlink'
+  (
+    CASE_DIR=$trip
+    TEST_ROOT=$trip/root
+    HOME=$trip/root/link
+    export HOME
+    shale build
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 99 "$status" 'guard'
+  assert_exists "$trip/guard-tripped" 'guard sentinel'
+}
+
+# The fixtures write to $HOME before any case reaches shale, so they carry the
+# guard too.
+test_meta_guard_covers_the_fixtures() {
+  local trip status helper
+  trip=$CASE_DIR/trip
+  for helper in conf mklayer; do
+    status=0
+    rm -rf "$trip" || fail "could not clear $trip"
+    mkdir -p "$trip/unmarked" || fail "could not create $trip/unmarked"
+    (
+      CASE_DIR=$trip
+      HOME=$trip/unmarked
+      export HOME
+      case "$helper" in
+        conf) conf 'base personal/base' ;;
+        mklayer) mklayer personal/base .zshrc ;;
+      esac
+    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    assert_status 99 "$status" "$helper guard"
+    assert_exists "$trip/guard-tripped" "$helper guard sentinel"
+    assert_missing "$trip/unmarked/.dotfiles" "$helper wrote into an unguarded HOME"
+  done
+}
+
+# The fixtures write to $HOME/.dotfiles, not to $HOME: a symlink there points
+# the write somewhere require_sandbox never looked.
+test_meta_guard_rejects_a_symlinked_fixture_path() {
+  local trip status helper
+  trip=$CASE_DIR/trip
+  for helper in conf mklayer; do
+    status=0
+    rm -rf "$trip" || fail "could not clear $trip"
+    mkdir -p "$trip/root/home" "$trip/decoy/.dotfiles" ||
+      fail 'could not build the decoy'
+    : >"$trip/root/home/.shale-test-sandbox" || fail 'could not plant a marker'
+    printf 'PRECIOUS\n' >"$trip/decoy/.dotfiles/shale.conf" ||
+      fail 'could not plant the decoy config'
+    ln -s "$trip/decoy/.dotfiles" "$trip/root/home/.dotfiles" ||
+      fail 'could not link the decoy'
+    (
+      CASE_DIR=$trip
+      TEST_ROOT=$trip/root
+      HOME=$trip/root/home
+      export HOME
+      case "$helper" in
+        conf) conf 'base personal/base' ;;
+        mklayer) mklayer personal/base .zshrc ;;
+      esac
+    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    assert_status 99 "$status" "$helper guard"
+    assert_exists "$trip/guard-tripped" "$helper guard sentinel"
+    assert_eq 'PRECIOUS' "$(cat "$trip/decoy/.dotfiles/shale.conf")" \
+      "$helper: the decoy config"
+    # Not just the file: mklayer resolves .dotfiles on its own before the deep
+    # mkdir -p, so nothing is created inside the decoy either.
+    assert_missing "$trip/decoy/.dotfiles/personal" \
+      "$helper: directories inside the decoy"
+  done
+}
+
+# '>' follows a symlink at the leaf exactly as it follows a symlinked directory,
+# so resolving the parent is not enough.
+test_meta_guard_rejects_a_symlinked_write_target() {
+  local trip status helper
+  trip=$CASE_DIR/trip
+  for helper in conf mklayer; do
+    status=0
+    rm -rf "$trip" || fail "could not clear $trip"
+    mkdir -p "$trip/root/home/.dotfiles/personal/base" "$trip/decoy" ||
+      fail 'could not build the decoy'
+    : >"$trip/root/home/.shale-test-sandbox" || fail 'could not plant a marker'
+    printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
+    case "$helper" in
+      conf)
+        ln -s "$trip/decoy/target" "$trip/root/home/.dotfiles/shale.conf" ||
+          fail 'could not link the decoy'
+        ;;
+      mklayer)
+        ln -s "$trip/decoy/target" "$trip/root/home/.dotfiles/personal/base/.zshrc" ||
+          fail 'could not link the decoy'
+        ;;
+    esac
+    (
+      CASE_DIR=$trip
+      TEST_ROOT=$trip/root
+      HOME=$trip/root/home
+      export HOME
+      case "$helper" in
+        conf) conf 'base personal/base' ;;
+        mklayer) mklayer personal/base .zshrc ;;
+      esac
+    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    assert_status 99 "$status" "$helper guard"
+    assert_exists "$trip/guard-tripped" "$helper guard sentinel"
+    assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$helper: the decoy file"
+  done
+}
+
+# A trip that was swallowed must stop the case, not just the run: by the time
+# run_case sees the sentinel the case body has already finished, and in #7 what
+# runs in between is stow --delete.
+test_meta_guard_refuses_after_a_swallowed_trip() {
+  local trip status home_ok
+  trip=$CASE_DIR/trip
+  home_ok=$HOME
+  status=0
+  mkdir -p "$trip/unmarked" || fail "could not create $trip/unmarked"
+  (
+    CASE_DIR=$trip
+    HOME=$trip/unmarked
+    export HOME
+    printf '%s' "$(shale build 2>/dev/null)" >/dev/null
+    # HOME is a valid sandbox again here, so a refusal can only come from the
+    # sentinel the swallowed trip left behind.
+    HOME=$home_ok
+    export HOME
+    shale build
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 99 "$status" 'the call after a swallowed trip'
+  assert_contains "$(cat "$trip/guard-tripped")" 'swallowed' 'sentinel'
+}
+
+# The one situation where the primary sentinel cannot be written at all.
+test_meta_guard_falls_back_to_a_sentinel_at_the_test_root() {
+  local trip status
+  skip_if_root 'root writes to a directory with no write bit'
+  trip=$CASE_DIR/trip
+  status=0
+  mkdir -p "$trip/root/home" "$trip/unwritable" "$trip/decoy" ||
+    fail 'could not build the fixture'
+  : >"$trip/root/home/.shale-test-sandbox" || fail 'could not plant a marker'
+  ln -s "$trip/decoy" "$trip/root/home/.dotfiles" || fail 'could not link the decoy'
+  chmod 0555 "$trip/unwritable" || fail 'could not remove the write bit'
+  (
+    CASE_DIR=$trip/unwritable
+    TEST_ROOT=$trip/root
+    HOME=$trip/root/home
+    export HOME
+    conf 'base personal/base'
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  chmod 0755 "$trip/unwritable" || fail 'could not restore the write bit'
+  assert_status 99 "$status" 'guard'
+  assert_missing "$trip/unwritable/guard-tripped" 'primary sentinel'
+  assert_exists "$trip/root/guard-tripped" 'fallback sentinel'
+}
+
+# The last line of defence on the only rm -rf in the harness.
+test_meta_cleanup_refuses_a_root_outside_the_template() {
+  local trip out
+  trip=$CASE_DIR/trip
+  mkdir -p "$trip/precious" || fail "could not create $trip/precious"
+  printf 'CANARY\n' >"$trip/precious/canary" || fail 'could not plant the canary'
+  out=$(
+    CLEANED=0
+    FAILED=0
+    ABORTED=0
+    TEST_ROOT=$trip/precious
+    cleanup 2>&1
+  )
+  assert_exists "$trip/precious/canary" 'the canary'
+  assert_contains "$out" 'refusing to remove' 'cleanup output'
+}
+
+# exit 99 inside $(...) kills only the substitution, so the sentinel is the only
+# thing that can stop a case which never ran shale from reporting a pass.
+test_meta_guard_trip_inside_command_substitution_leaves_a_sentinel() {
+  local trip status out
+  trip=$CASE_DIR/trip
+  status=0
+  mkdir -p "$trip/unmarked" || fail "could not create $trip/unmarked"
+  out=$(
+    CASE_DIR=$trip
+    HOME=$trip/unmarked
+    export HOME
+    printf '%s' "$(shale build 2>/dev/null)"
+  ) || status=$?
+  assert_status 0 "$status" 'swallowed trip'
+  assert_empty "$out" 'swallowed trip stdout'
+  assert_exists "$trip/guard-tripped" 'guard sentinel'
+}
+
+# The other half: that run_case acts on the sentinel.  Asserted against a real
+# inner run, because a case cannot abort its own suite and stay a case.
+test_meta_runner_aborts_on_a_swallowed_guard_trip() {
+  local extra
+  sandbox_leaf "$CASE_DIR" probe-trip.sh
+  extra=$sandbox_path
+  cat >"$extra" <<'PROBE' || fail "could not write $extra"
+test_probe_swallowed_trip() {
+  local out
+  HOME=$CASE_DIR/unmarked
+  export HOME
+  mkdir -p "$HOME"
+  out=$(shale build 2>/dev/null)
+  return 0
+}
+PROBE
+  run_inner_suite probe_swallowed_trip "$extra"
+  assert_status 99 "$inner_status" 'inner suite'
+  assert_contains "$inner_out" 'GUARD test_probe_swallowed_trip' 'inner suite output'
+  assert_not_contains "$inner_out" 'ok    test_probe_swallowed_trip' 'inner suite output'
+}
+
+# fail() is swallowed by a command substitution exactly as guard_trip is, so
+# run_case treats a written failure file after a zero exit as a failure.
+test_meta_runner_fails_on_a_swallowed_assertion() {
+  local extra
+  sandbox_leaf "$CASE_DIR" probe-assertion.sh
+  extra=$sandbox_path
+  cat >"$extra" <<'PROBE' || fail "could not write $extra"
+test_probe_swallowed_assertion() {
+  local out
+  out=$(assert_status 0 1 'deliberately failed assertion')
+  return 0
+}
+PROBE
+  run_inner_suite probe_swallowed_assertion "$extra"
+  assert_status 1 "$inner_status" 'inner suite'
+  assert_contains "$inner_out" 'FAIL  test_probe_swallowed_assertion' 'inner suite output'
+  assert_not_contains "$inner_out" 'ok    test_probe_swallowed_assertion' 'inner suite output'
+}
+
+# A case that exits 99 without a sentinel is treated as a guard trip too: 99 is
+# the guard's status and nothing else may claim it.
+test_meta_runner_aborts_on_a_bare_99_exit() {
+  local extra
+  sandbox_leaf "$CASE_DIR" probe-99.sh
+  extra=$sandbox_path
+  cat >"$extra" <<'PROBE' || fail "could not write $extra"
+test_probe_bare_99() {
+  exit 99
+}
+PROBE
+  run_inner_suite probe_bare_99 "$extra"
+  assert_status 99 "$inner_status" 'inner suite'
+  assert_contains "$inner_out" 'GUARD test_probe_bare_99' 'inner suite output'
+  assert_not_contains "$inner_out" 'ok    test_probe_bare_99' 'inner suite output'
+}
+
+# Without this an inner probe that starts its own suite recurses until the path
+# is too long for the filesystem, and the outer case then reports a pass having
+# asserted nothing.
+test_meta_inner_suite_refuses_to_nest() {
+  local nest status
+  nest=$CASE_DIR/nest
+  status=0
+  mkdir -p "$nest" || fail "could not create $nest"
+  (
+    CASE_DIR=$nest
+    SHALE_TESTS_INNER=1
+    export SHALE_TESTS_INNER
+    run_inner_suite usage_bare_prints /dev/null
+  ) >/dev/null 2>&1 || status=$?
+  assert_status 1 "$status" 'nesting attempt'
+  assert_contains "$(cat "$nest/failure" 2>/dev/null)" 'must not nest' 'failure message'
+}
+
+# The inner suite's own scaffolding is a harness write like any other.
+test_meta_inner_suite_write_is_guarded() {
+  local trip status
+  trip=$CASE_DIR/trip
+  status=0
+  mkdir -p "$trip/root/home" "$trip/decoy" || fail 'could not build the decoy'
+  : >"$trip/root/home/.shale-test-sandbox" || fail 'could not plant a marker'
+  ln -s "$trip/decoy" "$trip/root/inner" || fail 'could not link the decoy'
+  (
+    CASE_DIR=$trip/root
+    TEST_ROOT=$trip/root
+    HOME=$trip/root/home
+    export HOME
+    run_inner_suite usage_bare_prints /dev/null
+  ) >/dev/null 2>&1 || status=$?
+  assert_status 99 "$status" 'guard'
+  assert_missing "$trip/decoy/tests/run" 'the harness copy'
 }
 
 # --------------------------------------------------------------------- runner
@@ -517,24 +1223,60 @@ report_failure() {
     sed 's/^/    /' "$case_dir/transcript"
   fi
   printf -- '--- HOME tree:\n'
-  ( cd "$case_dir/home" && find . -print | sort | sed 's/^/    /' )
-  printf -- '--- symlinks:\n'
-  (
-    cd "$case_dir/home" && find . -type l -print | sort |
-      while IFS= read -r link; do
-        printf '    %s -> %s\n' "$link" "$(readlink "$link")"
-      done
-  )
+  if [ -d "$case_dir/home" ]; then
+    ( cd "$case_dir/home" && find . -print | sort | sed 's/^/    /' ) ||
+      printf '    (could not list %s)\n' "$case_dir/home"
+    printf -- '--- symlinks:\n'
+    (
+      cd "$case_dir/home" && find . -type l -print | sort |
+        while IFS= read -r link; do
+          printf '    %s -> %s\n' "$link" "$(readlink "$link")"
+        done
+    ) || printf '    (could not list %s)\n' "$case_dir/home"
+  else
+    printf '    (no home directory at %s)\n' "$case_dir/home"
+  fi
   printf '\n'
+}
+
+# Must not return: run_all has no abort check, so a guard trip that got this far
+# and then carried on would let the rest of the suite run and report.
+guard_abort() {
+  local name=$1 case_dir=$2
+  FAILED=$((FAILED + 1))
+  ABORTED=1
+  printf 'GUARD %s\n' "$name"
+  if [ -s "$case_dir/guard-tripped" ]; then
+    sed 's/^/tests: /' "$case_dir/guard-tripped" >&2
+  fi
+  if [ -s "$TEST_ROOT/guard-tripped" ]; then
+    sed 's/^/tests: (fallback sentinel) /' "$TEST_ROOT/guard-tripped" >&2
+  fi
+  if [ -s "$case_dir/stderr" ]; then
+    cat "$case_dir/stderr" >&2
+  fi
+  printf 'tests: the sandbox guard tripped; aborting the run\n' >&2
+  cleanup
+  exit 99
 }
 
 run_case() {
   local name=$1 case_dir=$2 case_home status reason
   case_home=$case_dir/home
+  # The runner's own writes go through the same resolution as everything else,
+  # and these three leaves exist as regular files before the case body runs,
+  # which is what lets fail/skip/guard_trip append to them unguarded.
   mkdir -p "$case_home" || return 2
-  : >"$case_home/.shale-test-sandbox" || return 2
-  : >"$case_dir/failure" || return 2
-  : >"$case_dir/transcript" || return 2
+  sandbox_resolve "$case_dir"
+  case_dir=$sandbox_dir
+  sandbox_resolve "$case_home"
+  case_home=$sandbox_dir
+  sandbox_leaf "$case_home" .shale-test-sandbox
+  : >"$sandbox_path" || return 2
+  sandbox_leaf "$case_dir" failure
+  : >"$sandbox_path" || return 2
+  sandbox_leaf "$case_dir" transcript
+  : >"$sandbox_path" || return 2
 
   status=0
   (
@@ -551,8 +1293,23 @@ run_case() {
     unset STOW_DIR
     # cd here so no .stowrc from wherever the suite was started is reachable.
     cd "$case_dir" || exit 1
+    require_sandbox
     "$name"
   ) >"$case_dir/stdout" 2>"$case_dir/stderr" || status=$?
+
+  # Both checks come before the status, because either signal raised inside a
+  # command substitution kills only that subshell and leaves the case's own
+  # status at 0.
+  # Either sentinel: the per-case one, or the fallback guard_trip writes when
+  # $CASE_DIR could not be written at all.
+  if [ -s "$case_dir/guard-tripped" ] || [ -s "$TEST_ROOT/guard-tripped" ]; then
+    guard_abort "$name" "$case_dir"
+  fi
+  if [ "$status" -eq 0 ] && [ -s "$case_dir/failure" ]; then
+    printf '%s\n' 'the assertion above was raised inside a command substitution;' \
+      'the case then carried on and returned 0' >>"$case_dir/failure"
+    status=1
+  fi
 
   case "$status" in
     0)
@@ -567,12 +1324,9 @@ run_case() {
 "
       ;;
     99)
-      FAILED=$((FAILED + 1))
-      printf 'GUARD %s\n' "$name"
-      cat "$case_dir/stderr" >&2
-      printf 'tests: the sandbox guard tripped; aborting the run\n' >&2
-      cleanup
-      exit 99
+      printf '%s\n' 'a case exited 99 without tripping the guard' \
+        >>"$case_dir/guard-tripped"
+      guard_abort "$name" "$case_dir"
       ;;
     *)
       FAILED=$((FAILED + 1))
@@ -583,7 +1337,6 @@ run_case() {
   return 0
 }
 
-SKIP_LIST=
 run_all() {
   # Function names cannot contain whitespace or glob characters, so splitting
   # this on IFS is safe.  The sort is not decoration: compgen's order is not
