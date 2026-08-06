@@ -7,13 +7,15 @@
 # Cases are functions named test_<area>_<claim>.  Each runs in its own subshell
 # with HOME pointed at a fresh sandbox.
 #
-# The rule the whole safety layer exists to make true: nothing writes to a path
+# The rules the whole safety layer exists to make true: nothing writes to a path
 # that has not been resolved and proven inside the test root immediately before
-# the write, leaf included, and a case that has had a guard trip swallowed does
+# the write, leaf included; nothing may already exist at a path the harness is
+# about to create for itself; and a case that has had a guard trip swallowed does
 # not go on to run anything.  See "guarded writes" below - every write in this
-# file goes through it except the guard's own diagnostic channel, which cannot
-# guard itself; the comment there names those leaves and says what stands in
-# for the guard on each.
+# file goes through it except two classes, both named there: the guard's own
+# diagnostic channel, which cannot guard itself, and the rigs the guard cases
+# build under $CASE_DIR/trip, unproven because they are what is being proven
+# against.
 
 if [ -z "${BASH_VERSION-}" ]; then
   printf 'tests: this script requires bash\n' >&2
@@ -112,10 +114,12 @@ resolved_root=$(cd "$TEST_ROOT" && pwd -P) || exit 1
 [ -n "$resolved_root" ] || exit 1
 TEST_ROOT=$resolved_root
 
-# guard_trip's fallback sentinel, created here because no primitive can prove a
-# leaf at the test root itself - sandbox_resolve proves paths *under* the root -
-# and because mktemp -d has just made this directory, empty, moments ago.  Its
-# emptiness is what the -s tests on it mean, so creating it changes nothing.
+# guard_trip's fallback sentinel, created here because the primitives are not
+# defined until further down the file, and safe here because mktemp -d has just
+# made this directory, empty and mode 0700, moments ago - which is the same
+# "nothing may already exist here" the primitives enforce, established by mktemp
+# rather than by a check.  Its emptiness is what the -s tests on it mean, so
+# creating it changes nothing.
 : >"$TEST_ROOT/guard-tripped" || exit 1
 
 # ----------------------------------------------------------- case-side helpers
@@ -208,56 +212,101 @@ require_sandbox() {
 
 # ------------------------------------------------------------- guarded writes
 #
-# Every write the harness makes goes through these, bar the base case named at
-# the end of this block.  The rule they exist to make true by construction: no
+# Every write the harness makes goes through these, bar the two classes named at
+# the end of this block.  The rules they exist to make true by construction: no
 # path is written unless it has been resolved and proven inside the test root
-# immediately before the write, leaf included.
+# immediately before the write, leaf included; and nothing may already exist at
+# a path the harness is about to create for itself.
 # Resolution is cd + pwd -P, so '..' and symlinks are followed before the
 # comparison, and the write then goes through the *resolved* directory rather
 # than the caller's string - which is what makes "the path written to is the
 # path that was checked" true rather than aspirational.
 #
+# The second rule is what covers everything a symlink test cannot see.  A
+# hardlink, a fifo, a socket and a plain regular file are all invisible to -L,
+# and testing for each of them in turn only closes the spelling it was shown.
+# The harness creates its capture files in a directory it has just made, so
+# anything already at one of those names was put there by something other than
+# this runner, whatever kind of thing it is - one refusal, no file types named.
+# It applies to what the harness creates for itself, not to fixture content: a
+# case may rewrite $HOME/.dotfiles/shale.conf as often as it likes.
+#
 # They assign globals rather than printing their result: a guard trip inside
 # $(...) exits only the substitution, and a caller would carry on with an empty
 # path.
 #
-# The base case, which cannot itself be guarded without regress, is the guard's
-# own diagnostic channel: guard-tripped, failure, skip and transcript, written
-# unguarded by guard_trip, fail, skip and the guard cases' own
-# 2>>$CASE_DIR/transcript redirections.  run_case resolves $CASE_DIR and creates
-# all four as regular files before any case body runs, so the directory is
-# proven, none of them is a symlink when the case starts, and a case that tries
-# to plant one there finds a regular file in the way.  The fallback sentinel at
-# $TEST_ROOT is created the same way, by the runner, in the empty directory
-# mktemp -d returned.  What is left uncovered is a case that removes one of them
-# first: that is a deliberate act, and the same one that would let a case write
-# anywhere with a bare printf.
+# The first uncovered class, which cannot be guarded without regress, is the
+# guard's own diagnostic channel: guard-tripped, failure, skip and transcript,
+# written unguarded by guard_trip, fail, skip and the guard cases' own
+# 2>>$CASE_DIR/transcript redirections.  run_case creates all four as regular
+# files in the directory it has just made empty, so the directory is proven,
+# none of them is anything but a regular file when the case starts, and a case
+# that tries to plant something there finds that file in the way.  The fallback
+# sentinel at $TEST_ROOT is the same claim one directory up, established by
+# mktemp -d.  What is left is a case that removes one of them first and puts its
+# own file there:
+#
+#   skip           silent: victim truncated, the suite reports SKIP and exits 0
+#   failure        loud: victim appended, its content quoted into the report
+#   guard-tripped  loud: victim appended, its content printed to stderr, and the
+#                  fallback at $TEST_ROOT is exposed the same way
+#   transcript     caught by run_shale's re-proof, but report_failure still
+#                  quotes whatever is there into a failure report
+#
+# and a fifo left at any of them blocks the write for ever.  Removing a file the
+# harness created is a deliberate act, and the same one that would let a case
+# write anywhere with a bare printf; nothing short of proving an inode closes
+# it, and no primitive here can do that without stat.
+#
+# The second is the rigs the guard cases build under $CASE_DIR/trip: they are
+# the input being proven against, so they go in with plain mkdir, ln and printf.
 
 sandbox_dir=
 sandbox_path=
 
 # Resolves an existing directory and proves it contained.  No $HOME involved, so
-# the runner can use it for its own writes as well.
+# the runner can use it for its own writes as well.  The test root itself counts
+# as contained: run_case proves each case directory as a leaf of it before
+# creating it, and the leaf test needs the parent resolved first.  $HOME is held
+# to the stricter "under the root" test, in require_sandbox.
 sandbox_resolve() {
   local dir=$1 resolved
   resolved=$(cd "$dir" 2>/dev/null && pwd -P) ||
     guard_trip "path does not resolve to a directory: $dir"
   [ -n "$resolved" ] || guard_trip "path does not resolve to a directory: $dir"
   case "$resolved" in
-    "$TEST_ROOT"/*) ;;
+    "$TEST_ROOT" | "$TEST_ROOT"/*) ;;
     *) guard_trip "path resolves outside the test root: $dir -> $resolved" ;;
   esac
   sandbox_dir=$resolved
 }
 
-# Resolves DIR and proves LEAF is not a symlink, because '>' follows one out of
-# the sandbox as readily as a symlinked directory does.
+# sandbox_leaf DIR LEAF [new] - resolves DIR and proves LEAF may be written.
+#
+# Without 'new', LEAF may exist and must not be a symlink, because '>' follows
+# one out of the sandbox as readily as a symlinked directory does.  That is the
+# mode for anything the harness rewrites: fixture content, and the diagnostic
+# leaves run_case has already created.
+#
+# With 'new', nothing may exist at LEAF at all.  -e and -L are both needed and
+# neither implies the other: -e is false for a dangling symlink, and -L is false
+# for the hardlink, fifo, socket and regular file that -e catches.
 sandbox_leaf() {
-  local dir=$1 leaf=$2
+  local dir=$1 leaf=$2 mode=${3-} target
   sandbox_resolve "$dir"
-  [ ! -L "$sandbox_dir/$leaf" ] ||
-    guard_trip "write target is a symlink: $sandbox_dir/$leaf"
-  sandbox_path=$sandbox_dir/$leaf
+  target=$sandbox_dir/$leaf
+  case "$mode" in
+    '')
+      [ ! -L "$target" ] || guard_trip "write target is a symlink: $target"
+      ;;
+    new)
+      { [ ! -e "$target" ] && [ ! -L "$target" ]; } ||
+        guard_trip "write target already exists: $target"
+      ;;
+    # A misspelt mode would otherwise silently select the weaker check.
+    *) guard_trip "sandbox_leaf: unknown mode: $mode" ;;
+  esac
+  sandbox_path=$target
 }
 
 # Case-side entry points: the sandbox HOME must be valid too.
@@ -300,18 +349,25 @@ run_shale() {
   SHALE_RUNS=$((SHALE_RUNS + 1))
   n=$SHALE_RUNS
   # All three leaves are proven before shale runs, not one at a time as each is
-  # written: a case that planted a symlink at any of them must stop the run
+  # written: a case that planted something at any of them must stop the run
   # rather than have the first two writes land and the third refuse.
-  sandbox_leaf "$CASE_DIR" "shale.$n.out"
+  #
+  # The capture files are fresh names in a directory run_case made, so nothing
+  # may exist at either.  The transcript is the one run_case created, so it must
+  # exist; the up-front proof is what stops the run before shale does anything,
+  # and it is re-proven below because shale's whole job is creating symlinks and
+  # the invocation sits inside this check-to-write window.
+  sandbox_leaf "$CASE_DIR" "shale.$n.out" new
   out=$sandbox_path
-  sandbox_leaf "$CASE_DIR" "shale.$n.err"
+  sandbox_leaf "$CASE_DIR" "shale.$n.err" new
   err=$sandbox_path
   sandbox_leaf "$CASE_DIR" transcript
-  transcript=$sandbox_path
   shale_status=0
   shale ${1+"$@"} >"$out" 2>"$err" || shale_status=$?
   shale_out=$(cat "$out")
   shale_err=$(cat "$err")
+  sandbox_leaf "$CASE_DIR" transcript
+  transcript=$sandbox_path
   {
     printf -- '--- shale %s -> exit %s\n' "$*" "$shale_status"
     printf -- '    stdout:\n'
@@ -336,16 +392,21 @@ run_inner_suite() {
   sandbox_mkdir "$dir/tmp"
   sandbox_mkdir "$dir/tests"
   inner_tests=$sandbox_dir
-  sandbox_leaf "$inner_tests" run
+  # 'new' on both files this builds: they are the harness's own, and a case that
+  # called this twice would be refused rather than silently reusing a copy.
+  sandbox_leaf "$inner_tests" run new
   inner_run=$sandbox_path
   sed '/^run_all$/,$d' "$SELF" >"$inner_run" || fail 'could not copy the harness'
   # After the copy's own INNER_SUITE= line, so it wins; before the probes, so a
-  # probe that starts a suite is refused however it was written.
+  # probe that starts a suite from its case body is refused.  A probe that clears
+  # the marker first is not: the append lands after the cut, so the mechanism is
+  # right, but no phrasing of it makes the refusal undefeatable.
   printf 'INNER_SUITE=1\n' >>"$inner_run" || fail 'could not mark the harness copy'
   cat "$extra" >>"$inner_run" || fail 'could not append the probe cases'
   printf 'run_all\nexit $?\n' >>"$inner_run" || fail 'could not close the harness copy'
   chmod 0755 "$inner_run" || fail 'could not make the harness copy executable'
-  sandbox_target "$dir" shale
+  sandbox_mkdir "$dir"
+  sandbox_leaf "$sandbox_dir" shale new
   cp "$SHALE" "$sandbox_path" || fail 'could not copy the script'
   chmod 0755 "$sandbox_path" || fail 'could not make the script copy executable'
   inner_status=0
@@ -1277,60 +1338,153 @@ test_meta_guard_rejects_a_symlinked_write_target() {
   done
 }
 
-# sandbox_leaf builds its result from the resolved directory, so the leaf that
-# was checked and the leaf that gets written are the same path however the
-# caller spelled the parent.  Here the two spellings differ in text and name the
-# same directory, which is the only way to observe the difference.
+# sandbox_leaf builds its result from the resolved directory, and that is a
+# containment property rather than a tidiness one.  cd canonicalises '..'
+# logically, textually and before the chdir, while the kernel resolves it
+# physically, so a symlink before the '..' makes the two disagree: sandbox_resolve
+# proves .../sub, and handing back the caller's spelling would write through
+# .../sub/link/.., which is the decoy directory.  No caller spells a path that
+# way today, but a case body can call this directly, as this one does.
 test_meta_sandbox_leaf_returns_the_resolved_path() {
-  sandbox_mkdir "$CASE_DIR/real/sub"
-  ln -s "$CASE_DIR/real" "$CASE_DIR/link" || fail 'could not create the symlink'
-  sandbox_leaf "$CASE_DIR/link/sub/.." target
-  assert_eq "$CASE_DIR/real/target" "$sandbox_path" 'sandbox_path'
+  local trip status returned
+  trip=$CASE_DIR/trip
+  status=0
+  mkdir -p "$trip/root/sub" "$trip/decoy/dir" || fail 'could not build the rig'
+  printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
+  ln -s "$trip/decoy/dir" "$trip/root/sub/link" || fail 'could not create the symlink'
+  (
+    CASE_DIR=$trip
+    TEST_ROOT=$trip/root
+    sandbox_leaf "$trip/root/sub/link/.." target
+    printf '%s\n' "$sandbox_path" >"$trip/returned"
+    printf 'CLOBBERED\n' >"$sandbox_path"
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 0 "$status" 'sandbox_leaf'
+  returned=$(cat "$trip/returned" 2>/dev/null)
+  assert_eq "$trip/root/sub/target" "$returned" 'sandbox_path'
+  assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" 'the decoy file'
+  assert_exists "$trip/root/sub/target" 'the file that was written'
 }
 
-# run_shale's capture files and the transcript are written inside the case body,
-# where the case's own working directory is $CASE_DIR and a symlink at any of
-# those names would carry the write out of the sandbox.
-test_meta_guard_rejects_a_symlinked_capture_file() {
-  local trip status leaf
+# run_shale's capture files are fresh names in the case's own directory, so
+# nothing may be at either of them, whatever kind of thing it is.  A hardlink and
+# a fifo are the two that no symlink test can see: the first carries the write
+# to the linked inode, the second blocks the suite for ever with no reader.  The
+# dangling symlink is here because -e alone does not see one.
+test_meta_guard_refuses_an_existing_capture_file() {
+  local trip status leaf kind label
   trip=$CASE_DIR/trip
-  for leaf in shale.1.out shale.1.err transcript; do
+  command -v mkfifo >/dev/null 2>&1 || skip 'mkfifo is not available'
+  for leaf in shale.1.out shale.1.err; do
+    for kind in symlink dangling hardlink fifo regular; do
+      label="$leaf $kind"
+      status=0
+      rm -rf "$trip" || fail "could not clear $trip"
+      mkdir -p "$trip/decoy" || fail "could not create $trip/decoy"
+      printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
+      case "$kind" in
+        symlink) ln -s "$trip/decoy/target" "$trip/$leaf" ;;
+        dangling) ln -s "$trip/decoy/gone" "$trip/$leaf" ;;
+        hardlink) ln "$trip/decoy/target" "$trip/$leaf" ;;
+        fifo) mkfifo "$trip/$leaf" ;;
+        regular) printf 'MINE\n' >"$trip/$leaf" ;;
+      esac || fail "could not plant a $kind at $leaf"
+      # SHALE_RUNS is 0 in this subshell, so the run below is shale.1.
+      (
+        CASE_DIR=$trip
+        run_shale build
+      ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+      assert_status 99 "$status" "$label guard"
+      assert_exists "$trip/guard-tripped" "$label guard sentinel"
+      assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$label: the decoy file"
+    done
+  done
+}
+
+# The transcript is the one run_case created, so it may exist and only a symlink
+# at it is refused.  Both proofs are asserted: the up-front one stops the run
+# before shale does anything, and the re-proof closes the window around the
+# invocation itself, which is where shale creates symlinks.
+test_meta_guard_rejects_a_symlinked_transcript() {
+  local trip status when
+  trip=$CASE_DIR/trip
+  for when in before after; do
     status=0
     rm -rf "$trip" || fail "could not clear $trip"
     mkdir -p "$trip/decoy" || fail "could not create $trip/decoy"
     printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
-    ln -s "$trip/decoy/target" "$trip/$leaf" || fail 'could not link the decoy'
-    # SHALE_RUNS is 0 in this subshell, so the run below is shale.1.
+    case "$when" in
+      before) ln -s "$trip/decoy/target" "$trip/transcript" ;;
+      # Planted while shale runs, by shale itself as far as run_shale can tell:
+      # the up-front proof has already passed by the time this lands.
+      after) : ;;
+    esac || fail 'could not link the decoy'
     (
       CASE_DIR=$trip
+      if [ "$when" = after ]; then
+        shale() {
+          ln -s "$trip/decoy/target" "$trip/transcript"
+        }
+      fi
       run_shale build
     ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
-    assert_status 99 "$status" "$leaf guard"
-    assert_exists "$trip/guard-tripped" "$leaf guard sentinel"
-    assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$leaf: the decoy file"
+    assert_status 99 "$status" "$when guard"
+    assert_exists "$trip/guard-tripped" "$when guard sentinel"
+    assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$when: the decoy file"
+    # What the up-front proof buys over the re-proof alone: shale never ran, so
+    # the capture files it would have been given do not exist.
+    if [ "$when" = before ]; then
+      assert_missing "$trip/shale.1.out" 'the capture file'
+      assert_missing "$trip/shale.1.err" 'the capture file'
+    fi
   done
 }
 
-# The runner's own capture and diagnostic leaves, all written before the case
-# body runs.  run_case is called here with a rigged case directory and 'true' as
-# the case name: the guard must fire in the prologue, so the name is never run
-# and any name would do.
-test_meta_runner_rejects_a_symlinked_capture_file() {
-  local trip status leaf
+# A mode this does not know is a typo in the harness, and falling through to the
+# weaker check on one would be silent.
+test_meta_sandbox_leaf_refuses_an_unknown_mode() {
+  local trip status
   trip=$CASE_DIR/trip
-  for leaf in stdout stderr failure transcript skip guard-tripped; do
+  status=0
+  mkdir -p "$trip" || fail "could not create $trip"
+  (
+    CASE_DIR=$trip
+    sandbox_leaf "$trip" target nwe
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 99 "$status" 'guard'
+  assert_contains "$(cat "$trip/guard-tripped")" 'unknown mode' 'sentinel'
+}
+
+# The runner creates the case directory itself, so anything already at that name
+# was left by an earlier case: case 001 can name 002's directory, and until this
+# refusal existed mkdir -p followed a symlink planted there and built a tree
+# outside the root before a single path had been resolved.  run_case is called
+# here with 'true' as the case name: the guard must fire in the prologue, so the
+# name is never run and any name would do.
+test_meta_runner_refuses_an_existing_case_directory() {
+  local trip status kind
+  trip=$CASE_DIR/trip
+  command -v mkfifo >/dev/null 2>&1 || skip 'mkfifo is not available'
+  for kind in directory symlink dangling regular fifo; do
     status=0
     rm -rf "$trip" || fail "could not clear $trip"
-    mkdir -p "$trip/rig" "$trip/decoy" || fail 'could not build the rig'
+    mkdir -p "$trip/decoy" || fail 'could not build the rig'
     printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
-    ln -s "$trip/decoy/target" "$trip/rig/$leaf" || fail 'could not link the decoy'
+    case "$kind" in
+      directory) mkdir "$trip/rig" ;;
+      symlink) ln -s "$trip/decoy" "$trip/rig" ;;
+      dangling) ln -s "$trip/decoy/gone" "$trip/rig" ;;
+      regular) printf 'MINE\n' >"$trip/rig" ;;
+      fifo) mkfifo "$trip/rig" ;;
+    esac || fail "could not plant a $kind at the case directory"
     (
       CASE_DIR=$trip
       run_case true "$trip/rig"
     ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
-    assert_status 99 "$status" "$leaf guard"
-    assert_exists "$trip/guard-tripped" "$leaf guard sentinel"
-    assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$leaf: the decoy file"
+    assert_status 99 "$status" "$kind guard"
+    assert_exists "$trip/guard-tripped" "$kind guard sentinel"
+    assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$kind: the decoy file"
+    assert_missing "$trip/decoy/home" "$kind: a home directory inside the decoy"
   done
 }
 
@@ -1603,6 +1757,28 @@ test_meta_inner_suite_write_is_guarded() {
   assert_missing "$trip/decoy/tests/run" 'the harness copy'
 }
 
+# The harness copy and the script copy are the harness's own files, so the same
+# refusal covers them: a hardlink planted at either name would otherwise be
+# written through, and no symlink test can see one.
+test_meta_inner_suite_refuses_an_existing_file() {
+  local trip status leaf
+  trip=$CASE_DIR/trip
+  for leaf in tests/run shale; do
+    status=0
+    rm -rf "$trip" || fail "could not clear $trip"
+    mkdir -p "$trip/inner/tests" "$trip/decoy" || fail 'could not build the rig'
+    printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
+    ln "$trip/decoy/target" "$trip/inner/$leaf" || fail 'could not link the decoy'
+    (
+      CASE_DIR=$trip
+      run_inner_suite usage_bare_prints /dev/null
+    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    assert_status 99 "$status" "$leaf guard"
+    assert_exists "$trip/guard-tripped" "$leaf guard sentinel"
+    assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$leaf: the decoy file"
+  done
+}
+
 # --------------------------------------------------------------------- runner
 
 report_failure() {
@@ -1666,26 +1842,36 @@ guard_abort() {
 
 run_case() {
   local name=$1 case_dir=$2 case_home case_out case_err leaf status reason
-  case_home=$case_dir/home
-  # The runner's own writes go through the same resolution as everything else,
-  # and the four diagnostic leaves exist as regular files before the case body
-  # runs, which is what lets fail/skip/guard_trip append to them unguarded.
-  mkdir -p "$case_home" || return 2
-  sandbox_resolve "$case_dir"
+  # Nothing is created until the path for it has been proven, the case directory
+  # included: run_all names it after the case, so anything already there was put
+  # there by an earlier case.  mkdir without -p is the write and the second half
+  # of the proof at once - it fails rather than following a symlink planted at
+  # that name, which is what stopped mkdir -p "$case_dir/home" from building a
+  # tree outside the root before anything had been resolved.
+  sandbox_leaf "${case_dir%/*}" "${case_dir##*/}" new
+  mkdir "$sandbox_path" || return 2
+  sandbox_resolve "$sandbox_path"
   case_dir=$sandbox_dir
-  sandbox_resolve "$case_home"
+  sandbox_leaf "$case_dir" home new
+  mkdir "$sandbox_path" || return 2
+  sandbox_resolve "$sandbox_path"
   case_home=$sandbox_dir
-  sandbox_leaf "$case_home" .shale-test-sandbox
+  # Everything below lands in a directory this function has just created empty,
+  # so no 'new' check here can fire; they go through the primitive so that the
+  # rule holds by construction rather than by an argument about the caller.  The
+  # four diagnostic leaves exist as regular files before the case body runs,
+  # which is what lets fail/skip/guard_trip append to them unguarded.
+  sandbox_leaf "$case_home" .shale-test-sandbox new
   : >"$sandbox_path" || return 2
   for leaf in failure transcript skip guard-tripped; do
-    sandbox_leaf "$case_dir" "$leaf"
+    sandbox_leaf "$case_dir" "$leaf" new
     : >"$sandbox_path" || return 2
   done
   # Not pre-created: the redirection below is their only write, and it is the
   # proven path that is redirected to.
-  sandbox_leaf "$case_dir" stdout
+  sandbox_leaf "$case_dir" stdout new
   case_out=$sandbox_path
-  sandbox_leaf "$case_dir" stderr
+  sandbox_leaf "$case_dir" stderr new
   case_err=$sandbox_path
 
   status=0
