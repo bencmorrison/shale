@@ -1176,6 +1176,42 @@ test_build_an_unreadable_layer_file_stops_the_build() {
   assert_missing "$HOME/.dotfiles/current.new"
 }
 
+# The directory that cannot be listed is the silent sibling of the file that
+# cannot be read: nullglob cannot tell it from an empty one, so its whole
+# subtree leaves the build with exit 0 and no message, and the reaped
+# current.old takes the last copy of it with it.  Both spellings, because -r
+# and -x fail in different places and only -r's is silent.
+test_build_an_unreadable_layer_directory_stops_the_build() {
+  local mode dir
+  skip_if_root
+  for mode in 0333 0666; do
+    conf 'base personal/base'
+    mklayer personal/base .zshrc
+    mklayer personal/base .config/nvim/init.lua
+    sandbox_mkdir "$HOME/.dotfiles/personal/base/.config/nvim"
+    dir=$sandbox_dir
+    chmod "$mode" "$dir" || fail "could not set mode $mode"
+    run_shale build
+    chmod 0755 "$dir" || fail 'could not restore the mode'
+    assert_status 1 "$shale_status" "mode $mode exit status"
+    assert_contains "$shale_err" \
+      "shale: cannot read $HOME/.dotfiles/personal/base/.config/nvim: permission denied" \
+      "mode $mode stderr"
+    assert_missing "$HOME/.dotfiles/current" "mode $mode"
+    assert_missing "$HOME/.dotfiles/current.new" "mode $mode"
+  done
+  # And at the layer root, where the whole layer would vanish.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  dir=$sandbox_dir
+  chmod 0333 "$dir" || fail 'could not remove the read bit'
+  run_shale build
+  chmod 0755 "$dir" || fail 'could not restore the mode'
+  assert_status 1 "$shale_status" 'layer root exit status'
+  assert_contains "$shale_err" \
+    "shale: cannot read $HOME/.dotfiles/personal/base: permission denied" 'layer root stderr'
+  assert_missing "$HOME/.dotfiles/current" 'layer root'
+}
+
 # A build that stops must leave the last good tree exactly as it was, not a
 # half-composed one.
 test_build_a_conflict_leaves_the_previous_tree_intact() {
@@ -1251,7 +1287,7 @@ test_build_warns_when_the_built_tree_was_edited() {
   run_shale build
   assert_status 0 "$shale_status"
   assert_contains "$shale_err" \
-    "shale: $HOME/.dotfiles/current/.zshrc is newer than $HOME/.dotfiles/local/.zshrc" \
+    "shale: $HOME/.dotfiles/current/.zshrc was newer than $HOME/.dotfiles/local/.zshrc" \
     'stderr'
   assert_contains "$shale_err" 'shale:   you edited the built tree; the layer wins' 'stderr'
   assert_contains "$shale_err" \
@@ -1261,6 +1297,30 @@ test_build_warns_when_the_built_tree_was_edited() {
   assert_eq 'local/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the rebuilt file'
   assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
   assert_missing "$HOME/.dotfiles/current.old/junk"
+}
+
+# The warning names current.old, which only the swap creates.  Reported during
+# the walk it would promise a path that an aborted build never makes - or worse,
+# point at a stale current.old holding something else entirely.
+test_build_says_nothing_about_divergence_when_the_build_aborts() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .vimrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  printf 'HAND EDITED\n' >"$sandbox_path" || fail 'could not edit the built tree'
+  mklayer personal/base .config/git/config
+  mklayer local .config/git 'LOCAL FILE'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: conflict at .config/git' 'stderr'
+  assert_not_contains "$shale_err" 'your version is kept at' 'stderr'
+  assert_missing "$HOME/.dotfiles/current.old"
+  assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the untouched tree'
 }
 
 # No .shale-built sentinel, so these two stateless guards are all that stands

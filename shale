@@ -295,15 +295,33 @@ cleanup() {
   esac
 }
 
-# Installed here rather than beside the dispatch so that every path out of the
-# script is covered.  A bash INT trap that does not itself exit returns control
-# to the line after the interrupted command, so without the kill a Ctrl-C
-# mid-compose would delete the scratch tree and then carry on to mv a path that
-# no longer exists, reporting success.
-trap cleanup EXIT
-trap 'cleanup; trap - INT; kill -INT $$' INT
-trap 'cleanup; exit 143' TERM
-trap 'cleanup; exit 129' HUP
+# A bash INT trap that does not itself exit returns control to the line after
+# the interrupted command, so without the kill a Ctrl-C mid-compose would delete
+# the scratch tree and then carry on to mv a path that no longer exists,
+# reporting success.  HUP is here because an ssh drop mid-bootstrap is the
+# realistic case.
+arm_traps() {
+  trap cleanup EXIT
+  trap 'cleanup; trap - INT; kill -INT $$' INT
+  trap 'cleanup; exit 143' TERM
+  trap 'cleanup; exit 129' HUP
+}
+
+# Recorded and re-raised afterwards rather than ignored, so a Ctrl-C is still
+# obeyed and still reports the status it should.  Bash runs a handler at the
+# next command boundary, which for the swap means *after* a rename it did not
+# stop: with the handlers above still armed, a signal arriving during
+# 'mv $CUR $OLD' runs cleanup once current is already at current.old, deleting
+# the composed tree that was about to replace it and leaving no current at all.
+defer_signals() {
+  DEFERRED=
+  trap 'DEFERRED=INT' INT
+  trap 'DEFERRED=TERM' TERM
+  trap 'DEFERRED=HUP' HUP
+}
+
+DEFERRED=
+arm_traps
 
 # The layer compose_dir is walking, for the messages it raises.  Threading four
 # more arguments through a recursion to reach them buys nothing.
@@ -370,11 +388,12 @@ conflict() {
 # layer, which is this design's one silent data-loss path: ~/.zshrc is a link
 # into current/ and an editor writes straight through it.  cp -p leaves a
 # legitimate layer update newer than the built copy, so a pull does not trip
-# this.
+# this.  Recorded, not printed: the message names current.old, which the swap
+# has not created yet and an aborted build never will.
 diverged() {
   local srel=$1 path=$2 i
   # Silent for every layer but the last one providing this path, so one edited
-  # file is one warning and it names the layer whose copy actually lands.
+  # file is one record and it names the layer whose copy actually lands.
   i=$((SRC_INDEX + 1))
   while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
     if [ -e "$DOTFILES/${LAYER_PATHS[$i]}/$srel" ] ||
@@ -383,18 +402,25 @@ diverged() {
     fi
     i=$((i + 1))
   done
-  DIVERGED=$((DIVERGED + 1))
-  warn "$CUR/$srel is newer than $path" \
-    'you edited the built tree; the layer wins' \
-    "your version is kept at $OLD/$srel"
+  DIVERGED_PATHS+=("$srel")
+  DIVERGED_LAYERS+=("$path")
 }
 
 # Copies one layer directory over the composed tree, entry by entry, last write
 # winning per path.  No bulk cp: it would name neither layer in a collision,
 # and it cannot promise .git is skipped below the root.
 compose_dir() {
-  local src=$1 dst=$2 rel=$3 e base srel dpath
-  for e in "$src${rel:+/$rel}"/*; do
+  local src=$1 dst=$2 rel=$3 e base srel dpath here
+  here=$src${rel:+/$rel}
+  # nullglob makes a directory that cannot be listed indistinguishable from an
+  # empty one, so without this its whole subtree is dropped from the build and
+  # the build exits 0.  -x as well as -r: without it the entries are named but
+  # nothing can be learnt about them, and every test below silently takes its
+  # false branch.
+  if [ ! -r "$here" ] || [ ! -x "$here" ]; then
+    die "cannot read $here: permission denied"
+  fi
+  for e in "$here"/*; do
     base=${e##*/}
     # At every depth, not just the layer root: a layer is a working repo.
     [ "$base" = .git ] && continue
@@ -548,7 +574,8 @@ cmd_build() {
   mkdir "$NEW" || die "could not create $NEW"
   SCRATCH=$NEW
 
-  DIVERGED=0
+  DIVERGED_PATHS=()
+  DIVERGED_LAYERS=()
   CONFLICT_PATHS=()
   CONFLICT_MINE=()
   CONFLICT_OTHER=()
@@ -602,22 +629,71 @@ cmd_build() {
     >"$NEW/.stow-local-ignore" ||
     die "could not write $NEW/.stow-local-ignore"
 
-  # Every step checked: mv a b where b is an existing directory moves a *into*
-  # b, so an unchecked failed rm -rf yields a stale current.old/current and a
-  # build that reports success.  Two renames also shrink the window in which
-  # every $HOME symlink dangles to the interval between them, and a crash
-  # between them leaves current.old recoverable.
+  # current.old must be gone, not merely attempted: mv a b where b is an
+  # existing directory moves a *into* b, so a failed rm -rf that went unnoticed
+  # would yield a stale current.old/current and a build that reported success.
   rm -rf "$OLD" || die "could not remove $OLD"
   { [ ! -e "$OLD" ] && [ ! -L "$OLD" ]; } || die "$OLD still exists"
+  # Two renames rather than a delete and a copy, so the window in which no name
+  # holds the tree $HOME points at is the interval between them rather than the
+  # duration of a recursive delete, and a crash inside it leaves current.old
+  # recoverable.  Nothing may run a handler inside that interval.
+  defer_signals
+  # Both renames are judged by the filesystem rather than by mv's exit status,
+  # and each is retried once.  Deferring signals stops a handler running inside
+  # the swap but not the signal itself, which goes to the whole process group -
+  # that is what Ctrl-C does - and so kills mv as well: either before the rename,
+  # which the retry covers, or in the instant between the rename taking effect
+  # and mv returning, where the status reports a failure about a move that
+  # happened and the state test is the only thing that can tell.  A durable
+  # failure - a full disk, a wrong mode - fails the retry exactly as it failed
+  # the first attempt.
   if [ -e "$CUR" ]; then
-    mv "$CUR" "$OLD" || die "could not move $CUR aside"
+    mv "$CUR" "$OLD"
+    [ ! -e "$CUR" ] || mv "$CUR" "$OLD"
+    if [ -e "$CUR" ] || [ ! -d "$OLD" ]; then
+      die "could not move $CUR aside"
+    fi
   fi
-  mv "$NEW" "$CUR" || die "could not move $NEW into place; recover with: mv $OLD $CUR"
+  mv "$NEW" "$CUR"
+  [ -d "$CUR" ] || mv "$NEW" "$CUR"
+  if [ ! -d "$CUR" ]; then
+    # Nothing is at $CUR and every link in $HOME points at it, so the previous
+    # tree goes back before anything else happens.  The composed tree is kept
+    # rather than cleaned up: it is the only copy of the build.
+    SCRATCH=
+    mv "$OLD" "$CUR"
+    if [ -d "$CUR" ]; then
+      die "could not move $NEW into place" \
+        "$CUR is the previous tree again, and $NEW is the one that was not installed"
+    fi
+    die "could not move $NEW into place" \
+      "nothing is at $CUR, so every link in your home directory dangles" \
+      "put the previous tree back with: mv $OLD $CUR"
+  fi
   SCRATCH=
+  arm_traps
+  if [ -n "$DEFERRED" ]; then
+    warn "interrupted, but $CUR had already been rebuilt" \
+      'the layers are composed and in place; nothing was left half-swapped'
+    kill "-$DEFERRED" $$
+  fi
+
   # Edits made to the built tree are the only copy of themselves, so a build
-  # that found any keeps the tree it displaced.
-  if [ "$DIVERGED" -eq 0 ]; then
+  # that found any keeps the tree it displaced.  Reported here rather than
+  # during the walk: until the swap has happened there is no current.old for
+  # the message to point at, and a build that aborts never makes one.
+  n=${#DIVERGED_PATHS[@]}
+  if [ "$n" -eq 0 ]; then
     rm -rf "$OLD" || warn "could not remove $OLD"
+  else
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      warn "$CUR/${DIVERGED_PATHS[$i]} was newer than ${DIVERGED_LAYERS[$i]}" \
+        'you edited the built tree; the layer wins' \
+        "your version is kept at $OLD/${DIVERGED_PATHS[$i]}"
+      i=$((i + 1))
+    done
   fi
 }
 
