@@ -58,10 +58,11 @@ jobs:
   # up by grep patterns over the source and by review.  This job is what turns
   # that into evidence, or shows it was wrong.
   #
-  # Deliberately NOT added to the required checks on main: its job is to tell us
-  # whether the claims hold, not to block work while we find out.  It is left
-  # able to fail visibly rather than marked continue-on-error, because a red
-  # check nobody can miss is the entire point.
+  # It passed on first contact - bash 3.2.57 on arm64 Darwin, 73 cases, no
+  # failures - so it is now a required check on main alongside the Linux job.
+  # The floor is therefore enforced by execution rather than by the construct
+  # greps alone.  Not marked continue-on-error: a red check nobody can miss is
+  # the entire point of having it.
   test-macos:
     runs-on: macos-latest
     steps:
