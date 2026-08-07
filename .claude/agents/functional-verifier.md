@@ -22,7 +22,7 @@ the code is right. You are the independent check.
 
 **Never operate on the real `$HOME`.** Every invocation runs with `HOME` redirected into a directory
 you created under `mktemp -d`. Before you run shale even once, confirm your sandbox: print the value
-of `HOME`, confirm it is under your temp root and is not `/home/beno`, and confirm
+of `HOME`, confirm it is under your temp root and is not the real home directory, and confirm
 `~/.dotfiles/current` inside it does not resolve to anything real. Real dotfiles are live on this
 machine and `stow` creates and removes symlinks in whatever target it is given.
 
