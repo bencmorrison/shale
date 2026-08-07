@@ -52,3 +52,56 @@ jobs:
             echo "::error::the suite skipped cases; a prerequisite is missing from the runner"
             exit 1
           }
+
+  # macOS is the reason shale is written to bash 3.2 and POSIX utility flags,
+  # and until now nothing had executed a line of it there - the floor was held
+  # up by grep patterns over the source and by review.  This job is what turns
+  # that into evidence, or shows it was wrong.
+  #
+  # Deliberately NOT added to the required checks on main: its job is to tell us
+  # whether the claims hold, not to block work while we find out.  It is left
+  # able to fail visibly rather than marked continue-on-error, because a red
+  # check nobody can miss is the entire point.
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # chkstow ships with stow.
+      - name: Install stow
+        run: brew install stow
+
+      - name: Install pinned shellcheck
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64 | aarch64) arch=aarch64 ;;
+            *) arch=x86_64 ;;
+          esac
+          url=https://github.com/koalaman/shellcheck/releases/download
+          curl -fsSL -o /tmp/shellcheck.tar.gz \
+            "$url/$SHELLCHECK_VERSION/shellcheck-$SHELLCHECK_VERSION.darwin.$arch.tar.gz"
+          tar -xzf /tmp/shellcheck.tar.gz -C /tmp
+          sudo install -m 0755 "/tmp/shellcheck-$SHELLCHECK_VERSION/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      # Recorded in the log so a failure can be read against the actual version
+      # rather than an assumption about what the image ships.
+      - name: Report the interpreter and userland
+        run: |
+          /bin/bash --version | head -1
+          command -v stow chkstow git
+          cp --version 2>/dev/null | head -1 || echo "cp: BSD (no --version)"
+
+      # /bin/bash explicitly, not the shebang: brew may put a newer bash earlier
+      # on PATH, which would quietly test the wrong thing.
+      - name: Run the suite under system bash
+        run: |
+          set -euo pipefail
+          /bin/bash tests/run | tee result.txt
+          grep -q ', 0 skipped' result.txt || {
+            echo "::error::the suite skipped cases; a prerequisite is missing from the runner"
+            exit 1
+          }
