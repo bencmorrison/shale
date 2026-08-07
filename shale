@@ -16,14 +16,22 @@ PROG=shale
 DOTFILES=${HOME-}/.dotfiles
 CONF=$DOTFILES/shale.conf
 
-# Diagnostics: first line prefixed 'shale: ', continuation lines 'shale:   '.
-emit() {
+# First line prefixed 'shale: ', continuation lines 'shale:   '.  On stdout,
+# which is where a command's own result belongs: doctor's report and which's
+# answer are what those commands are for, and both are routinely redirected.
+report() {
   local line prefix
   prefix="$PROG: "
   for line in "$@"; do
-    printf '%s%s\n' "$prefix" "$line" >&2
+    printf '%s%s\n' "$prefix" "$line"
     prefix="$PROG:   "
   done
+}
+
+# The same lines on stderr, for everything that is not a result: diagnostics,
+# usage errors, and the notes a command emits alongside its answer.
+emit() {
+  report "$@" >&2
 }
 
 warn() {
@@ -249,6 +257,75 @@ EOF
   return 0
 }
 
+# The url configured for clone root $1, in CLONE_URL; non-zero when the config
+# gave none.  A url belongs to a clone root rather than to a layer, so several
+# layers can share one.
+clone_url() {
+  local root=$1 i
+  CLONE_URL=
+  i=0
+  while [ "$i" -lt "${#CLONE_ROOTS[@]}" ]; do
+    if [ "${CLONE_ROOTS[$i]}" = "$root" ]; then
+      CLONE_URL=${CLONE_URLS[$i]}
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# ------------------------------------------------------------------- the doctor
+
+# A finding is a defect in the setup, and the count of them is what decides
+# doctor's exit status.  Warnings and notes go through note and never count.
+# Both are the report rather than a diagnostic, so both are on stdout.
+finding() {
+  FINDINGS=$((FINDINGS + 1))
+  report "$@"
+}
+
+note() {
+  report "$@"
+}
+
+# The running script's own path relative to $HOME, in SELF_REL.  Non-zero when
+# the script is not under $HOME, which is the ordinary case for an install on
+# PATH.  shale never learns or hard-codes where it lives: this is derived at
+# runtime from the path it was invoked by.
+#
+# The leaf is left unresolved because a symlink there is still a path a layer
+# can shadow.  The directory part is resolved, and has the opposite exposure:
+# once ~/.local/bin is itself a link into current, pwd -P answers with the path
+# inside current, and the check then reports clean on a setup that does shadow
+# the script.  Resolving neither would fail on any '..' or symlinked parent,
+# which is the commoner case.
+self_relative_path() {
+  local src base dir home
+  SELF_REL=
+  src=${BASH_SOURCE[0]-}
+  [ -n "$src" ] || return 1
+  [ -n "${HOME-}" ] || return 1
+  base=${src##*/}
+  dir=${src%/*}
+  # No '/' in the invocation at all: bash found it in the current directory.
+  [ "$dir" != "$src" ] || dir=.
+  dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  home=$(cd "$HOME" 2>/dev/null && pwd -P) || return 1
+  { [ -n "$dir" ] && [ -n "$home" ]; } || return 1
+  if [ "$dir" = "$home" ]; then
+    SELF_REL=$base
+    return 0
+  fi
+  # The '/' in the pattern is what stops a sibling like "$HOME-elsewhere" from
+  # matching.  The one appended to dir would matter only for dir = home, which
+  # the branch above has already returned from.
+  case "$dir/" in
+    "$home"/*) SELF_REL=${dir#"$home"/}/$base ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
 # ----------------------------------------------------------------- the commands
 
 cmd_build() {
@@ -260,8 +337,127 @@ cmd_apply() {
   not_implemented apply
 }
 
+# Ordered cheapest and most fundamental first.  Nothing here exits early or
+# short-circuits: every check runs whatever the ones before it found, and only
+# the finding count decides the exit status.
 cmd_doctor() {
-  not_implemented doctor
+  local tool i name path root dir entry leaf known
+
+  FINDINGS=0
+
+  for tool in git stow; do
+    command -v "$tool" >/dev/null 2>&1 ||
+      finding "$tool is not installed" \
+        "install it with your system package manager: shale installs nothing"
+  done
+  command -v chkstow >/dev/null 2>&1 ||
+    note "chkstow is not installed" \
+      "it comes with GNU stow, and without it shale cannot audit ${HOME-} for broken links"
+
+  if [ ! -d "$DOTFILES" ]; then
+    if [ -e "$DOTFILES" ] || [ -L "$DOTFILES" ]; then
+      finding "$DOTFILES exists but is not a directory" \
+        "shale keeps your layers, your config and its build output there"
+    else
+      finding "no dotfiles directory at $DOTFILES" \
+        "create it with: mkdir -p $DOTFILES"
+    fi
+  fi
+
+  # Bare, where every other command calls it as 'parse_config || exit 1': doctor
+  # must still report everything below when the config is broken or missing.
+  # The '2>&1' is on the call rather than in parse_config, which keeps writing to
+  # stderr for build, apply and which: here each of its errors is counted as a
+  # finding, so each has to appear in the report the count describes.
+  parse_config 2>&1
+  FINDINGS=$((FINDINGS + CONFIG_ERRORS))
+
+  i=0
+  while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
+    name=${LAYER_NAMES[$i]}
+    path=${LAYER_PATHS[$i]}
+    root=${path%%/*}
+    dir=$DOTFILES/$path
+    if [ -d "$dir" ]; then
+      :
+    elif [ -e "$dir" ] || [ -L "$dir" ]; then
+      finding "layer '$name': $dir exists but is not a directory"
+    elif [ -d "$DOTFILES/$root" ]; then
+      finding "layer '$name' has no directory at $dir, but its clone at $DOTFILES/$root exists" \
+        "check the path on line ${LAYER_LINES[$i]}"
+    elif clone_url "$root"; then
+      # A url means shale can obtain this one, so it is reported without
+      # counting: it is a state shale fixes, not a defect in the setup.
+      note "layer '$name' has no directory at $dir yet" \
+        "its clone root '$root' has a url: $CLONE_URL"
+    else
+      finding "layer '$name' has no directory at $dir and no url for '$root'" \
+        "add a url on that line, or create the directory"
+    fi
+    i=$((i + 1))
+  done
+
+  # Directories only, and nothing whose name begins with '.': a '.git' or a
+  # '.stowrc' beside the config is not a stray layer.
+  if [ -d "$DOTFILES" ]; then
+    for entry in "$DOTFILES"/*; do
+      # Also the arm the unmatched glob lands in.
+      [ -d "$entry" ] || continue
+      leaf=${entry##*/}
+      case "$leaf" in
+        current | current.new | current.old | "${CONF##*/}") continue ;;
+      esac
+      known=0
+      i=0
+      while [ "$i" -lt "${#LAYER_PATHS[@]}" ]; do
+        if [ "${LAYER_PATHS[$i]%%/*}" = "$leaf" ]; then
+          known=1
+          break
+        fi
+        i=$((i + 1))
+      done
+      [ "$known" -eq 0 ] || continue
+      note "$entry is not a configured layer" \
+        "it may be a leftover stow package, a stray clone, or a layer you removed from the config"
+    done
+  fi
+
+  # Never ship shale itself in a layer, enforced from the path the running
+  # script was invoked by so that shale still knows no install location.
+  if self_relative_path; then
+    i=0
+    while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
+      dir=$DOTFILES/${LAYER_PATHS[$i]}/$SELF_REL
+      if [ -e "$dir" ] || [ -L "$dir" ]; then
+        finding "layer '${LAYER_NAMES[$i]}' provides the running script itself at $dir" \
+          "applying it would replace the script with a link into $DOTFILES/current" \
+          "remove it from that layer: shale installs nothing, including itself"
+      fi
+      i=$((i + 1))
+    done
+  fi
+
+  # man stow, RESOURCE FILES: an option that may be given more than once -
+  # --ignore is the one that matters - is appended to the command line rather
+  # than overridden by it, so nothing shale passes can defend against this.
+  for entry in "${HOME-}/.stowrc" "$DOTFILES/.stowrc"; do
+    if [ -e "$entry" ] || [ -L "$entry" ]; then
+      note "a stow resource file exists at $entry" \
+        "stow adds its --ignore patterns to the ones shale passes rather than replacing them" \
+        "so it can silently drop files from an apply"
+    fi
+  done
+
+  if [ "$FINDINGS" -eq 0 ]; then
+    report 'no problems found'
+    exit 0
+  fi
+  if [ "$FINDINGS" -eq 1 ]; then
+    report '1 problem found'
+  else
+    report "$FINDINGS problems found"
+  fi
+  exit 1
 }
 
 cmd_which() {
