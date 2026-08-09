@@ -665,16 +665,6 @@ test_usage_command_surface_is_closed() {
   done
 }
 
-# build parses the config before anything else, so reaching the stub message is
-# itself the claim that a good config parsed clean.
-test_usage_build_is_stubbed() {
-  conf 'base personal/base' 'local local'
-  run_shale build
-  assert_status 1 "$shale_status"
-  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
-  assert_empty "$shale_out" 'stdout'
-}
-
 test_usage_apply_is_stubbed() {
   run_shale apply
   assert_status 1 "$shale_status"
@@ -691,11 +681,11 @@ test_usage_which_is_stubbed() {
 
 # --------------------------------------------------------------- config cases
 #
-# parse_config has no output of its own.  build runs it before reporting itself
-# unimplemented, so a clean parse is observable as the stub message and a broken
-# one as a diagnostic naming the file and line in its place.  The urls here are
-# opaque strings on purpose: shale passes a url to git verbatim and never looks
-# inside it, and no case in this suite may name a host.
+# parse_config has no output of its own, so these cases observe it through
+# build: a clean parse composes and exits 0, and a broken one produces a
+# diagnostic naming the file and line, with no current/ to show for it.  The
+# urls here are opaque strings on purpose: shale passes a url to git verbatim
+# and never looks inside it, and no case in this suite may name a host.
 
 test_config_comments_blanks_and_whitespace_are_accepted() {
   local tab
@@ -709,28 +699,35 @@ test_config_comments_blanks_and_whitespace_are_accepted() {
     '' \
     'local  local' \
     '#'
+  mklayer personal/base .zshrc
+  mklayer personal/wsl .zshrc
+  mklayer local .zshrc
   run_shale build
-  assert_status 1 "$shale_status"
-  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
-  assert_not_contains "$shale_err" 'shale.conf:' 'stderr'
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
 }
 
 test_config_two_and_three_column_lines_are_accepted() {
   conf 'base personal/base url-one' 'wsl personal/wsl' 'local local'
+  mklayer personal/base .zshrc
+  mklayer personal/wsl .zshrc
+  mklayer local .zshrc
   run_shale build
-  assert_status 1 "$shale_status"
-  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
-  assert_not_contains "$shale_err" 'shale.conf:' 'stderr'
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
 }
 
 # Two components is the shape every other case uses, and it is the one length at
 # which trimming the first component and trimming all but the last agree.
 test_config_a_deep_layer_path_is_accepted() {
   conf 'base personal/base' 'deep personal/wsl/nested/deeper'
+  mklayer personal/base .zshrc
+  mklayer personal/wsl/nested/deeper .zshrc
   run_shale build
-  assert_status 1 "$shale_status"
-  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
-  assert_not_contains "$shale_err" 'shale.conf:' 'stderr'
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_eq 'personal/wsl/nested/deeper/.zshrc' \
+    "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the winner'
 }
 
 test_config_conflicting_urls_for_one_root_are_rejected() {
@@ -745,16 +742,16 @@ test_config_conflicting_urls_for_one_root_are_rejected() {
     "shale: $HOME/.dotfiles/shale.conf:4: conflicting urls for clone root 'personal'" 'stderr'
   assert_contains "$shale_err" 'shale:   line 1: url-one' 'stderr'
   assert_contains "$shale_err" 'shale:   line 4: url-two' 'stderr'
-  assert_not_contains "$shale_err" 'not implemented' 'stderr'
   assert_empty "$shale_out" 'stdout'
   assert_missing "$HOME/.dotfiles/current"
 }
 
 test_config_a_repeated_identical_url_is_accepted() {
   conf 'base personal/base url-one' 'wsl personal/wsl url-one'
+  mklayer personal/base .zshrc
+  mklayer personal/wsl .zshrc
   run_shale build
-  assert_status 1 "$shale_status"
-  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
+  assert_status 0 "$shale_status"
   assert_not_contains "$shale_err" 'conflicting' 'stderr'
 }
 
@@ -764,7 +761,7 @@ test_config_a_four_column_line_is_rejected() {
   assert_status 1 "$shale_status"
   assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:2:" 'stderr'
   assert_contains "$shale_err" 'extra fields: spare' 'stderr'
-  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
 }
 
 test_config_a_line_without_a_path_is_rejected() {
@@ -777,7 +774,7 @@ test_config_a_line_without_a_path_is_rejected() {
     assert_status 1 "$shale_status" "'$line' exit status"
     assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:1:" "'$line' stderr"
     assert_contains "$shale_err" "got only 'base'" "'$line' stderr"
-    assert_not_contains "$shale_err" 'not implemented' "'$line' stderr"
+    assert_missing "$HOME/.dotfiles/current" "'$line' build output"
   done
 }
 
@@ -796,7 +793,7 @@ test_config_invalid_paths_are_rejected() {
     run_shale build
     assert_status 1 "$shale_status" "path '$path' exit status"
     assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:1:" "path '$path' stderr"
-    assert_not_contains "$shale_err" 'not implemented' "path '$path' stderr"
+    assert_missing "$HOME/.dotfiles/current" "path '$path' build output"
   done
 }
 
@@ -810,7 +807,7 @@ test_config_invalid_names_are_rejected() {
     assert_status 1 "$shale_status" "name '$name' exit status"
     assert_contains "$shale_err" \
       "shale: $HOME/.dotfiles/shale.conf:1: invalid layer name '$name'" "name '$name' stderr"
-    assert_not_contains "$shale_err" 'not implemented' "name '$name' stderr"
+    assert_missing "$HOME/.dotfiles/current" "name '$name' build output"
   done
 }
 
@@ -822,7 +819,7 @@ test_config_duplicate_names_and_paths_are_rejected() {
     "shale: $HOME/.dotfiles/shale.conf:2: duplicate layer name 'base', first used on line 1" 'stderr'
   assert_contains "$shale_err" \
     "shale: $HOME/.dotfiles/shale.conf:3: duplicate layer path 'personal/base', first used on line 1" 'stderr'
-  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
 }
 
 # Config errors cluster, and revealing them one run at a time is infuriating.
@@ -842,7 +839,7 @@ test_config_every_error_is_reported_in_one_run() {
   assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:3: invalid layer name" 'stderr'
   assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:3: invalid layer path" 'stderr'
   assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:5: conflicting urls" 'stderr'
-  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
 }
 
 test_config_a_missing_config_is_shales_message() {
@@ -850,7 +847,7 @@ test_config_a_missing_config_is_shales_message() {
   assert_status 1 "$shale_status"
   assert_contains "$shale_err" "shale: no config file at $HOME/.dotfiles/shale.conf" 'stderr'
   assert_not_contains "$shale_err" 'No such file' 'stderr'
-  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
   assert_empty "$shale_out" 'stdout'
 }
 
@@ -864,7 +861,7 @@ test_config_a_config_that_is_a_directory_is_shales_message() {
     "shale: $HOME/.dotfiles/shale.conf is not a regular file" 'stderr'
   assert_not_contains "$shale_err" 'read error' 'stderr'
   assert_not_contains "$shale_err" 'unbound variable' 'stderr'
-  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
   assert_empty "$shale_out" 'stdout'
 }
 
@@ -885,7 +882,7 @@ test_config_a_config_with_no_records_reports_no_layers() {
   assert_status 1 "$shale_status"
   assert_contains "$shale_err" \
     "shale: no layers configured in $HOME/.dotfiles/shale.conf" 'stderr'
-  assert_not_contains "$shale_err" 'not implemented' 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
 }
 
 # The last line is the invalid one, so its diagnostic is proof it was read at
@@ -905,10 +902,698 @@ test_config_reached_through_a_symlink_parses() {
   sandbox_mkdir "$HOME/.dotfiles"
   ln -s "$HOME/.dotfiles/elsewhere/shale.conf" "$HOME/.dotfiles/shale.conf" ||
     fail 'could not link the config'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+}
+
+# ---------------------------------------------------------------- build cases
+#
+# build is the first command that writes anything, so most of these assert the
+# composed tree rather than the output.  mklayer's default content is
+# LAYER/RELPATH, which is what pins which layer won without a case having to
+# say so.
+
+test_build_precedence_follows_config_order() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq 'local/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the winner'
+  # The same two layers on disk, in the other order: neither alphabetical order
+  # nor directory order has changed, so only config order can move the winner.
+  conf 'local local' 'base personal/base'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the winner'
+}
+
+# Whole file, not a merge: the lower layer's content must be gone, not appended
+# to or interleaved with.
+test_build_a_higher_layer_wholly_replaces_the_lower() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc 'BASE ONLY'
+  mklayer local .zshrc 'LOCAL ONLY'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq 'LOCAL ONLY' "$(cat "$HOME/.dotfiles/current/.zshrc")" '.zshrc'
+  assert_not_contains "$(cat "$HOME/.dotfiles/current/.zshrc")" 'BASE' '.zshrc'
+}
+
+test_build_disjoint_files_union_into_deep_directories() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer local .config/nvim/lua/plugins/init.lua
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq 'personal/base/.config/git/config' \
+    "$(cat "$HOME/.dotfiles/current/.config/git/config")" 'the base file'
+  assert_eq 'local/.config/nvim/lua/plugins/init.lua' \
+    "$(cat "$HOME/.dotfiles/current/.config/nvim/lua/plugins/init.lua")" 'the local file'
+}
+
+# The leading dot is what dotglob buys, and the glob characters are what a
+# quoted expansion buys.  A dotfile tree that composed everything but its
+# dotfiles would still pass every other case here.
+test_build_awkward_filenames_survive() {
+  local name
+  conf 'base personal/base'
+  # shellcheck disable=SC2016  # literal file names, not expansions
+  for name in .hidden 'a name with spaces' 'star*name' 'bracket[name' 'dollar$name' 'trailing~'; do
+    mklayer personal/base "$name"
+    run_shale build
+    assert_status 0 "$shale_status" "'$name' exit status"
+    assert_eq "personal/base/$name" "$(cat "$HOME/.dotfiles/current/$name")" "'$name' content"
+  done
+}
+
+# A script in current that will not run reads like a PATH problem for an hour.
+# Both directions, because taking the mode from the wrong layer is as wrong as
+# not taking it at all.  This does not catch a dropped -p: cp applies the
+# source's permission bits to a new file anyway, and it is the timestamps -p
+# also preserves that the rebuild case below pins.
+test_build_the_exec_bit_follows_the_winning_layer() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .local/bin/up
+  mklayer local .local/bin/up
+  mklayer personal/base .local/bin/down
+  mklayer local .local/bin/down
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/local/.local/bin"
+  chmod 0755 "$sandbox_dir/up" || fail 'could not set the exec bit'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.local/bin"
+  chmod 0755 "$sandbox_dir/down" || fail 'could not set the exec bit'
+  run_shale build
+  assert_status 0 "$shale_status"
+  [ -x "$HOME/.dotfiles/current/.local/bin/up" ] ||
+    fail 'up is not executable: the winning layer had the exec bit'
+  [ ! -x "$HOME/.dotfiles/current/.local/bin/down" ] ||
+    fail 'down is executable: the winning layer did not have the exec bit'
+  [ ! -x "$HOME/.dotfiles/current/.zshrc" ] || fail '.zshrc is executable'
+}
+
+test_build_is_idempotent_and_drops_a_file_deleted_from_a_layer() {
+  local first
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .vimrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  first=$(cd "$HOME/.dotfiles/current" && find . -print | sort)
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq "$first" "$(cd "$HOME/.dotfiles/current" && find . -print | sort)" 'the tree'
+  # The -p in cp -RPp: it leaves the built copy no newer than the layer file, so
+  # a rebuild that changed nothing has nothing to say.  Without it every second
+  # build accuses you of editing the tree.
+  assert_empty "$shale_err" 'the second build stderr'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .vimrc
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/current/.vimrc"
+  assert_exists "$HOME/.dotfiles/current/.zshrc"
+}
+
+test_build_reaps_a_planted_scratch_tree_and_a_stale_old_tree() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME/.dotfiles/current.new" junk 'left behind by a killed run'
+  sandbox_write "$HOME/.dotfiles/current.old" junk 'left behind by an older build'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/current.new"
+  assert_missing "$HOME/.dotfiles/current.old"
+  assert_missing "$HOME/.dotfiles/current/junk"
+  assert_exists "$HOME/.dotfiles/current/.zshrc"
+}
+
+# The scratch name is cleared, not emptied: a link left at it must be removed
+# rather than composed through into whatever it points at.
+test_build_reaps_a_scratch_tree_that_is_a_symlink() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME/keepsafe" target 'PRECIOUS'
+  sandbox_target "$HOME/.dotfiles" current.new
+  ln -s "$HOME/keepsafe" "$sandbox_path" || fail 'could not link the scratch name'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/current.new"
+  assert_eq 'PRECIOUS' "$(cat "$HOME/keepsafe/target")" 'the link target'
+  assert_missing "$HOME/keepsafe/.zshrc"
+  assert_exists "$HOME/.dotfiles/current/.zshrc"
+}
+
+# Copied verbatim and never dereferenced: the dangling one's target does not
+# exist, so anything that followed it would fail rather than quietly copy a
+# file, and the one pointing at a directory is a leaf - recursing into it would
+# put a higher layer's files inside whatever the lower layer pointed at.
+test_build_preserves_a_symlink_verbatim() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base real/inside
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" link new
+  ln -s ../elsewhere/target "$sandbox_path" || fail 'could not create the symlink'
+  sandbox_leaf "$sandbox_dir" tolink new
+  ln -s real "$sandbox_path" || fail 'could not create the directory symlink'
+  run_shale build
+  assert_status 0 "$shale_status"
+  [ -L "$HOME/.dotfiles/current/link" ] || fail 'the composed link is not a symlink'
+  assert_eq '../elsewhere/target' "$(readlink "$HOME/.dotfiles/current/link")" 'the link target'
+  [ -L "$HOME/.dotfiles/current/tolink" ] ||
+    fail 'the link to a directory was composed as a directory'
+  assert_eq 'real' "$(readlink "$HOME/.dotfiles/current/tolink")" 'the directory link target'
+}
+
+# The case the rm -f before every cp exists for: cp writes *through* a
+# destination symlink that points at an existing file, so without it a higher
+# layer's file rewrites whatever a lower layer's link pointed at.
+test_build_a_file_over_a_symlink_does_not_write_through_it() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME/keepsafe" target 'PRECIOUS'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .netrc new
+  ln -s "$HOME/keepsafe/target" "$sandbox_path" || fail 'could not create the symlink'
+  mklayer local .netrc 'LOCAL NETRC'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq 'PRECIOUS' "$(cat "$HOME/keepsafe/target")" "the lower layer's link target"
+  assert_eq 'LOCAL NETRC' "$(cat "$HOME/.dotfiles/current/.netrc")" 'the composed file'
+  [ ! -L "$HOME/.dotfiles/current/.netrc" ] || fail 'the composed .netrc is still a symlink'
+}
+
+# Both directions in one run, which is also the claim that every collision is
+# collected rather than the first one aborting.
+test_build_file_versus_directory_aborts_naming_both_layers() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer local .config/git 'LOCAL FILE'
+  mklayer personal/base .config/nvim 'BASE FILE'
+  mklayer local .config/nvim/init.lua
   run_shale build
   assert_status 1 "$shale_status"
-  assert_contains "$shale_err" 'shale: build is not implemented yet' 'stderr'
-  assert_not_contains "$shale_err" 'shale.conf:' 'stderr'
+  assert_contains "$shale_err" 'shale: conflict at .config/git' 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'local' provides a file        $HOME/.dotfiles/local/.config/git" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'base'  provides a directory   $HOME/.dotfiles/personal/base/.config/git" 'stderr'
+  assert_contains "$shale_err" 'shale: conflict at .config/nvim' 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'local' provides a directory   $HOME/.dotfiles/local/.config/nvim" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'base'  provides a file        $HOME/.dotfiles/personal/base/.config/nvim" 'stderr'
+  assert_contains "$shale_err" \
+    'shale:   a layer cannot replace a directory with a file, or a file with a directory' 'stderr'
+  assert_contains "$shale_err" 'shale:   remove or rename one of them' 'stderr'
+  assert_contains "$shale_err" \
+    "shale: 2 conflicts; $HOME/.dotfiles/current not rebuilt" 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+# The destination is a symlink to a directory, so a -d test that does not also
+# ask -L says "directory, carry on" and the higher layer's files are written
+# through the link into whatever the lower layer pointed at.
+test_build_a_directory_over_a_symlinked_directory_is_a_conflict() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME/keepsafe" target 'PRECIOUS'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .config new
+  ln -s "$HOME/keepsafe" "$sandbox_path" || fail 'could not create the symlink'
+  mklayer local .config/git/config
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: conflict at .config' 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'local' provides a directory   $HOME/.dotfiles/local/.config" 'stderr'
+  assert_contains "$shale_err" "layer 'base'" 'stderr'
+  assert_missing "$HOME/keepsafe/git"
+  assert_eq 'PRECIOUS' "$(cat "$HOME/keepsafe/target")" "the lower layer's link target"
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# The divergence check compares against the previous build, where the same path
+# may well be a directory: without the regular-file guard its mkdir timestamp
+# is newer than any layer file and every rebuild invents a warning.
+test_build_a_directory_replaced_by_a_file_rebuilds_quietly() {
+  conf 'base personal/base'
+  mklayer personal/base .config/inside
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  mklayer personal/base .config
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.config" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_eq 'personal/base/.config' "$(cat "$HOME/.dotfiles/current/.config")" 'the composed file'
+  assert_missing "$HOME/.dotfiles/current.old"
+}
+
+# A layer file that cannot be read stops the build, rather than composing a
+# tree with a hole in it and reporting success.
+test_build_an_unreadable_layer_file_stops_the_build() {
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .netrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  chmod 0000 "$sandbox_dir/.netrc" || fail 'could not remove the read bit'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not copy $HOME/.dotfiles/personal/base/.netrc to $HOME/.dotfiles/current.new/.netrc" \
+    'stderr'
+  assert_missing "$HOME/.dotfiles/current"
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+# The directory that cannot be listed is the silent sibling of the file that
+# cannot be read: nullglob cannot tell it from an empty one, so its whole
+# subtree leaves the build with exit 0 and no message, and the reaped
+# current.old takes the last copy of it with it.  Both spellings, because -r
+# and -x fail in different places and only -r's is silent.
+test_build_an_unreadable_layer_directory_stops_the_build() {
+  local mode dir
+  skip_if_root
+  for mode in 0333 0666; do
+    conf 'base personal/base'
+    mklayer personal/base .zshrc
+    mklayer personal/base .config/nvim/init.lua
+    sandbox_mkdir "$HOME/.dotfiles/personal/base/.config/nvim"
+    dir=$sandbox_dir
+    chmod "$mode" "$dir" || fail "could not set mode $mode"
+    run_shale build
+    chmod 0755 "$dir" || fail 'could not restore the mode'
+    assert_status 1 "$shale_status" "mode $mode exit status"
+    assert_contains "$shale_err" \
+      "shale: cannot read $HOME/.dotfiles/personal/base/.config/nvim: permission denied" \
+      "mode $mode stderr"
+    assert_missing "$HOME/.dotfiles/current" "mode $mode"
+    assert_missing "$HOME/.dotfiles/current.new" "mode $mode"
+  done
+  # And at the layer root, where the whole layer would vanish.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  dir=$sandbox_dir
+  chmod 0333 "$dir" || fail 'could not remove the read bit'
+  run_shale build
+  chmod 0755 "$dir" || fail 'could not restore the mode'
+  assert_status 1 "$shale_status" 'layer root exit status'
+  assert_contains "$shale_err" \
+    "shale: cannot read $HOME/.dotfiles/personal/base: permission denied" 'layer root stderr'
+  assert_missing "$HOME/.dotfiles/current" 'layer root'
+}
+
+# A build that stops must leave the last good tree exactly as it was, not a
+# half-composed one.
+test_build_a_conflict_leaves_the_previous_tree_intact() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .vimrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  mklayer personal/base .config/git/config
+  mklayer local .config/git 'LOCAL FILE'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: 1 conflict; $HOME/.dotfiles/current not rebuilt" 'stderr'
+  assert_eq 'personal/base/.zshrc' \
+    "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the previous tree'
+  assert_missing "$HOME/.dotfiles/current/.config"
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+# The guaranteed day-one state of a local layer.  Without nullglob the glob
+# yields its own pattern and the copy of a file named '*' fails the build.
+test_build_an_empty_layer_directory_is_a_silent_no_op() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" '.zshrc'
+  assert_empty "$shale_err" 'stderr'
+  assert_missing "$HOME/.dotfiles/current/*"
+}
+
+# Skipped at every depth, because a layer is a working repo.  .gitignore is not
+# skipped: it is a file you want in your home directory, and the whole point of
+# the ignore list build writes.
+test_build_git_directories_stay_out_of_current() {
+  conf 'base personal/base'
+  mklayer personal/base .git/config 'GIT'
+  mklayer personal/base .config/nvim/.git/config 'NESTED GIT'
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .gitignore
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/current/.git"
+  assert_missing "$HOME/.dotfiles/current/.config/nvim/.git"
+  assert_exists "$HOME/.dotfiles/current/.config/nvim/init.lua"
+  assert_exists "$HOME/.dotfiles/current/.gitignore"
+}
+
+# The design's one silent data-loss path: ~/.zshrc is a link into current/, so
+# an editor writes straight through it and the next build overwrites the edit.
+# The layer file is dated into the past so the comparison cannot come down to
+# filesystem timestamp granularity.
+test_build_warns_when_the_built_tree_was_edited() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the first build stderr'
+  assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
+  # A stale tree at the name the swap moves current to: without the removal
+  # before it, mv puts current *inside* current.old and the copy kept below is
+  # one level down from where the warning says it is.
+  sandbox_write "$HOME/.dotfiles/current.old" junk 'left behind by an older build'
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  printf 'HAND EDITED\n' >"$sandbox_path" || fail 'could not edit the built tree'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/current/.zshrc was newer than $HOME/.dotfiles/local/.zshrc" \
+    'stderr'
+  assert_contains "$shale_err" 'shale:   you edited the built tree; the layer wins' 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   your version is kept at $HOME/.dotfiles/current.old/.zshrc" 'stderr'
+  # One edited file is one warning, naming the layer whose copy replaced it.
+  assert_not_contains "$shale_err" "$HOME/.dotfiles/personal/base/.zshrc" 'stderr'
+  assert_eq 'local/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the rebuilt file'
+  assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
+  assert_missing "$HOME/.dotfiles/current.old/junk"
+}
+
+# The warning names current.old, which only the swap creates.  Reported during
+# the walk it would promise a path that an aborted build never makes - or worse,
+# point at a stale current.old holding something else entirely.
+test_build_says_nothing_about_divergence_when_the_build_aborts() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .vimrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  printf 'HAND EDITED\n' >"$sandbox_path" || fail 'could not edit the built tree'
+  mklayer personal/base .config/git/config
+  mklayer local .config/git 'LOCAL FILE'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: conflict at .config/git' 'stderr'
+  assert_not_contains "$shale_err" 'your version is kept at' 'stderr'
+  assert_missing "$HOME/.dotfiles/current.old"
+  assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the untouched tree'
+}
+
+# A failing rename is otherwise unreachable from a case: $CUR, $OLD and $NEW are
+# siblings in one directory, so nothing short of that directory becoming
+# unwritable mid-build can stop one, and that breaks the build long before the
+# swap.  A stub mv on PATH is what makes the swap's failure paths executable.
+# MATCH is a glob; ARG is 1 to match the source and 2 the destination; LEAVE is
+# shell run before failing, for the partial destination a copy-fallback killed
+# part-way would leave; a non-empty ONCE makes only the first matching call fail,
+# which is the only way to tell a retry that was refused from one that was made
+# and failed again.  Sets stub_path, which the caller puts in front of PATH.
+# shellcheck disable=SC2016  # the body is written for the stub's shell, not this one
+stub_mv() {
+  local match=$1 arg=$2 leave=${3-} once=${4-} real guard
+  real=$(command -v mv) || fail 'mv is not on PATH'
+  sandbox_mkdir "$CASE_DIR/stub-bin"
+  stub_path=$sandbox_dir
+  guard=':'
+  [ -z "$once" ] || guard="[ ! -e \"$stub_path/fired\" ] || exec $real \"\$@\""
+  sandbox_write "$stub_path" mv \
+    '#!/usr/bin/env bash' \
+    "case \"\$$arg\" in" \
+    "  $match)" \
+    "    $guard" \
+    "    : >\"$stub_path/fired\"" \
+    "    ${leave:-:}" \
+    '    exit 1' \
+    '    ;;' \
+    'esac' \
+    "exec $real \"\$@\""
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+}
+
+# Three states a failed install can leave, three messages.  The first-build one
+# is the case that used to leak mv's own 'cannot stat' line and then advise a
+# recovery command naming a directory that had never existed.
+# shellcheck disable=SC2123  # PATH is prefixed on purpose and restored below
+test_build_a_failed_install_reports_the_state_it_left() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # No previous current: there is nothing to fall back on and nothing to advise.
+  stub_mv '*/current.new' 1
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not move $HOME/.dotfiles/current.new into place" 'first build stderr'
+  assert_contains "$shale_err" \
+    "shale:   this build had no previous $HOME/.dotfiles/current to fall back on" \
+    'first build stderr'
+  assert_contains "$shale_err" \
+    "shale:   the composed tree is at $HOME/.dotfiles/current.new" 'first build stderr'
+  assert_not_contains "$shale_err" 'No such file or directory' 'first build stderr'
+  assert_not_contains "$shale_err" 'put it back with' 'first build stderr'
+  # The composed tree is spared rather than eaten by the EXIT trap.
+  assert_exists "$HOME/.dotfiles/current.new/.zshrc" 'the spared scratch tree'
+}
+
+# shellcheck disable=SC2123
+test_build_a_failed_install_puts_the_previous_tree_back() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  # Only the install fails, so the restore that follows it works.
+  stub_mv '*/current.new' 1
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not move $HOME/.dotfiles/current.new into place" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   $HOME/.dotfiles/current is the previous tree again, and $HOME/.dotfiles/current.new is the one that was not installed" \
+    'stderr'
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the restored tree'
+  assert_missing "$HOME/.dotfiles/current.old"
+}
+
+# shellcheck disable=SC2123
+test_build_a_failed_install_that_cannot_be_undone_says_where_both_trees_are() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  # Every move onto current fails, so the restore fails too.
+  stub_mv '*/current' 2
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale:   the previous tree is at $HOME/.dotfiles/current.old, and $HOME/.dotfiles/current is missing or incomplete" \
+    'stderr'
+  assert_contains "$shale_err" \
+    "shale:   put it back with: rm -rf $HOME/.dotfiles/current && mv $HOME/.dotfiles/current.old $HOME/.dotfiles/current" \
+    'stderr'
+  assert_exists "$HOME/.dotfiles/current.old/.zshrc" 'the previous tree'
+  assert_exists "$HOME/.dotfiles/current.new/.zshrc" 'the composed tree'
+}
+
+# Each rename is retried once, and each retry must refuse a destination that is
+# not clear: an attempt that failed having left something behind would take the
+# retry *into* it, nesting a whole tree one level down and passing the state
+# test that follows.  The stub leaves a partial destination and fails, which is
+# what a copy-fallback killed part-way looks like.
+# shellcheck disable=SC2123
+test_build_a_retried_rename_refuses_a_destination_that_is_not_clear() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  # shellcheck disable=SC2016  # the body runs in the stub, not here
+  stub_mv '*/current.old' 2 'mkdir -p "$2/half"' once
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not move $HOME/.dotfiles/current aside" 'stderr'
+  # Not nested one level down inside the partial current.old.
+  assert_missing "$HOME/.dotfiles/current.old/current"
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the untouched tree'
+}
+
+# The same claim for the second rename, where a half-installed directory at
+# current satisfies -d and would otherwise report success.
+# shellcheck disable=SC2123
+test_build_a_half_installed_tree_is_not_reported_as_success() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  # shellcheck disable=SC2016  # the body runs in the stub, not here
+  stub_mv '*/current.new' 1 'mkdir -p "$2/half"' once
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not move $HOME/.dotfiles/current.new into place" 'stderr'
+  assert_missing "$HOME/.dotfiles/current/current.new"
+  assert_exists "$HOME/.dotfiles/current.new/.zshrc" 'the composed tree'
+}
+
+# No .shale-built sentinel, so these two stateless guards are all that stands
+# between a build and writing through whatever someone left at current.  Three
+# cases rather than one loop: nothing in the harness can prove a path with a
+# symlink already at it, so a second pass could not clear the first one's rig.
+test_build_refuses_a_current_that_is_a_regular_file() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME/.dotfiles" current 'not a directory'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/current exists but is not a directory" 'stderr'
+  assert_contains "$shale_err" 'shale:   remove it, or move it aside' 'stderr'
+  assert_eq 'not a directory' "$(cat "$HOME/.dotfiles/current")" 'the planted file'
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+test_build_refuses_a_current_that_is_a_symlink() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/elsewhere"
+  sandbox_target "$HOME/.dotfiles" current
+  ln -s "$HOME/.dotfiles/elsewhere" "$sandbox_path" || fail 'could not link current'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: $HOME/.dotfiles/current is a symlink" 'stderr'
+  assert_contains "$shale_err" 'shale:   remove it, or move it aside' 'stderr'
+  # Nothing was written through the link, which -e alone would not show.
+  assert_missing "$HOME/.dotfiles/elsewhere/.zshrc"
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+# The variant no -e test can see, and the one a removed clone leaves behind.
+test_build_refuses_a_current_that_is_a_dangling_symlink() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_target "$HOME/.dotfiles" current
+  ln -s "$HOME/.dotfiles/gone" "$sandbox_path" || fail 'could not link current'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: $HOME/.dotfiles/current is a symlink" 'stderr'
+  assert_missing "$HOME/.dotfiles/gone"
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+test_build_refuses_a_layer_shipping_a_stow_local_ignore() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .stow-local-ignore '^/secret'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: layer 'local' provides $HOME/.dotfiles/local/.stow-local-ignore" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   shale writes $HOME/.dotfiles/current/.stow-local-ignore itself" 'stderr'
+  assert_contains "$shale_err" "shale: $HOME/.dotfiles/current not rebuilt" 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+# Exactly these three, because a package-local list replaces stow's built-in one
+# wholesale: without the file a layer's .gitignore silently never reaches $HOME,
+# and with the wrong contents a layer-root README does.
+test_build_writes_the_stow_local_ignore_list() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq '^/README.*
+^/LICENSE.*
+^/COPYING' "$(cat "$HOME/.dotfiles/current/.stow-local-ignore")" 'the ignore list'
+}
+
+test_build_reports_one_line_per_layer_in_config_order() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .vimrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq "shale: composed layer 'base' from $HOME/.dotfiles/personal/base
+shale: composed layer 'local' from $HOME/.dotfiles/local" "$shale_out" 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# Every layer is verified before anything is written, and all of them in one
+# run.  Without this a missing layer directory composes nothing and reports
+# success, which is the silent half of a mistyped path.
+test_build_a_missing_layer_directory_stops_the_build() {
+  conf 'base personal/base' 'work work' 'wsl personal/wsl2' 'web web url-one'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: layer 'work' has no directory at $HOME/.dotfiles/work and no url for 'work'" 'stderr'
+  assert_contains "$shale_err" 'shale:   add a url on that line, or create the directory' 'stderr'
+  assert_contains "$shale_err" \
+    "shale: layer 'wsl' has no directory at $HOME/.dotfiles/personal/wsl2, but its clone at $HOME/.dotfiles/personal exists" \
+    'stderr'
+  assert_contains "$shale_err" 'shale:   check the path on line 3' 'stderr'
+  assert_contains "$shale_err" \
+    "shale: layer 'web' has no directory at $HOME/.dotfiles/web" 'stderr'
+  assert_contains "$shale_err" "shale:   its clone root 'web' has a url: url-one" 'stderr'
+  assert_empty "$shale_out" 'stdout'
+  assert_missing "$HOME/.dotfiles/current"
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+test_build_a_layer_path_that_is_not_a_directory_stops_the_build() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME/.dotfiles" local 'not a directory'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: layer 'local': $HOME/.dotfiles/local exists but is not a directory" 'stderr'
+  assert_empty "$shale_out" 'stdout'
+  assert_missing "$HOME/.dotfiles/current"
 }
 
 # --------------------------------------------------------------- doctor cases
@@ -1559,7 +2244,7 @@ test_meta_shellcheck_is_clean() {
 test_meta_shellcheck_dead_functions_are_expected() {
   local allowed out line rest lineno src name
   require_shellcheck
-  allowed=' warn '
+  allowed=' '
   out=$(shellcheck --shell=bash --format=gcc "$SHALE" 2>&1)
   while IFS= read -r line; do
     case "$line" in
