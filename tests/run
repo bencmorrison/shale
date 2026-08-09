@@ -1323,6 +1323,160 @@ test_build_says_nothing_about_divergence_when_the_build_aborts() {
   assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the untouched tree'
 }
 
+# A failing rename is otherwise unreachable from a case: $CUR, $OLD and $NEW are
+# siblings in one directory, so nothing short of that directory becoming
+# unwritable mid-build can stop one, and that breaks the build long before the
+# swap.  A stub mv on PATH is what makes the swap's failure paths executable.
+# MATCH is a glob; ARG is 1 to match the source and 2 the destination; LEAVE is
+# shell run before failing, for the partial destination a copy-fallback killed
+# part-way would leave; a non-empty ONCE makes only the first matching call fail,
+# which is the only way to tell a retry that was refused from one that was made
+# and failed again.  Sets stub_path, which the caller puts in front of PATH.
+# shellcheck disable=SC2016  # the body is written for the stub's shell, not this one
+stub_mv() {
+  local match=$1 arg=$2 leave=${3-} once=${4-} real guard
+  real=$(command -v mv) || fail 'mv is not on PATH'
+  sandbox_mkdir "$CASE_DIR/stub-bin"
+  stub_path=$sandbox_dir
+  guard=':'
+  [ -z "$once" ] || guard="[ ! -e \"$stub_path/fired\" ] || exec $real \"\$@\""
+  sandbox_write "$stub_path" mv \
+    '#!/usr/bin/env bash' \
+    "case \"\$$arg\" in" \
+    "  $match)" \
+    "    $guard" \
+    "    : >\"$stub_path/fired\"" \
+    "    ${leave:-:}" \
+    '    exit 1' \
+    '    ;;' \
+    'esac' \
+    "exec $real \"\$@\""
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+}
+
+# Three states a failed install can leave, three messages.  The first-build one
+# is the case that used to leak mv's own 'cannot stat' line and then advise a
+# recovery command naming a directory that had never existed.
+# shellcheck disable=SC2123  # PATH is prefixed on purpose and restored below
+test_build_a_failed_install_reports_the_state_it_left() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # No previous current: there is nothing to fall back on and nothing to advise.
+  stub_mv '*/current.new' 1
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not move $HOME/.dotfiles/current.new into place" 'first build stderr'
+  assert_contains "$shale_err" \
+    "shale:   this build had no previous $HOME/.dotfiles/current to fall back on" \
+    'first build stderr'
+  assert_contains "$shale_err" \
+    "shale:   the composed tree is at $HOME/.dotfiles/current.new" 'first build stderr'
+  assert_not_contains "$shale_err" 'No such file or directory' 'first build stderr'
+  assert_not_contains "$shale_err" 'put it back with' 'first build stderr'
+  # The composed tree is spared rather than eaten by the EXIT trap.
+  assert_exists "$HOME/.dotfiles/current.new/.zshrc" 'the spared scratch tree'
+}
+
+# shellcheck disable=SC2123
+test_build_a_failed_install_puts_the_previous_tree_back() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  # Only the install fails, so the restore that follows it works.
+  stub_mv '*/current.new' 1
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not move $HOME/.dotfiles/current.new into place" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   $HOME/.dotfiles/current is the previous tree again, and $HOME/.dotfiles/current.new is the one that was not installed" \
+    'stderr'
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the restored tree'
+  assert_missing "$HOME/.dotfiles/current.old"
+}
+
+# shellcheck disable=SC2123
+test_build_a_failed_install_that_cannot_be_undone_says_where_both_trees_are() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  # Every move onto current fails, so the restore fails too.
+  stub_mv '*/current' 2
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale:   the previous tree is at $HOME/.dotfiles/current.old, and $HOME/.dotfiles/current is missing or incomplete" \
+    'stderr'
+  assert_contains "$shale_err" \
+    "shale:   put it back with: rm -rf $HOME/.dotfiles/current && mv $HOME/.dotfiles/current.old $HOME/.dotfiles/current" \
+    'stderr'
+  assert_exists "$HOME/.dotfiles/current.old/.zshrc" 'the previous tree'
+  assert_exists "$HOME/.dotfiles/current.new/.zshrc" 'the composed tree'
+}
+
+# Each rename is retried once, and each retry must refuse a destination that is
+# not clear: an attempt that failed having left something behind would take the
+# retry *into* it, nesting a whole tree one level down and passing the state
+# test that follows.  The stub leaves a partial destination and fails, which is
+# what a copy-fallback killed part-way looks like.
+# shellcheck disable=SC2123
+test_build_a_retried_rename_refuses_a_destination_that_is_not_clear() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  # shellcheck disable=SC2016  # the body runs in the stub, not here
+  stub_mv '*/current.old' 2 'mkdir -p "$2/half"' once
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not move $HOME/.dotfiles/current aside" 'stderr'
+  # Not nested one level down inside the partial current.old.
+  assert_missing "$HOME/.dotfiles/current.old/current"
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the untouched tree'
+}
+
+# The same claim for the second rename, where a half-installed directory at
+# current satisfies -d and would otherwise report success.
+# shellcheck disable=SC2123
+test_build_a_half_installed_tree_is_not_reported_as_success() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  # shellcheck disable=SC2016  # the body runs in the stub, not here
+  stub_mv '*/current.new' 1 'mkdir -p "$2/half"' once
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not move $HOME/.dotfiles/current.new into place" 'stderr'
+  assert_missing "$HOME/.dotfiles/current/current.new"
+  assert_exists "$HOME/.dotfiles/current.new/.zshrc" 'the composed tree'
+}
+
 # No .shale-built sentinel, so these two stateless guards are all that stands
 # between a build and writing through whatever someone left at current.  Three
 # cases rather than one loop: nothing in the harness can prove a path with a

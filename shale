@@ -510,7 +510,7 @@ self_relative_path() {
 # ----------------------------------------------------------------- the commands
 
 cmd_build() {
-  local i name path root dir errors n
+  local i name path root dir errors n had_current
 
   parse_config || exit 1
 
@@ -648,41 +648,58 @@ cmd_build() {
   # happened and the state test is the only thing that can tell.  A durable
   # failure - a full disk, a wrong mode - fails the retry exactly as it failed
   # the first attempt.
+  had_current=0
   if [ -e "$CUR" ]; then
+    had_current=1
     mv "$CUR" "$OLD"
-    [ ! -e "$CUR" ] || mv "$CUR" "$OLD"
+    # Retried only onto a destination that is still clear: a first attempt that
+    # left anything at $OLD would take the second one *into* it, nesting the
+    # previous tree a level down and passing the test below.
+    if [ -e "$CUR" ] && [ ! -e "$OLD" ] && [ ! -L "$OLD" ]; then
+      mv "$CUR" "$OLD"
+    fi
     if [ -e "$CUR" ] || [ ! -d "$OLD" ]; then
       die "could not move $CUR aside"
     fi
   fi
   mv "$NEW" "$CUR"
-  [ -d "$CUR" ] || mv "$NEW" "$CUR"
-  if [ ! -d "$CUR" ]; then
-    # Nothing is at $CUR and every link in $HOME points at it, so the previous
-    # tree goes back before anything else happens.  The composed tree is kept
-    # rather than cleaned up: it is the only copy of the build.
+  if [ ! -e "$CUR" ] && [ ! -L "$CUR" ]; then
+    mv "$NEW" "$CUR"
+  fi
+  # A rename that completed always leaves the source gone, so a $NEW that is
+  # still there means a partial tree at $CUR rather than an installed one.
+  if [ ! -d "$CUR" ] || [ -e "$NEW" ] || [ -L "$NEW" ]; then
+    # The composed tree is kept rather than cleaned up: with $CUR in an unknown
+    # state it may be the only whole copy of anything.
     SCRATCH=
-    mv "$OLD" "$CUR"
-    if [ -d "$CUR" ]; then
+    if [ "$had_current" -eq 1 ] && [ -d "$OLD" ] &&
+      [ ! -e "$CUR" ] && [ ! -L "$CUR" ]; then
+      mv "$OLD" "$CUR"
+    fi
+    if [ "$had_current" -eq 0 ]; then
+      die "could not move $NEW into place" \
+        "this build had no previous $CUR to fall back on" \
+        "the composed tree is at $NEW"
+    fi
+    if [ -d "$CUR" ] && [ ! -e "$OLD" ]; then
       die "could not move $NEW into place" \
         "$CUR is the previous tree again, and $NEW is the one that was not installed"
     fi
     die "could not move $NEW into place" \
-      "nothing is at $CUR, so every link in your home directory dangles" \
-      "put the previous tree back with: mv $OLD $CUR"
+      "the previous tree is at $OLD, and $CUR is missing or incomplete" \
+      "put it back with: rm -rf $CUR && mv $OLD $CUR"
   fi
   SCRATCH=
   arm_traps
-  if [ -n "$DEFERRED" ]; then
-    warn "interrupted, but $CUR had already been rebuilt" \
-      'the layers are composed and in place; nothing was left half-swapped'
-    kill "-$DEFERRED" $$
-  fi
 
   # Edits made to the built tree are the only copy of themselves, so a build
   # that found any keeps the tree it displaced.  Reported here rather than
   # during the walk: until the swap has happened there is no current.old for
-  # the message to point at, and a build that aborts never makes one.
+  # the message to point at, and a build that aborts never makes one.  Before
+  # the re-raise below, because a signal that ends the run here must not take
+  # the only notice that current.old holds an edit with it - the next build
+  # reaps current.old and cannot re-detect the divergence, cp -p having left
+  # the rebuilt copy no newer than its layer.
   n=${#DIVERGED_PATHS[@]}
   if [ "$n" -eq 0 ]; then
     rm -rf "$OLD" || warn "could not remove $OLD"
@@ -694,6 +711,12 @@ cmd_build() {
         "your version is kept at $OLD/${DIVERGED_PATHS[$i]}"
       i=$((i + 1))
     done
+  fi
+
+  if [ -n "$DEFERRED" ]; then
+    warn "interrupted, but $CUR had already been rebuilt" \
+      'the layers are composed and in place; nothing was left half-swapped'
+    kill "-$DEFERRED" $$
   fi
 }
 
