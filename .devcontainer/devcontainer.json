@@ -1,0 +1,19 @@
+{
+	"name": "shale",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+
+	// tests/run skips five cases under root, because root ignores the mode bits
+	// they depend on, and the CI gate fails on any skip.  A root container
+	// cannot pass the suite's own acceptance criterion.
+	"remoteUser": "vscode",
+
+	// shale reads ${HOME-} and tolerates it being unset, so with no HOME in the
+	// environment `shale build` resolves its tree to /.dotfiles and mkdirs, mvs
+	// and rm -rfs at the filesystem root.  Setting it on the container covers
+	// `docker exec` invocations that carry no environment of their own.
+	"containerEnv": {
+		"HOME": "/home/vscode"
+	}
+}
