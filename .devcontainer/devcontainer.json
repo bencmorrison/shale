@@ -15,5 +15,17 @@
 	// `docker exec` invocations that carry no environment of their own.
 	"containerEnv": {
 		"HOME": "/home/vscode"
+	},
+
+	// VS Code forwards the host's ssh-agent in, which on this developer's machine
+	// is 1Password.  git then signs through that socket rather than through the
+	// key file the image already holds, so every commit made in here blocks on an
+	// approval prompt on the host - including commits made by an agent running
+	// unattended, which simply fail.  OpenSSH treats an empty SSH_AUTH_SOCK as no
+	// agent at all, so this hands signing back to ~/.ssh, where github.com is
+	// already pinned to IdentitiesOnly with IdentityAgent none for the same
+	// reason.
+	"remoteEnv": {
+		"SSH_AUTH_SOCK": ""
 	}
 }

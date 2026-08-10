@@ -4,6 +4,10 @@ PLAN.md
 # Machine-local dev container variant; mounts a personal credential.
 .devcontainer/local/
 
+# Where Claude Code puts a subagent's isolated checkout.  It is inside the repo,
+# so an agent staging with `git add -A` commits another agent's whole worktree.
+.claude/worktrees/
+
 .DS_Store
 *~
 *.swp
