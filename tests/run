@@ -826,6 +826,64 @@ test_usage_help_forms_match_bare() {
   done
 }
 
+# README.md quotes the usage text verbatim, and the copy and the heredoc it came
+# from can drift apart without anything failing: the reader is the only thing
+# that reads both.  This is that thing.
+#
+# The fence is extracted from the file rather than restated here, because a copy
+# of the text inside the harness would be a third thing to keep in step and
+# would rot in the same silence.  It is found by its opening line rather than by
+# its position, so a block added above it changes nothing; exactly one block may
+# open with the bare prompt, since two would let this check the wrong one and
+# pass.
+test_usage_readme_quotes_the_usage_text_verbatim() {
+  local readme line nl inside first taking found fence
+  readme=$REPO_ROOT/README.md
+  [ -f "$readme" ] || fail "no README at $readme"
+  nl='
+'
+  fence=
+  found=0
+  inside=0
+  first=0
+  taking=0
+  while IFS= read -r line; do
+    case "$line" in
+      '```'*)
+        if [ "$inside" -eq 1 ]; then
+          inside=0
+          taking=0
+        else
+          inside=1
+          first=1
+        fi
+        continue
+        ;;
+    esac
+    [ "$inside" -eq 1 ] || continue
+    # The prompt line opens the block and is not part of what shale prints.
+    if [ "$first" -eq 1 ]; then
+      first=0
+      if [ "$line" = '$ shale' ]; then
+        taking=1
+        found=$((found + 1))
+      fi
+      continue
+    fi
+    [ "$taking" -eq 1 ] || continue
+    fence=$fence$line$nl
+  done <"$readme"
+  [ "$found" -eq 1 ] ||
+    fail "$readme holds $found fenced block(s) opening with '\$ shale', and exactly one is expected" \
+      'the usage transcript is found by that line rather than by its position in the file'
+  # run_shale captures stdout through a command substitution, which drops the
+  # trailing newline; the fence has to lose its own to be comparable.
+  fence=${fence%"$nl"}
+  run_shale
+  assert_status 0 "$shale_status"
+  assert_eq "$fence" "$shale_out" "usage text quoted in $readme"
+}
+
 test_usage_unknown_command_exits_2() {
   run_shale buld
   assert_status 2 "$shale_status"

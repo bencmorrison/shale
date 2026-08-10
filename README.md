@@ -11,23 +11,23 @@ Because a layer is only a directory, layers can come from anywhere: a personal r
 different account, or a directory that exists on one machine and is versioned nowhere. Combining them
 is the machine's business, not the repos'.
 
-## Status
-
-Not yet implemented. Work is tracked in the issues.
-
 ## Requirements
 
 `bash`, `git` and GNU `stow`, installed with your system package manager. Shale installs nothing,
-including itself.
+including itself. `git` is used only to clone a layer repository the machine does not have yet.
+`chkstow` ships with GNU stow and is what `doctor` audits `$HOME` with; without it `doctor` says so
+and skips that one check.
 
-Tested on Linux and WSL. It is written to macOS's system bash 3.2 and POSIX utility flags, but is
-untested there.
+Shale is written to a floor of bash 3.2 and POSIX utility flags, which is what macOS ships. The test
+suite runs in CI on Linux and on macOS, the macOS job under `/bin/bash` so that the floor is
+exercised rather than assumed. WSL is Linux for shale's purposes. No other platform is exercised.
 
 ## Install
 
 Copy the script to any directory on your `PATH`:
 
 ```sh
+mkdir -p ~/.local/bin
 cp shale ~/.local/bin/shale
 ```
 
@@ -39,10 +39,13 @@ Shale never needs to know where it lives, and there is nothing else to install.
 mkdir -p ~/.dotfiles
 cp examples/wsl-work.conf ~/.dotfiles/shale.conf
 $EDITOR ~/.dotfiles/shale.conf     # list this machine's layers
+mkdir -p ~/.dotfiles/local         # a layer with no url is yours to create
 shale apply                        # clones what is missing, builds, links
 ```
 
-`examples/minimal.conf` is the smaller starting point — one repository layer and one local directory.
+Shale clones a layer that has a url and creates no layer that has not, so every url-less layer has
+to exist before the first apply — `local`, in both shipped examples. `examples/minimal.conf` is the
+smaller starting point: one repository layer and that same local directory.
 
 Already stowing dotfiles by hand? Unstow the old packages before the first apply:
 [docs/migrating.md](docs/migrating.md).
@@ -72,25 +75,158 @@ nothing else does.
 
 The config is machine-specific and belongs to the machine, not to any layer repo.
 
+Every transcript below was produced from that config, in a home directory at `/home/you` that had
+been applied once already — `doctor` says more before the first build than after one. Where a
+transcript needed a fault to show, the text says what was broken first.
+
 ## Commands
+
+```
+$ shale
+shale - layered dotfiles builder
+
+usage:
+  shale build          compose the configured layers into ~/.dotfiles/current
+  shale apply          build, then stow current into your home directory
+  shale doctor         check prerequisites, config, and broken links
+  shale which PATH     show which layer provides PATH, and what it shadows
+
+~/.dotfiles/shale.conf lists one layer per line, lowest precedence first:
+
+  NAME  PATH  [URL]
+
+PATH is relative to ~/.dotfiles.  URL says how to clone PATH's top-level
+directory; give it once per directory and leave it off the other lines.
+```
+
+`shale help`, `shale -h` and `shale --help` print that same text, as does `shale` with no arguments
+above. The four commands in it are the whole surface: there are no others, and no options.
 
 | Command | What it does |
 |---|---|
-| `shale build` | Clones any missing layer, composes the layers into `~/.dotfiles/current` |
-| `shale apply` | Builds, then stows `current` into `$HOME` |
-| `shale doctor` | Checks prerequisites, the config, the layers, and `$HOME` for broken links |
-| `shale which PATH` | Reports which layer provides `PATH`, and which layers it shadows |
+| `shale build` | Clones any missing clone root that has a url, then composes the layers into `~/.dotfiles/current` |
+| `shale apply` | Builds, then stows `current` over `$HOME`, replacing the last apply's links |
+| `shale doctor` | Checks the prerequisites, the config, the layers and `$HOME`, and reports what it finds |
+| `shale which PATH` | Names every layer providing `PATH`, winner first, and when `build` would refuse the set |
 
-Run `shale` with no arguments for usage.
+Shale chooses between three exit codes, and no others:
+
+- **0** — shale did what was asked.
+- **1** — shale diagnosed a problem: a broken config, a missing layer, a build conflict, a stow
+  failure, a `doctor` finding, or a path no layer provides.
+- **2** — the invocation was wrong. Usage goes to stderr.
+
+A run a signal ends is the exception, and exits on the signal in the usual way: 130 for a Ctrl-C,
+143 for a `kill`, 137 for a `kill -9`.
+
+What a command produces goes to stdout — `doctor`'s report, `which`'s answer, `build`'s progress —
+so it can be piped or redirected. Diagnostics and warnings go to stderr. That is the whole rule, and
+it splits the two commands that say something alongside their answer: `doctor`'s notes are part of
+its report and go to stdout with it, while `which`'s note that `build` would refuse the set is a
+diagnostic, so `shale which PATH > file` keeps the answer and leaves the warning on the terminal.
+
+`build` and `apply` take a lock at `~/.dotfiles/.lock` for the whole build and, for `apply`, the
+stow that follows it. A second shale run refuses immediately rather than waiting, and touches
+nothing:
+
+```
+shale: another shale has the lock at /home/you/.dotfiles/.lock
+shale:   build and apply take it so that two of them cannot rebuild /home/you/.dotfiles/current at once
+shale:   if no other shale is running, this lock is stale: remove it with: rmdir /home/you/.dotfiles/.lock
+```
 
 `~/.dotfiles/current` is generated output. It is disposable — a bad build is fixed by fixing a layer
-and building again — and it should never be edited or versioned. Edit the layer, not the result.
+and building again — and it should never be edited or versioned. Edit the layer, not the result. A
+build that finds a file in `current` newer than the layer's copy says so and keeps the tree it
+replaced at `~/.dotfiles/current.old`, so the edit is recoverable until the next build, which
+removes it. A build composes into `~/.dotfiles/current.new` and renames that into place, so a
+`current.new` left lying about is a run that died mid-build and is safe to delete.
+
+One file in there is shale's own rather than a copy: `current/.stow-local-ignore`, which keeps a
+`README`, `LICENSE` or `COPYING` at the top of the built tree out of `$HOME`. A layer that ships a
+`.stow-local-ignore` at its own top level fails the build, naming the layer; one further down is an
+ordinary file and is copied like any other.
 
 To update your layers, pull each clone root with git, then apply:
 
 ```sh
 git -C ~/.dotfiles/personal pull
 shale apply
+```
+
+## Which layer wins
+
+```
+$ shale which .zshrc
+winner    work   /home/you/.dotfiles/work/.zshrc
+shadowed  base   /home/you/.dotfiles/personal/base/.zshrc
+```
+
+Directories merge rather than shadow, and the report says so instead of naming a winner:
+
+```
+$ shale which .config/profile.d
+merged    work   /home/you/.dotfiles/work/.config/profile.d/
+merged    wsl    /home/you/.dotfiles/personal/wsl/.config/profile.d/
+merged    base   /home/you/.dotfiles/personal/base/.config/profile.d/
+```
+
+`which` reads the layers, not the built tree, so it answers the same before the first build as after
+one. A path no layer provides is a diagnosis, and exits 1:
+
+```
+$ shale which .vimrc
+shale: no layer provides '.vimrc'
+```
+
+## When two layers disagree about a path
+
+A file replaces a file and a directory merges into a directory, but neither may replace the other.
+Here the `local` layer provides `.config/profile.d` as a file where the layers below it provide a
+directory; `build` names both layers and rebuilds nothing:
+
+```
+$ shale build
+shale: composed layer 'base' from /home/you/.dotfiles/personal/base
+shale: composed layer 'wsl' from /home/you/.dotfiles/personal/wsl
+shale: composed layer 'work' from /home/you/.dotfiles/work
+shale: composed layer 'local' from /home/you/.dotfiles/local
+shale: conflict at .config/profile.d
+shale:   layer 'local' provides a file        /home/you/.dotfiles/local/.config/profile.d
+shale:   layer 'work'  provides a directory   /home/you/.dotfiles/work/.config/profile.d
+shale:   a layer cannot replace a directory with a file, or a file with a directory
+shale:   remove or rename one of them
+shale: 1 conflict; /home/you/.dotfiles/current not rebuilt
+```
+
+There is no flag to override that. `shale which` on the path names the same pair before you run the
+build.
+
+## Checking the setup
+
+`shale doctor` checks that git and stow are installed, that the config parses, that every configured
+layer directory is there, that nothing in `~/.dotfiles` is a stray, that no layer ships shale
+itself, that no `.stowrc` is in a position to drop files from an apply, and that no link in `$HOME`
+points into the built tree at a path it no longer provides. It changes nothing.
+
+```
+$ shale doctor
+shale: no problems found
+```
+
+Doctor reports two kinds of line. A *problem* is a defect in the setup: it counts towards the total
+and makes doctor exit 1. Everything else is a note about something worth knowing, and neither counts
+nor changes the exit code. Below, a `vim  vim` line was added to the config for a layer that is not
+there, and a stray `~/.dotfiles/old-tmux` directory was created — the first is the problem, the
+second the note:
+
+```
+$ shale doctor
+shale: layer 'vim' has no directory at /home/you/.dotfiles/vim and no url for 'vim'
+shale:   add a url on that line, or create the directory
+shale: /home/you/.dotfiles/old-tmux is not a configured layer
+shale:   it may be a leftover stow package, a stray clone, or a layer you removed from the config
+shale: 1 problem found
 ```
 
 ## Adding to a config file instead of replacing it
@@ -112,13 +248,19 @@ into authoring a layer.
 stow -D -d ~/.dotfiles -t ~ current
 ```
 
-This is also the escape hatch if an apply goes wrong.
+This is also the escape hatch if an apply goes wrong. It removes the links into `current` and leaves
+your layers, your config and the built tree alone; `shale apply` puts them back.
 
 ## Known limits
 
 - Rebuilding replaces `~/.dotfiles/current` in place, so there is a brief window in which the
   symlinks in `$HOME` point at nothing. Apply relinks immediately afterwards.
-- Two concurrent `shale apply` runs will interleave and produce an arbitrary tree. Don't.
+- When a whole directory leaves every layer, stow does not visit it and the links inside it are left
+  dangling by an apply that still exits 0. `shale doctor` finds them and prints what to do about
+  them; [docs/migrating.md](docs/migrating.md) covers the case in full.
+- A shale that is killed outright — `kill -9`, or the machine losing power — leaves its lock
+  directory behind, and a `~/.dotfiles/current.new` as well if it died mid-build. `doctor` reports
+  neither. Shale never reclaims a lock; the refusal above names the command that clears it.
 - Git cannot store an empty directory, so a layer that needs one ships a `.gitkeep`, which will
   appear in `$HOME`.
 
