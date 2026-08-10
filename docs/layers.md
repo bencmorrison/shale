@@ -171,7 +171,9 @@ sibling works — `.exrc -> .vimrc` resolves inside `current/` and reading `~/.e
 A link written as though it started in `$HOME`, such as `.exrc -> .dotfiles/current/.vimrc`, dangles
 after a successful apply that reports nothing. Never point a layer symlink into `current/`.
 
-Keep links relative. Stow refuses an absolute one and abandons the whole apply:
+Keep links relative. Stow refuses an absolute one and abandons the whole apply, and stow 2.3.1
+misses one below the top of the tree — an absolute link that appears to work there stops working
+the day stow is upgraded:
 
 ```
 WARNING! stowing current would cause conflicts:
