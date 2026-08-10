@@ -3377,6 +3377,163 @@ test_apply_a_directory_removed_from_every_layer_leaves_a_dangling_link() {
   assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
 }
 
+# The third outcome, between the two apply otherwise reports: stow did the work,
+# but not all of it.  A layer shipping a '.dotfiles/...' path makes stow refuse
+# to link over its own stow directory, and it says so on stderr and exits 0 - so
+# reading the status alone made shale call a partial apply a whole one and print
+# nothing at all.
+#
+# The claim is about shale's lines, which is why those are what is asserted.  The
+# replay is pinned to the head of stow's line only: 2.3.1 and 2.4.1 both emit
+# "WARNING: skipping target which was current stow directory $target" - from
+# should_skip_target_which_is_stow_dir on 2.3.1 and from should_skip_target on
+# 2.4.1, the sub having been renamed between them - and the $target on the end
+# is a path stow computed, which nothing here fixes the spelling of.
+test_apply_a_layer_shipping_a_dotfiles_path_is_reported() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .dotfiles/notes
+  run_shale apply
+  # 0, and deliberately: the apply the user asked for did happen.
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_err" 'shale: stow exited 0 and wrote output' 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   if it names a path stow skipped, that path is not linked from $HOME/.dotfiles/current into $HOME" \
+    'stderr'
+  assert_contains "$shale_err" 'WARNING: skipping target' 'the replayed stow output'
+  # What was skipped, and what was not: the rest of the tree is linked, which is
+  # the half that made the silence dangerous.
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_exists "$HOME/.dotfiles/current/.dotfiles/notes" 'the built tree'
+  assert_missing "$HOME/.dotfiles/notes" 'the link stow refused to make'
+}
+
+# The other thing stow puts on that stream, and why shale's lines may not assert
+# that anything was skipped.  A ~/.dotfiles that is a symlink to a store on
+# another volume is a layout people keep their dotfiles in, and 2.3.1 answers it
+# with "BUG in find_stowed_path? Absolute/relative mismatch between Stow dir ..."
+# on stderr - having linked the whole tree correctly, and exited 0.
+#
+# So nothing here asserts that shale said anything at all: that line is 2.3.1's
+# and does not appear in 2.4.1's source.  What is asserted is that the layout
+# works, and that whenever shale does speak the report is the conditional one -
+# which is what stops the unconditional claim of a partial apply, false of every
+# apply of this layout, from coming back in any wording rather than only in the
+# one that was here first.
+test_apply_a_symlinked_dotfiles_directory_is_not_reported_as_a_partial_apply() {
+  local store
+  sandbox_mkdir "$CASE_DIR/store"
+  store=$sandbox_dir
+  # Before conf and mklayer, which would otherwise create the real directory
+  # this has to replace.
+  sandbox_leaf "$HOME" .dotfiles new
+  ln -s "$store" "$sandbox_path" || fail 'could not link the dotfiles directory'
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status"
+  # Through $HOME, which is the only thing the user cares about, and the whole
+  # of what a claim of a partial apply would be false about.
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.zshrc")" 'the linked file'
+  assert_eq 'personal/base/.config/nvim/init.lua' \
+    "$(cat "$HOME/.config/nvim/init.lua")" 'the linked file'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  # Whether shale speaks at all is the stow version's choice; what it says when
+  # it does is shale's, and both halves have to be there.  A report that dropped
+  # the 'if' - in these words or any others - loses the second assertion, which
+  # is the whole of what this case is guarding.
+  if [ -n "$shale_err" ]; then
+    assert_contains "$shale_err" 'shale: stow exited 0 and wrote output' 'stderr'
+    assert_contains "$shale_err" \
+      "shale:   if it names a path stow skipped, that path is not linked from $HOME/.dotfiles/current into $HOME" \
+      'stderr'
+  fi
+}
+
+# The other side of it, and the case that would fail if stow wrote anything to
+# stderr on an ordinary run: shale reports the presence of that stream without
+# reading it, so one routine line from stow would put a warning on every apply
+# there is.  Twice, because the second apply is the one people run.
+test_apply_a_clean_run_reports_no_warnings() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the first apply stderr'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the second apply stderr'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
+# Holding stow's output must not cost apply its fd 1.  Capturing stow's stderr
+# while letting its stdout past means duplicating fd 1 first, and that dup fails
+# outright on a shale started with its stdout closed - which made 'shale apply
+# >&-' run no stow at all and link nothing, having linked everything before.
+# Exotic, and still a working invocation turned into a silent no-op.  Taking both
+# streams into one capture is what keeps fd 1 out of it.
+#
+# Not run_shale: it captures stdout to a file, which is the one thing this case
+# may not do.  The wrapper is still the route to the script, so the sandbox
+# proofs are unchanged.
+test_apply_with_stdout_closed_still_links_everything() {
+  local status err transcript
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_leaf "$CASE_DIR" closed-stdout.err new
+  err=$sandbox_path
+  sandbox_leaf "$CASE_DIR" transcript
+  status=0
+  shale apply >&- 2>"$err" || status=$?
+  # run_shale's, because it is bypassed above and the failure report is written
+  # for both: without this the report shows the assertion and nothing about what
+  # shale did.  Re-proven after the run for the reason run_shale gives - shale's
+  # whole job is creating symlinks, and the invocation sits inside the window.
+  sandbox_leaf "$CASE_DIR" transcript
+  transcript=$sandbox_path
+  {
+    printf -- '--- shale apply >&- -> exit %s\n' "$status"
+    printf -- '    stdout:\n'
+    printf -- '      (closed)\n'
+    printf -- '    stderr:\n'
+    sed 's/^/      /' "$err"
+  } >>"$transcript"
+  assert_status 0 "$status" 'apply with stdout closed'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_eq 'personal/base/.config/nvim/init.lua' \
+    "$(cat "$HOME/.config/nvim/init.lua")" 'the linked file'
+}
+
+# The mirror of it: the replay is the last thing a warned apply does, so without
+# an explicit 'return 0' apply exits with the status of a printf to stderr - 1
+# on a 'shale apply 2>&-', for an apply that did everything right.  The layer
+# ships a '.dotfiles/...' path so that the warning path is the one being run.
+test_apply_with_stderr_closed_still_exits_0() {
+  local status out transcript
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .dotfiles/notes
+  sandbox_leaf "$CASE_DIR" closed-stderr.out new
+  out=$sandbox_path
+  sandbox_leaf "$CASE_DIR" transcript
+  status=0
+  shale apply >"$out" 2>&- || status=$?
+  sandbox_leaf "$CASE_DIR" transcript
+  transcript=$sandbox_path
+  {
+    printf -- '--- shale apply 2>&- -> exit %s\n' "$status"
+    printf -- '    stdout:\n'
+    sed 's/^/      /' "$out"
+    printf -- '    stderr:\n'
+    printf -- '      (closed)\n'
+  } >>"$transcript"
+  assert_status 0 "$status" 'a warned apply with stderr closed'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
 # stow plans both phases before it changes anything, so a conflict costs the
 # whole apply and nothing of $HOME.  That is the one state in which current and
 # $HOME legitimately disagree, and the message has to say so rather than leave
@@ -3529,6 +3686,37 @@ test_apply_a_stowrc_in_the_working_directory_is_not_read() {
   assert_status 0 "$shale_status"
   assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
   assert_missing "$CASE_DIR/elsewhere/.zshrc" 'the directory the resource file named'
+}
+
+# The limit of reporting stow's stderr, asserted rather than wished away.
+# --ignore is the resource-file option nothing on the command line can defend
+# against - man stow, RESOURCE FILES: an option that may be given more than once
+# is appended to the command line rather than overridden by it - and stow drops
+# the file it matches in silence: no stderr, no stdout, exit 0.  So shale has
+# nothing to report the presence of, and the file is missing from $HOME with
+# every command still saying the apply was clean.  Closing that is #58, and it
+# is doctor that will: apply has nothing to see here.
+#
+# stow takes the value as a Perl regex anchored at the end - bin/stow builds
+# qr($regex\z) - and Stow.pm's ignore() matches it against the package-relative
+# path rather than the basename, so '--ignore=sub/xyz' drops 'sub/xyz' and
+# leaves a top-level 'xyz' linked.  'vimrc' matches '.vimrc' by that anchor and
+# leaves '.zshrc' alone, which is what makes this a partial apply rather than an
+# empty one.
+test_apply_a_stowrc_ignore_drops_a_file_without_a_word_from_stow() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .vimrc
+  sandbox_write "$HOME" .stowrc '--ignore=vimrc'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_exists "$HOME/.dotfiles/current/.vimrc" 'the built tree'
+  assert_missing "$HOME/.vimrc" 'the link the resource file dropped'
+  # Only that apply is silent about it, not that stderr is empty: #58 puts this
+  # in doctor's mouth, and other things may reach apply's stderr besides.  The
+  # day something here does report it, the case to change is this one.
+  assert_not_contains "$shale_err" 'shale: stow exited 0 and wrote output' 'stderr'
 }
 
 # The positive half of the pair above, and what doctor's resource-file check
