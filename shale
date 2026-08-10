@@ -74,6 +74,25 @@ die() {
   exit 1
 }
 
+# 'cannot search' or 'cannot read' for the directory $1, in DENIED_VERB: the bit
+# that is actually missing, for every message about a directory shale has to
+# walk.  Both callers test '! -r || ! -x', which is the right condition - one
+# bit short either way and the walk fails - but one wording for the two states
+# is a claim the reader disproves with ls: at mode 0444 the directory lists
+# perfectly well and it is the search bit that is gone.
+#
+# The search bit is tested first, so it also answers for mode 0000 where both
+# are missing.  That tie has to fall this way: which reports the same directory
+# and tests search alone, nothing there ever listing one, so 'search' is the one
+# word all three commands can say about a single directory.
+denied_verb() {
+  if [ ! -x "$1" ]; then
+    DENIED_VERB='cannot search'
+  else
+    DENIED_VERB='cannot read'
+  fi
+}
+
 usage() {
   cat <<'EOF'
 shale - layered dotfiles builder
@@ -700,7 +719,13 @@ compose_dir() {
   # nothing can be learnt about them, and every test below silently takes its
   # false branch.
   if [ ! -r "$here" ] || [ ! -x "$here" ]; then
-    die "cannot read $here: permission denied"
+    # The layer name and the verb are doctor's and which's, both of which report
+    # this same directory: nothing local to this function says the three
+    # messages have to match, and a reader comparing two of them is who does.
+    denied_verb "$here"
+    die "layer '$SRC_NAME': $DENIED_VERB $here: permission denied" \
+      'shale composes a layer by walking it' \
+      'check the permissions on that directory'
   fi
   for e in "$here"/*; do
     base=${e##*/}
@@ -1147,21 +1172,24 @@ which_normalise() {
 
 # The first directory on the way from $1 to the path $2 inside it that exists
 # but cannot be searched, in OBSCURED; non-zero when every directory on that way
-# can be searched.
+# can be searched.  Shared by build, doctor and which, so that all three say the
+# same thing about the same directory.
 #
-# Without this, a layer that provides the path answers 'no' to both -e and -L
-# exactly as a layer that does not - the tests fail with EACCES rather than
-# ENOENT - and which names the layer below it the winner, confidently and
-# wrongly, while build refuses the same setup outright.  Only search permission
-# matters: reading a directory is what listing it needs, and nothing here lists
-# one.
+# Without this, a path under a directory that cannot be searched answers 'no' to
+# -e, -L and -d exactly as a path that is not there does - the tests fail with
+# EACCES rather than ENOENT - so which names the layer below it the winner, while
+# build and doctor call the layer directory missing and send the reader to a
+# config line that is correct.  Only search permission matters: reading a
+# directory is what listing it needs, and nothing here lists one.
 #
 # The walk starts at $DOTFILES rather than at the layer directory, with the
 # layer's own path as the first components of $2: a layer path has more than one
 # component in every example there is, and an intermediate one that cannot be
 # searched makes the layer directory itself answer 'no' to -d, which would let
-# the loop below decide there was nothing in the way.
-which_obscured() {
+# the loop below decide there was nothing in the way.  The leaf is never tested,
+# only the directories above it, which leaves a layer directory that cannot be
+# read to compose_dir and to doctor's own check of it.
+obscured_ancestor() {
   local here=$1 rest=$2 component
   OBSCURED=
   while :; do
@@ -1247,6 +1275,18 @@ cmd_build() {
     dir=$DOTFILES/$path
     if [ -d "$dir" ]; then
       :
+    elif obscured_ancestor "$DOTFILES" "$path"; then
+      # Before every arm below, because all of them are reached by the same
+      # 'no': a directory on the way to this layer that cannot be searched makes
+      # -d, -e and -L false for a layer directory that is there and is fine.
+      # Reported as a missing layer, the remedy sends the reader to a config
+      # line that is correct and never mentions the permission that is the
+      # cause.  The line is which's, word for word, so a reader comparing the
+      # two commands about one setup is told one thing.
+      emit "layer '$name': cannot search $OBSCURED: permission denied" \
+        "shale cannot tell whether there is a directory at $dir" \
+        'check the permissions on that directory'
+      errors=$((errors + 1))
     elif [ -e "$dir" ] || [ -L "$dir" ]; then
       emit "layer '$name': $dir exists but is not a directory"
       errors=$((errors + 1))
@@ -1594,12 +1634,21 @@ cmd_doctor() {
     if [ -d "$dir" ] && { [ ! -r "$dir" ] || [ ! -x "$dir" ]; }; then
       # '-d' alone is true for a directory nothing can be got out of, so without
       # this a layer at mode 0000 passes doctor while build stops dead at it.
-      # The condition and the first line are compose_dir's, so the two commands
-      # say the same thing about the same directory.
-      finding "layer '$name': cannot read $dir: permission denied" \
-        'shale composes a layer by walking it, and build stops there'
+      # The condition, the verb and the first line are compose_dir's, so the two
+      # commands say the same thing about the same directory.
+      denied_verb "$dir"
+      finding "layer '$name': $DENIED_VERB $dir: permission denied" \
+        'shale composes a layer by walking it, and build stops there' \
+        'check the permissions on that directory'
     elif [ -d "$dir" ]; then
       :
+    elif obscured_ancestor "$DOTFILES" "$path"; then
+      # cmd_build's arm and cmd_build's wording, in the same position among the
+      # arms below it, which is the whole of what doctor is for: the reader who
+      # runs doctor about a build that stopped must be told what stopped it.
+      finding "layer '$name': cannot search $OBSCURED: permission denied" \
+        "shale cannot tell whether there is a directory at $dir" \
+        'check the permissions on that directory'
     elif [ -e "$dir" ] || [ -L "$dir" ]; then
       finding "layer '$name': $dir exists but is not a directory"
     elif [ -d "$DOTFILES/$root" ]; then
@@ -1632,8 +1681,13 @@ cmd_doctor() {
   # the scan finds nothing and says nothing, which is a clean bill of health for
   # a directory it never read.
   if [ -d "$DOTFILES" ] && { [ ! -r "$DOTFILES" ] || [ ! -x "$DOTFILES" ]; }; then
-    finding "cannot list $DOTFILES: permission denied" \
-      'shale cannot tell which of the directories in it are layers and which are strays'
+    # The bit that is missing, not one word for the two states: at mode 0666 the
+    # glob lists this directory perfectly well and what fails is the -d on each
+    # entry, so 'cannot list' about it was a claim the reader disproves with ls.
+    denied_verb "$DOTFILES"
+    finding "$DENIED_VERB $DOTFILES: permission denied" \
+      'shale cannot tell which of the directories in it are layers and which are strays' \
+      'check the permissions on that directory'
   elif [ -d "$DOTFILES" ]; then
     for entry in "$DOTFILES"/*; do
       # Also the arm the unmatched glob lands in.
@@ -1736,12 +1790,13 @@ cmd_which() {
     # Only where the tests above said no, which is the only case their answer
     # can be a permissions failure rather than a fact: a path that was found was
     # found through directories that could all be searched.
-    if which_obscured "$DOTFILES" "${LAYER_PATHS[$i]}/$rel"; then
+    if obscured_ancestor "$DOTFILES" "${LAYER_PATHS[$i]}/$rel"; then
       # 'search', as the parser says of $DOTFILES and for the same reason:
-      # which_obscured tests the search bit alone, and a directory at mode 0444
-      # is one this reads nothing from and lists perfectly well.
+      # obscured_ancestor tests the search bit alone, and a directory at mode
+      # 0444 is one this reads nothing from and lists perfectly well.
       emit "layer '${LAYER_NAMES[$i]}': cannot search $OBSCURED: permission denied" \
-        "shale cannot tell whether that layer provides '$rel'"
+        "shale cannot tell whether that layer provides '$rel'" \
+        'check the permissions on that directory'
       obscured=$((obscured + 1))
     fi
   done
