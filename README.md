@@ -42,6 +42,8 @@ $EDITOR ~/.dotfiles/shale.conf     # list this machine's layers
 shale apply                        # clones what is missing, builds, links
 ```
 
+`examples/minimal.conf` is the smaller starting point — one repository layer and one local directory.
+
 ## Configuration
 
 `~/.dotfiles/shale.conf` lists one layer per line, lowest precedence first:
