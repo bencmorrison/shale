@@ -277,21 +277,27 @@ clone_url() {
   return 1
 }
 
-# ---------------------------------------------------------------- the composer
+# ----------------------------------------------------------- the scratch trees
 
 # The scratch tree while one exists, and empty otherwise, which is what makes
-# cleanup idempotent.
+# cleanup idempotent.  CLONING is the same for the clone in flight: an
+# interrupted clone must leave nothing behind that a later run could walk.
 SCRATCH=
+CLONING=
 
-# The glob gate is the last line of defence on the only rm -rf in this script:
-# an empty or corrupted SCRATCH lands in the refusing branch rather than
-# deleting a layer or a home directory.  Blanking comes first so a second call
-# does nothing even if the removal failed.
+# The glob gates are the last line of defence on these two rm -rf calls, which
+# run from a trap at a moment nothing chose: an empty or corrupted variable
+# lands in a refusing branch rather than deleting a layer or a home directory.
+# Blanking comes first so a second call does nothing even if a removal failed.
 cleanup() {
-  local scratch=${SCRATCH-}
+  local scratch=${SCRATCH-} cloning=${CLONING-}
   SCRATCH=
+  CLONING=
   case "$scratch" in
     */current.new) rm -rf "$scratch" ;;
+  esac
+  case "$cloning" in
+    */.*.cloning) rm -rf "$cloning" ;;
   esac
 }
 
@@ -322,6 +328,80 @@ defer_signals() {
 
 DEFERRED=
 arm_traps
+
+# ------------------------------------------------------------------ the clones
+
+# Clones every configured clone root that has a url and nothing at its path,
+# before anything is composed, so a clone that fails costs nothing composed.
+# One clone per root however many layers derive from it, which is the whole
+# reason a url attaches to the root rather than to the layer.  A checkout that
+# is already there is left exactly as it is: updating one is git's job.
+clone_missing_roots() {
+  local i root url dir tmp have_git
+  have_git=0
+  i=0
+  while [ "$i" -lt "${#CLONE_ROOTS[@]}" ]; do
+    root=${CLONE_ROOTS[$i]}
+    url=${CLONE_URLS[$i]}
+    dir=$DOTFILES/$root
+    i=$((i + 1))
+    # -L as well as -e, because a dangling symlink is something someone else
+    # put there too: the layer check below names it, rather than this cloning
+    # into whatever it points at or renaming over it.
+    { [ ! -e "$dir" ] && [ ! -L "$dir" ]; } || continue
+    # Lazily, and once: a machine where every layer is already present builds
+    # with no git installed at all.
+    if [ "$have_git" -eq 0 ]; then
+      command -v git >/dev/null 2>&1 ||
+        die "git is not installed, and $dir must be cloned from $url" \
+          'install it with your system package manager: shale installs nothing'
+      have_git=1
+    fi
+    # The leading dot is what keeps this name out of the layer namespace: a
+    # path component in the config must start with a letter, digit or '_', so
+    # no configured layer can ever be called this.
+    tmp=$DOTFILES/.$root.cloning
+    # Named before anything touches it, reaping included: a signal delivered
+    # partway through the rm would otherwise run cleanup with CLONING still
+    # empty and leave a half-removed tree behind.  Naming a path costs nothing,
+    # which is what makes doing it first free.
+    CLONING=$tmp
+    rm -rf "$tmp" || die "could not remove $tmp"
+    { [ ! -e "$tmp" ] && [ ! -L "$tmp" ]; } || die "$tmp still exists"
+    report "cloning '$root' from $url into $dir"
+    # Into the temporary name and renamed after, so an interrupted or failed
+    # clone cannot leave a half-populated directory that looks like a layer.
+    # git's stderr is neither captured nor reformatted: it is the progress of
+    # the slowest part of a bootstrap, and the diagnosis when one fails.
+    git clone -- "$url" "$tmp" || die "could not clone $url into $dir"
+    # Re-tested here because a clone takes as long as a network does: mv into a
+    # directory that exists moves the source *inside* it, which would nest a
+    # whole clone one level down and satisfy every test after this one.
+    if [ -e "$dir" ] || [ -L "$dir" ]; then
+      CLONING=
+      # No build reaps it either: the reap runs only for a root that is about
+      # to be cloned, and this one no longer is.  So the message says so.
+      die "$dir appeared while '$root' was being cloned" \
+        "the clone is at $tmp" \
+        "no build will touch it while $dir exists: use it, or remove it"
+    fi
+    mv "$tmp" "$dir"
+    # Judged by the filesystem rather than by mv's status: a rename that
+    # completed always leaves the source gone.
+    if [ ! -d "$dir" ] || [ -e "$tmp" ] || [ -L "$tmp" ]; then
+      # Kept rather than cleaned up, and the message says what to do with it.
+      # The next build reaps it and fetches again, so keeping it silently would
+      # save nothing: what makes it worth keeping is being told it is there.
+      CLONING=
+      die "could not move the clone into place at $dir" \
+        "the clone is at $tmp" \
+        "move it into place with: mv $tmp $dir, or the next build fetches it again"
+    fi
+    CLONING=
+  done
+}
+
+# ---------------------------------------------------------------- the composer
 
 # The layer compose_dir is walking, for the messages it raises.  Threading four
 # more arguments through a recursion to reach them buys nothing.
@@ -521,6 +601,10 @@ cmd_build() {
   # the last thing this process does.
   shopt -s dotglob nullglob
 
+  # Before the check below, which is what makes a root with a url that shale
+  # can obtain no longer a missing layer at all.
+  clone_missing_roots
+
   # Every layer is verified before anything is written, so a missing one costs
   # nothing composed.  The wording branches on the cause because the cause is
   # what decides the remedy.
@@ -540,12 +624,19 @@ cmd_build() {
       emit "layer '$name' has no directory at $dir, but its clone at $DOTFILES/$root exists" \
         "check the path on line ${LAYER_LINES[$i]}"
       errors=$((errors + 1))
-    elif clone_url "$root"; then
+    elif [ -e "$DOTFILES/$root" ] || [ -L "$DOTFILES/$root" ]; then
+      # Reached only by a layer path deeper than its root - a one-component path
+      # is the arm above - and it is why cloning does not make this state
+      # unreachable: shale removes nothing it did not create, so a root that is
+      # a file or a dangling symlink is never cloned over, whether or not the
+      # config gives a url for it.
       emit "layer '$name' has no directory at $dir" \
-        "its clone root '$root' has a url: $CLONE_URL" \
-        "clone '$root' from it, or create the directory"
+        "its clone root $DOTFILES/$root exists but is not a directory" \
+        'remove it, or move it aside'
       errors=$((errors + 1))
     else
+      # No branch for a root with a url and nothing at its path: cloning has
+      # already run, and it either obtained that root or stopped the build.
       emit "layer '$name' has no directory at $dir and no url for '$root'" \
         "add a url on that line, or create the directory"
       errors=$((errors + 1))
@@ -571,8 +662,12 @@ cmd_build() {
   # Reaping whatever a killed run left behind.
   rm -rf "$NEW" || die "could not remove $NEW"
   { [ ! -e "$NEW" ] && [ ! -L "$NEW" ]; } || die "$NEW still exists"
-  mkdir "$NEW" || die "could not create $NEW"
+  # Before the mkdir, not after it: a signal delivered between the two would
+  # otherwise run cleanup with SCRATCH still empty and leave the scratch tree
+  # behind.  Naming a path that does not exist yet costs nothing - cleanup's
+  # rm -rf is a no-op on it - which is what makes this ordering free.
   SCRATCH=$NEW
+  mkdir "$NEW" || die "could not create $NEW"
 
   DIVERGED_PATHS=()
   DIVERGED_LAYERS=()
@@ -772,9 +867,15 @@ cmd_doctor() {
     elif [ -d "$DOTFILES/$root" ]; then
       finding "layer '$name' has no directory at $dir, but its clone at $DOTFILES/$root exists" \
         "check the path on line ${LAYER_LINES[$i]}"
+    elif [ -e "$DOTFILES/$root" ] || [ -L "$DOTFILES/$root" ]; then
+      # Before the url arm, and counted: a url does not mean shale can obtain
+      # this root, because shale clones only where nothing is.
+      finding "layer '$name' has no directory at $dir" \
+        "its clone root $DOTFILES/$root exists but is not a directory" \
+        'remove it, or move it aside'
     elif clone_url "$root"; then
-      # A url means shale can obtain this one, so it is reported without
-      # counting: it is a state shale fixes, not a defect in the setup.
+      # A url and nothing in the way means shale can obtain this one, so it is
+      # reported without counting: a state shale fixes, not a defect.
       note "layer '$name' has no directory at $dir yet" \
         "its clone root '$root' has a url: $CLONE_URL"
     else

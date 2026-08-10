@@ -470,6 +470,31 @@ conf() {
   sandbox_write "$HOME/.dotfiles" shale.conf ${1+"$@"}
 }
 
+# mkrepo NAME RELPATH... - a git repository at $CASE_DIR/repos/NAME holding one
+# commit of each RELPATH, with content NAME/RELPATH so an assertion pins where a
+# file came from.  Its path lands in repo_url: every clone case names a
+# repository it created itself, because a case that named a host would be
+# testing the network.
+#
+# Outside $HOME on purpose - a clone source is not part of the home being built,
+# and one under ~/.dotfiles would be a layer.  '-c init.defaultBranch' is not
+# cosmetic: without it git's advice block lands in every captured failure dump.
+mkrepo() {
+  local name=${1-} rel dir target
+  [ -n "$name" ] || fail 'mkrepo: no name given'
+  shift
+  sandbox_mkdir "$CASE_DIR/repos/$name"
+  dir=$sandbox_dir
+  git -c init.defaultBranch=main init -q "$dir" || fail "could not init $dir"
+  for rel in ${1+"$@"}; do
+    target=$dir/$rel
+    sandbox_write "${target%/*}" "${target##*/}" "$name/$rel"
+  done
+  (cd "$dir" && git add -A . && git commit -qm 'fixture') ||
+    fail "could not commit in $dir"
+  repo_url=$dir
+}
+
 # mklayer LAYER RELPATH [CONTENT] - LAYER is a path under $HOME/.dotfiles.
 # CONTENT defaults to LAYER/RELPATH, so an assertion pins which layer won
 # without the case having to state it.
@@ -1354,6 +1379,63 @@ stub_mv() {
   chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
 }
 
+# stub_interrupt NAME MATCH BODY - a NAME on PATH that runs BODY and then
+# interrupts shale, for the calls whose whole argument list matches MATCH;
+# every other call execs the real one.  BODY may use "$real" and the arguments.
+#
+# This is how a case aims at an instant no timed test can hit: the moment a
+# path exists, or half exists, and shale has not yet recorded its name.  $PPID
+# is shale itself - env execs bash in place, so there is no shell of the stub's
+# own in between - and bash defers the handler to the next command boundary,
+# which is where each of those windows is.  Sets stub_path, which the caller
+# puts in front of PATH.
+#
+# It fires once.  The handler it provokes runs the same tool against the same
+# path, so a stub that fired every time would defeat the cleanup it exists to
+# test and the case would fail against correct code.
+stub_interrupt() {
+  local name=$1 match=$2 body=$3 real
+  real=$(command -v "$name") || fail "$name is not on PATH"
+  sandbox_mkdir "$CASE_DIR/stub-bin"
+  stub_path=$sandbox_dir
+  # shellcheck disable=SC2016  # the body is written for the stub's shell
+  sandbox_write "$stub_path" "$name" \
+    '#!/usr/bin/env bash' \
+    "real=$real" \
+    "fired=$stub_path/fired" \
+    'case "$*" in' \
+    "  $match)" \
+    '    [ ! -e "$fired" ] || exec "$real" "$@"' \
+    '    : >"$fired"' \
+    "    $body" \
+    '    kill -INT "$PPID"' \
+    '    exit 0' \
+    '    ;;' \
+    'esac' \
+    'exec "$real" "$@"'
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+}
+
+# The scratch tree has to be named before it is created, not after: a signal
+# arriving between the two runs cleanup while SCRATCH is still empty, and the
+# tree survives a run that reported nothing.
+# shellcheck disable=SC2123
+test_build_an_interrupt_as_the_scratch_tree_appears_leaves_nothing() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # shellcheck disable=SC2016  # the body runs in the stub, not here
+  stub_interrupt mkdir '*/current.new' '"$real" "$@" || exit $?'
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  # 128 + SIGINT: shale re-raises the signal rather than inventing a status.
+  assert_status 130 "$shale_status"
+  assert_missing "$HOME/.dotfiles/current.new"
+  assert_missing "$HOME/.dotfiles/current"
+}
+
 # Three states a failed install can leave, three messages.  The first-build one
 # is the case that used to leak mv's own 'cannot stat' line and then advise a
 # recovery command naming a directory that had never existed.
@@ -1564,8 +1646,11 @@ shale: composed layer 'local' from $HOME/.dotfiles/local" "$shale_out" 'stdout'
 # Every layer is verified before anything is written, and all of them in one
 # run.  Without this a missing layer directory composes nothing and reports
 # success, which is the silent half of a mistyped path.
+# Two causes, two wordings, one run.  A root with a url is not among them: by
+# the time this check runs, cloning has either obtained that root or stopped the
+# build, so there is no third thing a missing layer can be.
 test_build_a_missing_layer_directory_stops_the_build() {
-  conf 'base personal/base' 'work work' 'wsl personal/wsl2' 'web web url-one'
+  conf 'base personal/base' 'work work' 'wsl personal/wsl2'
   mklayer personal/base .zshrc
   run_shale build
   assert_status 1 "$shale_status"
@@ -1576,9 +1661,6 @@ test_build_a_missing_layer_directory_stops_the_build() {
     "shale: layer 'wsl' has no directory at $HOME/.dotfiles/personal/wsl2, but its clone at $HOME/.dotfiles/personal exists" \
     'stderr'
   assert_contains "$shale_err" 'shale:   check the path on line 3' 'stderr'
-  assert_contains "$shale_err" \
-    "shale: layer 'web' has no directory at $HOME/.dotfiles/web" 'stderr'
-  assert_contains "$shale_err" "shale:   its clone root 'web' has a url: url-one" 'stderr'
   assert_empty "$shale_out" 'stdout'
   assert_missing "$HOME/.dotfiles/current"
   assert_missing "$HOME/.dotfiles/current.new"
@@ -1593,6 +1675,419 @@ test_build_a_layer_path_that_is_not_a_directory_stops_the_build() {
   assert_contains "$shale_err" \
     "shale: layer 'local': $HOME/.dotfiles/local exists but is not a directory" 'stderr'
   assert_empty "$shale_out" 'stdout'
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# ---------------------------------------------------------------- clone cases
+#
+# Every url here is a path to a repository the case created; no case names a
+# host.  What the cases are about is what shale does around git, so the ones
+# that count clones put a recording git in front of the real one rather than
+# reading shale's own report back to itself.
+
+# A git on PATH that appends its arguments to a log and then runs the real one.
+# BEFORE is shell run first, which is the only way to reach the state where
+# something else created the clone root while the clone was in flight.  Sets
+# stub_path, which the caller puts in front of PATH, and git_log.
+stub_git() {
+  local before=${1-} real
+  real=$(command -v git) || fail 'git is not on PATH'
+  sandbox_leaf "$CASE_DIR" git-calls new
+  git_log=$sandbox_path
+  : >"$git_log" || fail "could not write $git_log"
+  sandbox_mkdir "$CASE_DIR/stub-bin"
+  stub_path=$sandbox_dir
+  # shellcheck disable=SC2016  # written for the stub's shell, not this one
+  sandbox_write "$stub_path" git \
+    '#!/usr/bin/env bash' \
+    "printf '%s\n' \"\$*\" >>\"$git_log\"" \
+    "${before:-:}" \
+    "exec $real \"\$@\""
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+}
+
+# The bootstrap this whole design exists for: a config, no layer, one command.
+# The assertion on stderr is git's own 'Cloning into' line, which pins both that
+# the clone runs into the temporary name and that nothing passes --quiet; the
+# path is asserted rather than the sentence, which git translates.
+test_clone_a_missing_root_is_cloned_and_composed() {
+  mkrepo personal .zshrc .config/git/config
+  conf "base personal $repo_url"
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: cloning 'personal' from $repo_url into $HOME/.dotfiles/personal" 'stdout'
+  assert_contains "$shale_err" "$HOME/.dotfiles/.personal.cloning" 'stderr'
+  assert_eq 'personal/.zshrc' "$(cat "$HOME/.dotfiles/personal/.zshrc")" 'the clone'
+  assert_eq 'personal/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built tree'
+  assert_eq 'personal/.config/git/config' \
+    "$(cat "$HOME/.dotfiles/current/.config/git/config")" 'the built tree'
+  assert_exists "$HOME/.dotfiles/personal/.git" 'the checkout'
+  assert_missing "$HOME/.dotfiles/current/.git"
+  assert_missing "$HOME/.dotfiles/.personal.cloning"
+}
+
+# One clone per root, not per layer: this is the whole reason the url attaches
+# to the first path component rather than to the layer.
+# shellcheck disable=SC2123
+test_clone_one_clone_serves_every_layer_under_its_root() {
+  local saved clones
+  mkrepo personal base/.zshrc wsl/.zshrc work/.gitconfig
+  conf "base personal/base $repo_url" 'wsl personal/wsl' 'work personal/work'
+  stub_git
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 0 "$shale_status"
+  clones=$(grep -c '^clone ' "$git_log")
+  assert_eq 1 "$clones" 'git clone invocations'
+  assert_eq "shale: cloning 'personal' from $repo_url into $HOME/.dotfiles/personal
+shale: composed layer 'base' from $HOME/.dotfiles/personal/base
+shale: composed layer 'wsl' from $HOME/.dotfiles/personal/wsl
+shale: composed layer 'work' from $HOME/.dotfiles/personal/work" "$shale_out" 'stdout'
+  assert_eq 'personal/wsl/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built tree'
+  assert_eq 'personal/work/.gitconfig' \
+    "$(cat "$HOME/.dotfiles/current/.gitconfig")" 'the built tree'
+}
+
+test_clone_every_missing_root_with_a_url_is_cloned() {
+  local personal_url
+  mkrepo personal .zshrc
+  personal_url=$repo_url
+  mkrepo work .gitconfig
+  conf "base personal $personal_url" "work work $repo_url"
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq "shale: cloning 'personal' from $personal_url into $HOME/.dotfiles/personal
+shale: cloning 'work' from $repo_url into $HOME/.dotfiles/work
+shale: composed layer 'base' from $HOME/.dotfiles/personal
+shale: composed layer 'work' from $HOME/.dotfiles/work" "$shale_out" 'stdout'
+  assert_eq 'personal/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built tree'
+  assert_eq 'work/.gitconfig' "$(cat "$HOME/.dotfiles/current/.gitconfig")" 'the built tree'
+}
+
+# The case that keeps a sync command cut from scope: shale obtains a layer it
+# has not got and never touches one it has.  git is not run at all on the second
+# build, which is the same claim the lazy prerequisite check makes.
+# shellcheck disable=SC2123
+test_clone_an_existing_checkout_is_left_alone() {
+  local saved
+  mkrepo personal .zshrc
+  conf "base personal $repo_url"
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_write "$HOME/.dotfiles/personal" UNTRACKED 'not in the repository'
+  sandbox_write "$HOME/.dotfiles/personal" .zshrc 'edited in the checkout'
+  stub_git
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 0 "$shale_status"
+  assert_empty "$(cat "$git_log")" 'git invocations'
+  assert_not_contains "$shale_out" 'cloning' 'stdout'
+  assert_eq 'not in the repository' \
+    "$(cat "$HOME/.dotfiles/personal/UNTRACKED")" 'the untracked marker'
+  assert_eq 'edited in the checkout' \
+    "$(cat "$HOME/.dotfiles/personal/.zshrc")" 'the edited file'
+  assert_eq 'edited in the checkout' \
+    "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built tree'
+}
+
+# git's own diagnosis is what says why, so it is neither captured nor
+# reformatted.  Nothing is left at either name: a half-populated directory at
+# the layer path is a tree the composer would happily walk.
+#
+# What is asserted of git's line is that it is there, on stderr, carrying the
+# path it was given: any line that is not shale's.  Every word of it - the
+# 'fatal: ' prefix included, which is where the last version of this case was
+# wrong - is a catalogue string that a German environment replaces wholesale;
+# what makes both halves stable is run_case pinning LC_ALL, and asserting the
+# prefix here is what gives that pin a case that fails without it.
+test_clone_a_url_that_is_not_a_repository_leaves_nothing_behind() {
+  local foreign
+  conf "base personal $CASE_DIR/repos/absent"
+  run_shale build
+  assert_status 1 "$shale_status"
+  foreign=$(printf '%s\n' "$shale_err" | grep -v '^shale:')
+  assert_contains "$foreign" 'fatal: ' "git's own stderr"
+  assert_contains "$foreign" "$CASE_DIR/repos/absent" "git's own stderr"
+  assert_contains "$shale_err" \
+    "shale: could not clone $CASE_DIR/repos/absent into $HOME/.dotfiles/personal" 'stderr'
+  assert_missing "$HOME/.dotfiles/personal"
+  assert_missing "$HOME/.dotfiles/.personal.cloning"
+  assert_missing "$HOME/.dotfiles/current"
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+# A clone that dies part-way is the realistic network failure, and the one a
+# url pointing at nothing never reaches: git has written a partial tree by then.
+# It must not survive under any name - at the layer path it is a tree the
+# composer would walk, and at the temporary one it would block the next build.
+# shellcheck disable=SC2123
+test_clone_a_partly_written_clone_is_removed() {
+  local saved
+  mkrepo personal .zshrc
+  conf "base personal $repo_url"
+  # $4 is the destination git was given: 'clone -- URL DEST'.
+  # shellcheck disable=SC2016  # the body runs in the stub, not here
+  stub_git 'mkdir -p "$4/objects" && printf half >"$4/HEAD"; exit 1'
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not clone $repo_url into $HOME/.dotfiles/personal" 'stderr'
+  assert_missing "$HOME/.dotfiles/.personal.cloning"
+  assert_missing "$HOME/.dotfiles/personal"
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# The clone in flight has to be named before the reap that clears it, for the
+# same reason the scratch tree does: a signal delivered partway through the
+# removal runs cleanup with CLONING still empty, and what is left is a tree
+# that is neither a clone nor gone.
+# shellcheck disable=SC2123
+test_clone_an_interrupt_while_a_stale_clone_is_reaped_leaves_nothing() {
+  local saved
+  mkrepo personal .zshrc
+  conf "base personal $repo_url"
+  sandbox_write "$HOME/.dotfiles/.personal.cloning/inner" DEEP 'from a killed run'
+  sandbox_write "$HOME/.dotfiles/.personal.cloning" TOP 'from a killed run'
+  # Half the reap, so the tree is still there when the interrupt lands.
+  # shellcheck disable=SC2016  # the body runs in the stub, not here
+  stub_interrupt rm '*/.*.cloning' '"$real" -rf "$2/inner" || exit $?'
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 130 "$shale_status"
+  assert_missing "$HOME/.dotfiles/.personal.cloning"
+  assert_missing "$HOME/.dotfiles/personal"
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# What a killed clone leaves is reaped, not cloned into: git refuses a
+# destination that is not empty, so without this the next build cannot recover.
+test_clone_a_stale_cloning_directory_is_reaped() {
+  mkrepo personal .zshrc
+  conf "base personal $repo_url"
+  sandbox_write "$HOME/.dotfiles/.personal.cloning" LEFTOVER 'from a killed run'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/.personal.cloning"
+  assert_missing "$HOME/.dotfiles/personal/LEFTOVER"
+  assert_eq 'personal/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built tree'
+}
+
+# The clone lands and the layer is still missing, which is a mistyped path under
+# a real checkout and nothing shale can obtain.  Also the order: the clone has
+# to have happened before this check could reach that wording.
+test_clone_a_layer_missing_inside_a_fresh_clone_is_the_path_error() {
+  mkrepo personal base/.zshrc
+  conf "base personal/base $repo_url" 'wsl personal/wsl2'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: layer 'wsl' has no directory at $HOME/.dotfiles/personal/wsl2, but its clone at $HOME/.dotfiles/personal exists" \
+    'stderr'
+  assert_contains "$shale_err" 'shale:   check the path on line 2' 'stderr'
+  assert_exists "$HOME/.dotfiles/personal/base/.zshrc" 'the clone'
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# Anything already at a clone root is left alone whatever it is, and the layer
+# check names it: cloning over it would mean removing something shale did not
+# put there.
+test_clone_a_root_that_is_not_a_directory_is_not_cloned_over() {
+  mkrepo personal .zshrc
+  conf "base personal $repo_url"
+  sandbox_write "$HOME/.dotfiles" personal 'not a directory'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: layer 'base': $HOME/.dotfiles/personal exists but is not a directory" 'stderr'
+  assert_eq 'not a directory' "$(cat "$HOME/.dotfiles/personal")" 'the planted file'
+  assert_not_contains "$shale_out" 'cloning' 'stdout'
+  assert_missing "$HOME/.dotfiles/.personal.cloning"
+}
+
+# A layer path deeper than its root is what makes this state reachable and
+# distinct: nothing is at the layer path, and the root is not a directory, so
+# every other arm of the check is false.  Told to add a url the line already
+# has, or to create a directory inside a regular file, you would do neither and
+# learn nothing; the defect is the file, and only this wording names it.
+#
+# Two layers, one with a url and one without, because the state does not depend
+# on the url: a url is not permission to clone over something already there.
+test_clone_a_file_at_a_clone_root_names_the_root_not_the_url() {
+  mkrepo personal base/.zshrc
+  conf "base personal/base $repo_url" 'work work/sub'
+  sandbox_write "$HOME/.dotfiles" personal 'not a directory'
+  sandbox_write "$HOME/.dotfiles" work 'not a directory either'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: layer 'base' has no directory at $HOME/.dotfiles/personal/base" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   its clone root $HOME/.dotfiles/personal exists but is not a directory" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: layer 'work' has no directory at $HOME/.dotfiles/work/sub" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   its clone root $HOME/.dotfiles/work exists but is not a directory" 'stderr'
+  assert_contains "$shale_err" 'shale:   remove it, or move it aside' 'stderr'
+  # The remedy that is a no-op, and the claim that is false.
+  assert_not_contains "$shale_err" 'no url' 'stderr'
+  assert_not_contains "$shale_err" 'add a url on that line' 'stderr'
+  assert_eq 'not a directory' "$(cat "$HOME/.dotfiles/personal")" 'the planted file'
+  assert_not_contains "$shale_out" 'cloning' 'stdout'
+  assert_missing "$HOME/.dotfiles/.personal.cloning"
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# The same state in the shape -e cannot see.
+test_clone_a_dangling_symlink_at_a_clone_root_names_the_root_not_the_url() {
+  mkrepo personal base/.zshrc
+  conf "base personal/base $repo_url"
+  sandbox_target "$HOME/.dotfiles" personal
+  ln -s "$HOME/.dotfiles/gone" "$sandbox_path" || fail 'could not link the root'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: layer 'base' has no directory at $HOME/.dotfiles/personal/base" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   its clone root $HOME/.dotfiles/personal exists but is not a directory" 'stderr'
+  assert_not_contains "$shale_err" 'no url' 'stderr'
+  assert_missing "$HOME/.dotfiles/gone"
+  assert_not_contains "$shale_out" 'cloning' 'stdout'
+  assert_missing "$HOME/.dotfiles/.personal.cloning"
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# The variant no -e test can see, and the one a removed clone leaves behind.
+test_clone_a_dangling_symlink_at_a_root_is_not_cloned_over() {
+  mkrepo personal .zshrc
+  conf "base personal $repo_url"
+  sandbox_target "$HOME/.dotfiles" personal
+  ln -s "$HOME/.dotfiles/gone" "$sandbox_path" || fail 'could not link the root'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: layer 'base': $HOME/.dotfiles/personal exists but is not a directory" 'stderr'
+  assert_not_contains "$shale_out" 'cloning' 'stdout'
+  assert_missing "$HOME/.dotfiles/gone"
+  assert_missing "$HOME/.dotfiles/.personal.cloning"
+}
+
+# git is a prerequisite of cloning, not of building.  The url is deliberately
+# one no clone could succeed from: an implementation that cloned eagerly fails
+# this case rather than passing it slowly.
+# shellcheck disable=SC2123
+test_clone_git_is_needed_only_when_a_clone_is() {
+  local tool found stub saved
+  conf "base personal $CASE_DIR/repos/absent"
+  mklayer personal .zshrc
+  sandbox_mkdir "$CASE_DIR/stub-bin"
+  stub=$sandbox_dir
+  for tool in env bash cat sed rm mkdir cp mv; do
+    found=$(command -v "$tool") || fail "$tool is not on PATH"
+    sandbox_leaf "$stub" "$tool" new
+    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
+  done
+  saved=$PATH
+  PATH=$stub
+  run_shale build
+  PATH=$saved
+  assert_status 0 "$shale_status"
+  assert_eq 'personal/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built tree'
+  assert_not_contains "$shale_out" 'cloning' 'stdout'
+}
+
+# shellcheck disable=SC2123
+test_clone_a_missing_git_stops_a_build_that_must_clone() {
+  local tool found stub saved
+  mkrepo personal .zshrc
+  conf "base personal $repo_url"
+  sandbox_mkdir "$CASE_DIR/stub-bin"
+  stub=$sandbox_dir
+  for tool in env bash cat sed rm mkdir cp mv; do
+    found=$(command -v "$tool") || fail "$tool is not on PATH"
+    sandbox_leaf "$stub" "$tool" new
+    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
+  done
+  saved=$PATH
+  PATH=$stub
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: git is not installed, and $HOME/.dotfiles/personal must be cloned from $repo_url" 'stderr'
+  assert_contains "$shale_err" \
+    'shale:   install it with your system package manager: shale installs nothing' 'stderr'
+  assert_missing "$HOME/.dotfiles/personal"
+  assert_missing "$HOME/.dotfiles/.personal.cloning"
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# A rename that fails after a whole clone has been fetched: the clone is kept
+# and named, because fetching it again is the one cost here that is not shale's
+# to spend twice.
+# shellcheck disable=SC2123
+test_clone_a_clone_that_cannot_be_moved_into_place_is_kept() {
+  local saved
+  mkrepo personal .zshrc
+  conf "base personal $repo_url"
+  stub_mv '*/.personal.cloning' 1
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not move the clone into place at $HOME/.dotfiles/personal" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   the clone is at $HOME/.dotfiles/.personal.cloning" 'stderr'
+  # Keeping it is only worth anything if the message says how to use it: the
+  # next build reaps this name and fetches the whole thing again.
+  assert_contains "$shale_err" \
+    "shale:   move it into place with: mv $HOME/.dotfiles/.personal.cloning $HOME/.dotfiles/personal, or the next build fetches it again" \
+    'stderr'
+  assert_eq 'personal/.zshrc' \
+    "$(cat "$HOME/.dotfiles/.personal.cloning/.zshrc")" 'the kept clone'
+  assert_missing "$HOME/.dotfiles/personal"
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# The window between the check that the root is missing and the rename that
+# fills it is as long as a network is.  mv into a directory that exists puts the
+# source inside it, so a clone that lost that race would otherwise land at
+# ~/.dotfiles/personal/.personal.cloning and nothing after it would notice.
+# shellcheck disable=SC2123
+test_clone_a_root_that_appears_during_the_clone_is_not_nested_into() {
+  local saved
+  mkrepo personal .zshrc
+  conf "base personal $repo_url"
+  # shellcheck disable=SC2016  # the body runs in the stub, not here
+  stub_git 'mkdir -p "$HOME/.dotfiles/personal"'
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/personal appeared while 'personal' was being cloned" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   the clone is at $HOME/.dotfiles/.personal.cloning" 'stderr'
+  # Nothing reaps this one: the reap runs only for a root about to be cloned,
+  # and a root that exists is skipped, so the message must say so.
+  assert_contains "$shale_err" \
+    "shale:   no build will touch it while $HOME/.dotfiles/personal exists: use it, or remove it" \
+    'stderr'
+  assert_missing "$HOME/.dotfiles/personal/.personal.cloning"
+  assert_eq 'personal/.zshrc' \
+    "$(cat "$HOME/.dotfiles/.personal.cloning/.zshrc")" 'the kept clone'
   assert_missing "$HOME/.dotfiles/current"
 }
 
@@ -1710,6 +2205,26 @@ test_doctor_an_uncloned_layer_with_a_url_is_noted_without_failing() {
     "shale: layer 'base' has no directory at $HOME/.dotfiles/personal/base yet" 'stdout'
   assert_contains "$shale_out" "shale:   its clone root 'personal' has a url: url-one" 'stdout'
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# A url does not mean shale can obtain the root: it clones only where nothing
+# is, so a root that is not a directory is a defect in the setup and not a
+# state shale fixes.  Uncounted, this reports 'no problems found' on a setup
+# where build cannot get past the layer check - the two commands disagreeing
+# about one state, which is the worst thing a checker can do.
+test_doctor_a_clone_root_that_is_not_a_directory_is_a_finding() {
+  conf "base personal/base $CASE_DIR/repos/absent"
+  sandbox_write "$HOME/.dotfiles" personal 'not a directory'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: layer 'base' has no directory at $HOME/.dotfiles/personal/base" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   its clone root $HOME/.dotfiles/personal exists but is not a directory" 'stdout'
+  assert_contains "$shale_out" 'shale:   remove it, or move it aside' 'stdout'
+  assert_not_contains "$shale_out" 'has a url' 'stdout'
+  assert_not_contains "$shale_out" 'no problems found' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
 }
 
 test_doctor_a_missing_dotfiles_directory_is_a_finding() {
@@ -3083,6 +3598,10 @@ run_case() {
     SHALE_RUNS=0
     HOME=$case_home
     export HOME
+    # Every message this suite asserts on comes from git or stow, and both
+    # translate theirs.  Without this the assertions pass or fail according to
+    # the locale of whoever is running them.
+    export LC_ALL=C
     export GIT_CONFIG_GLOBAL=/dev/null
     export GIT_CONFIG_SYSTEM=/dev/null
     export GIT_AUTHOR_NAME='shale tests'
