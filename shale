@@ -13,7 +13,31 @@ fi
 set -uo pipefail
 
 PROG=shale
-DOTFILES=${HOME-}/.dotfiles
+
+# A trailing slash on HOME is otherwise carried into every path shale prints -
+# '$HOME//.dotfiles/current' - and into the comparisons which makes against it,
+# where "$HOME"/* matches nothing at all under a home that already ends in one,
+# so every absolute path is reported as being outside $HOME.  Stripped once,
+# here, so that nothing below has to spell it twice.
+case "${HOME-}" in
+  '' | /) ;;
+  */)
+    # The whole trailing run, cut in one go.  A HOME of nothing but slashes
+    # leaves nothing to keep, and that is the root directory rather than an
+    # empty path: an empty HOME would put every path shale prints at /.
+    HOME=${HOME%"${HOME##*[!/]}"}
+    [ -n "$HOME" ] || HOME=/
+    ;;
+esac
+
+# $HOME as the left-hand side of a join, which is the same string for every home
+# but the root directory: there $HOME is '/' and '$HOME/.dotfiles' is '//.dotfiles'.
+# HOME itself keeps the slash, because it is also printed on its own and an empty
+# path is not a home anyone can be told to look in.
+HOME_PREFIX=${HOME-}
+HOME_PREFIX=${HOME_PREFIX%/}
+
+DOTFILES=$HOME_PREFIX/.dotfiles
 CONF=$DOTFILES/shale.conf
 CUR=$DOTFILES/current
 NEW=$DOTFILES/current.new
@@ -83,6 +107,13 @@ config_error() {
   emit "$@"
 }
 
+# One literal carriage return, matched as "$CR" by parse_config's CRLF check.
+# Assigned here rather than written into that case pattern, so the pattern is a
+# quoted parameter expansion, which is a literal on every bash there is; $'\r'
+# inside a pattern is a question about the 3.2 floor that nothing here can answer
+# by running it.
+CR=$'\r'
+
 # A layer name and every component of a layer path share one grammar.
 valid_component() {
   case "${1-}" in
@@ -116,7 +147,7 @@ valid_path() {
 # and returns non-zero; it must never exit, because doctor calls it bare and
 # goes on to report the rest of its findings.
 parse_config() {
-  local line lineno name path url extra root ok dup found i
+  local line lineno name path url extra root ok dup found i cr cr_seen qconf
   LAYER_NAMES=()
   LAYER_PATHS=()
   LAYER_LINES=()
@@ -127,6 +158,20 @@ parse_config() {
   CONFIG_ERRORS=0
 
   if [ ! -e "$CONF" ]; then
+    # -e cannot tell 'nothing is there' from 'nothing can be learnt about it':
+    # a $DOTFILES that cannot be searched fails every test of a path inside it,
+    # and reporting that as a missing config sends the reader to create a file
+    # that is already there.  Search permission on the directory holding it is
+    # what tells the two apart.
+    if [ -d "$DOTFILES" ] && [ ! -x "$DOTFILES" ]; then
+      # 'search' rather than 'read': this arm is reached on the search bit
+      # alone, and at mode 0444 the directory is perfectly readable - it is
+      # opening a file inside it that the missing bit refuses.
+      config_error "cannot search $DOTFILES: permission denied" \
+        "shale cannot tell whether there is a config file at $CONF" \
+        "check the permissions on that directory"
+      return 1
+    fi
     config_error "no config file at $CONF" \
       "list one layer per line, lowest precedence first: NAME PATH [URL]"
     return 1
@@ -140,11 +185,33 @@ parse_config() {
     return 1
   fi
 
+  # For the remedy the carriage-return arm prints.  Hoisted out of the loop
+  # because it does not vary, and because a call taking "$CONF" inside a loop
+  # that reads from it is a shellcheck SC2094 - it cannot know the function does
+  # not write the file.
+  shell_quote "$CONF"
+  qconf=$QUOTED
+
+  cr_seen=0
   lineno=0
   # The '|| [ -n "$line" ]' arm is what parses a last line with no newline
   # after it, which read reports as a failure having still assigned it.
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
+    # Noted here and reported below, once the fields say whether this line
+    # carries a record: a carriage return is invisible in every message that
+    # could quote it, so a record is otherwise rejected as "invalid layer path
+    # 'personal/base'" about a path that looks exactly right.  Cut from the line
+    # before the fields are read, so that the record the reader sees is the one
+    # shale describes, and so a comment or a blank line carrying one is the
+    # comment or the blank line it looks like.
+    cr=0
+    case "$line" in
+      *"$CR"*)
+        cr=1
+        line=${line//$CR/}
+        ;;
+    esac
     name=
     path=
     url=
@@ -175,6 +242,29 @@ EOF
     case "$name" in
       '' | '#'*) continue ;;
     esac
+
+    # Only now, where the line is known to carry a record: shale reads nothing
+    # from a comment or a blank line, so a carriage return on one changes
+    # nothing about the config and refusing it would fail a build that the same
+    # file with one line ending fixed completes.  Collected like every other
+    # record error rather than abandoning the parse, so the records already read
+    # are still there for doctor to measure the directories in $DOTFILES against.
+    if [ "$cr" -eq 1 ]; then
+      # One finding per record, and the explanation with the first of them: a
+      # CRLF file carries the defect on every line, and the reader who has been
+      # told once what a carriage return means and how to strip them learns
+      # nothing from being told it again for each of five layers.
+      if [ "$cr_seen" -eq 0 ]; then
+        cr_seen=1
+        config_error "$CONF:$lineno: this line contains a carriage return" \
+          "a carriage return here usually means DOS (CRLF) line endings, which shale's line-oriented format does not accept" \
+          "if that is what this file has, strip them with: shale_conf=\$(tr -d '\\r' < $qconf) && printf '%s\\n' \"\$shale_conf\" > $qconf" \
+          "a carriage return inside a name or a path is not that, and stripping one renames the layer silently"
+      else
+        config_error "$CONF:$lineno: this line contains a carriage return"
+      fi
+      continue
+    fi
 
     if [ -z "$path" ]; then
       config_error "$CONF:$lineno: expected 'NAME PATH [URL]', got only '$name'" \
@@ -689,6 +779,10 @@ self_relative_path() {
     SELF_REL=$base
     return 0
   fi
+  # pwd -P answers '/' for the root directory and for nothing else, which is the
+  # one home whose joins below would come out doubled.  After the equality test,
+  # which that same home passes for a script sitting directly in it.
+  home=${home%/}
   # The '/' in the pattern is what stops a sibling like "$HOME-elsewhere" from
   # matching.  The one appended to dir would matter only for dir = home, which
   # the branch above has already returned from.
@@ -948,7 +1042,7 @@ which_normalise() {
   # shellcheck disable=SC2088  # a tilde to match, not one to expand
   case "$path" in
     '~') path=$HOME ;;
-    '~/'*) path=$HOME/${path#'~/'} ;;
+    '~/'*) path=$HOME_PREFIX/${path#'~/'} ;;
   esac
 
   # A path inside the built tree or inside a layer, which is what tab completion
@@ -991,7 +1085,10 @@ which_normalise() {
   fi
 
   case "$path" in
-    "$HOME"/*) path=${path#"$HOME"/} ;;
+    # $HOME_PREFIX rather than $HOME, so that a home of '/' compares as '/*'
+    # rather than as '//*', which matches no absolute path at all; the arm below
+    # still spells $HOME, which is the whole of it and not a join.
+    "$HOME_PREFIX"/*) path=${path#"$HOME_PREFIX"/} ;;
     "$HOME") path= ;;
     # A well-formed invocation naming a state shale will not act on, so this is
     # a diagnosis and not a usage error.  It must also never fall through: an
@@ -1046,6 +1143,43 @@ which_normalise() {
 
   WHICH_REL=$path
   return 0
+}
+
+# The first directory on the way from $1 to the path $2 inside it that exists
+# but cannot be searched, in OBSCURED; non-zero when every directory on that way
+# can be searched.
+#
+# Without this, a layer that provides the path answers 'no' to both -e and -L
+# exactly as a layer that does not - the tests fail with EACCES rather than
+# ENOENT - and which names the layer below it the winner, confidently and
+# wrongly, while build refuses the same setup outright.  Only search permission
+# matters: reading a directory is what listing it needs, and nothing here lists
+# one.
+#
+# The walk starts at $DOTFILES rather than at the layer directory, with the
+# layer's own path as the first components of $2: a layer path has more than one
+# component in every example there is, and an intermediate one that cannot be
+# searched makes the layer directory itself answer 'no' to -d, which would let
+# the loop below decide there was nothing in the way.
+which_obscured() {
+  local here=$1 rest=$2 component
+  OBSCURED=
+  while :; do
+    if [ -d "$here" ] && [ ! -x "$here" ]; then
+      OBSCURED=$here
+      return 0
+    fi
+    # The leaf needs no search permission of its own, only on the directory
+    # holding it, which is the $here this arm leaves the loop from.
+    case "$rest" in
+      */*)
+        component=${rest%%/*}
+        rest=${rest#*/}
+        ;;
+      *) return 1 ;;
+    esac
+    here=$here/$component
+  done
 }
 
 # How $1 is composed, in WHICH_KIND, and how it is shown, in WHICH_SHOW.
@@ -1457,7 +1591,14 @@ cmd_doctor() {
     path=${LAYER_PATHS[$i]}
     root=${path%%/*}
     dir=$DOTFILES/$path
-    if [ -d "$dir" ]; then
+    if [ -d "$dir" ] && { [ ! -r "$dir" ] || [ ! -x "$dir" ]; }; then
+      # '-d' alone is true for a directory nothing can be got out of, so without
+      # this a layer at mode 0000 passes doctor while build stops dead at it.
+      # The condition and the first line are compose_dir's, so the two commands
+      # say the same thing about the same directory.
+      finding "layer '$name': cannot read $dir: permission denied" \
+        'shale composes a layer by walking it, and build stops there'
+    elif [ -d "$dir" ]; then
       :
     elif [ -e "$dir" ] || [ -L "$dir" ]; then
       finding "layer '$name': $dir exists but is not a directory"
@@ -1484,7 +1625,16 @@ cmd_doctor() {
 
   # Directories only, and nothing whose name begins with '.': a '.git' or a
   # '.stowrc' beside the config is not a stray layer.
-  if [ -d "$DOTFILES" ]; then
+  #
+  # Both permission bits are tested first, and neither is enough on its own:
+  # without -r the glob cannot list the directory and expands to itself, and
+  # without -x every -d test inside is false whatever the glob found.  Either way
+  # the scan finds nothing and says nothing, which is a clean bill of health for
+  # a directory it never read.
+  if [ -d "$DOTFILES" ] && { [ ! -r "$DOTFILES" ] || [ ! -x "$DOTFILES" ]; }; then
+    finding "cannot list $DOTFILES: permission denied" \
+      'shale cannot tell which of the directories in it are layers and which are strays'
+  elif [ -d "$DOTFILES" ]; then
     for entry in "$DOTFILES"/*; do
       # Also the arm the unmatched glob lands in.
       [ -d "$entry" ] || continue
@@ -1525,6 +1675,12 @@ cmd_doctor() {
   # man stow, RESOURCE FILES: an option that may be given more than once -
   # --ignore is the one that matters - is appended to the command line rather
   # than overridden by it, so nothing shale passes can defend against this.
+  #
+  # The two locations are the two stow reads: '~/.stowrc', and './.stowrc' from
+  # the directory it is run in.  $DOTFILES is that directory because cmd_apply
+  # runs stow inside 'cd "$DOTFILES"' - which is what makes the second file a
+  # known one rather than whichever directory the user happened to be in.  Move
+  # that cd and this check silently stops covering the file that takes effect.
   for entry in "${HOME-}/.stowrc" "$DOTFILES/.stowrc"; do
     if [ -e "$entry" ] || [ -L "$entry" ]; then
       note "a stow resource file exists at $entry" \
@@ -1552,7 +1708,7 @@ cmd_doctor() {
 # Reads no build output but the one note at the end: the answer is what the
 # layers say, so it is the same before the first build as after it.
 cmd_which() {
-  local arg=${1-} rel path i n lower upper keyword column width
+  local arg=${1-} rel path i n lower upper keyword column width obscured
 
   parse_config || exit 1
   which_normalise "$arg" || exit 1
@@ -1563,18 +1719,38 @@ cmd_which() {
   WHICH_NAMES=()
   WHICH_KINDS=()
   WHICH_SHOWS=()
+  obscured=0
   i=${#LAYER_NAMES[@]}
   while [ "$i" -gt 0 ]; do
     i=$((i - 1))
     path=$DOTFILES/${LAYER_PATHS[$i]}/$rel
     # -L as well as -e: a layer may legitimately ship a symlink whose target is
     # not inside the tree, and -e alone reports that layer as not providing it.
-    { [ -e "$path" ] || [ -L "$path" ]; } || continue
-    which_describe "$path"
-    WHICH_NAMES+=("${LAYER_NAMES[$i]}")
-    WHICH_KINDS+=("$WHICH_KIND")
-    WHICH_SHOWS+=("$WHICH_SHOW")
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      which_describe "$path"
+      WHICH_NAMES+=("${LAYER_NAMES[$i]}")
+      WHICH_KINDS+=("$WHICH_KIND")
+      WHICH_SHOWS+=("$WHICH_SHOW")
+      continue
+    fi
+    # Only where the tests above said no, which is the only case their answer
+    # can be a permissions failure rather than a fact: a path that was found was
+    # found through directories that could all be searched.
+    if which_obscured "$DOTFILES" "${LAYER_PATHS[$i]}/$rel"; then
+      # 'search', as the parser says of $DOTFILES and for the same reason:
+      # which_obscured tests the search bit alone, and a directory at mode 0444
+      # is one this reads nothing from and lists perfectly well.
+      emit "layer '${LAYER_NAMES[$i]}': cannot search $OBSCURED: permission denied" \
+        "shale cannot tell whether that layer provides '$rel'"
+      obscured=$((obscured + 1))
+    fi
   done
+
+  # No partial answer, and no answer at all: the layer that could not be read
+  # may be the one that wins, and a report naming any other layer the winner
+  # would be wrong in the one way this command must never be wrong.
+  [ "$obscured" -eq 0 ] ||
+    die "cannot say which layer provides '$rel'"
 
   n=${#WHICH_NAMES[@]}
   if [ "$n" -eq 0 ]; then

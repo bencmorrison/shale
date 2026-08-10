@@ -382,14 +382,53 @@ sandbox_write() {
 
 # Every case reaches shale through this, never through $SHALE or any other path
 # to the script; a meta case enforces that mechanically.
+#
+# '--script PATH' runs that copy of the script instead of the repo's, which is
+# what the self-shadow cases need: the check reads ${BASH_SOURCE[0]}, so only a
+# script genuinely under $HOME exercises it, and the repo's copy never is.
+#
+# Two proofs, and neither is enough alone.  sandbox_leaf says the path is inside
+# the test root and is not a symlink; it says nothing about anything being there,
+# and its default mode accepts a name with nothing at it at all.  The regular-file
+# test is what closes that, because the fallback for a name that does not exist
+# is not a failure: a path with no '/' in it is handed to bash, and bash looks a
+# bare command word up on PATH - so '--script echo' ran /usr/bin/echo.  That
+# spelling has to stay reachable, being the one input that makes
+# ${BASH_SOURCE[0]} arrive with no directory part at all.
+#
+# 'bash --' rather than 'bash', because bash reads a leading '-' as its own
+# option: '--script -c' became 'bash -c <the next argument>', which runs an
+# arbitrary command word.  The '--' still leaves ${BASH_SOURCE[0]} bare.
 shale() {
+  local script
   require_sandbox
-  "$SHALE" ${1+"$@"}
+  if [ "${1-}" != --script ]; then
+    "$SHALE" ${1+"$@"}
+    return $?
+  fi
+  script=${2-}
+  [ -n "$script" ] || guard_trip '--script was given an empty path'
+  shift 2
+  case "$script" in
+    */*) sandbox_leaf "${script%/*}" "${script##*/}" ;;
+    # Relative to the caller's directory, which is what running it as a bare
+    # word means and therefore what has to be proven.
+    *) sandbox_leaf . "$script" ;;
+  esac
+  [ -f "$sandbox_path" ] ||
+    guard_trip "--script names no regular file: $sandbox_path"
+  case "$script" in
+    */*) "$script" ${1+"$@"} ;;
+    *) bash -- "$script" ${1+"$@"} ;;
+  esac
 }
 
 # Runs shale and captures its status, stdout and stderr into shale_status,
 # shale_out and shale_err.  Every invocation is also appended to the case's
-# transcript, which the failure report prints.
+# transcript, which the failure report prints.  A leading '--script PATH' is
+# passed through to the wrapper, which is where the containment proof for it
+# lives; the transcript records it like any other argument, so what ran is what
+# the report shows.
 run_shale() {
   local n out err transcript
   SHALE_RUNS=$((SHALE_RUNS + 1))
@@ -916,6 +955,179 @@ test_config_an_unreadable_config_reports_permissions() {
   assert_contains "$shale_err" \
     "shale: cannot read $HOME/.dotfiles/shale.conf: permission denied" 'stderr'
   assert_not_contains "$shale_err" 'no layers' 'stderr'
+}
+
+# The '-e' test that decides this message answers 'no' both when the file is
+# absent and when nothing about it can be learnt, and the remedy for the two is
+# not the same: told there is no config, the reader writes one over the config
+# they already have, or tries to and cannot.  The mode goes back before the
+# assertions so that a failing run still leaves a removable sandbox.
+#
+# 0444 is the mode that decides the wording: the directory is readable through
+# it and lists perfectly, and what the missing bit refuses is opening the file
+# inside it, so 'cannot read' would be a claim the reader can disprove with ls.
+test_config_an_unsearchable_dotfiles_directory_is_not_a_missing_config() {
+  local mode
+  skip_if_root
+  for mode in 0000 0444; do
+    conf 'base personal/base'
+    mklayer personal/base .zshrc
+    chmod "$mode" "$HOME/.dotfiles" || fail "could not set mode $mode"
+    run_shale build
+    chmod 0755 "$HOME/.dotfiles" || fail 'could not restore the mode'
+    assert_status 1 "$shale_status" "$mode exit status"
+    assert_contains "$shale_err" \
+      "shale: cannot search $HOME/.dotfiles: permission denied" "$mode stderr"
+    assert_contains "$shale_err" \
+      "shale:   shale cannot tell whether there is a config file at $HOME/.dotfiles/shale.conf" "$mode stderr"
+    assert_not_contains "$shale_err" 'no config file at' "$mode stderr"
+  done
+}
+
+# A carriage return is invisible in a message that quotes the field carrying it,
+# so a CRLF config is rejected as an invalid path that looks exactly right.  The
+# diagnosis has to name the ending, and the misleading line must not be printed
+# beside it - a reader given both compares two spellings of 'personal/base' and
+# finds them identical.
+#
+# The second spelling is a carriage return inside a field, which the same rule
+# catches: the line carries a record, and the record it carries is not the one
+# the file appears to hold.  Stripping that one renames the layer instead of
+# fixing anything, which is why the message says so rather than promising the
+# conversion is the answer.
+test_config_a_crlf_config_names_the_line_endings() {
+  local spelling
+  for spelling in endings field; do
+    sandbox_target "$HOME/.dotfiles" shale.conf
+    case "$spelling" in
+      endings) printf 'base personal/base\r\nlocal local\r\n' ;;
+      field) printf 'ba\rse\tpersonal/base\n' ;;
+    esac >"$sandbox_path" || fail "could not write $sandbox_path"
+    mklayer personal/base .zshrc
+    run_shale build
+    assert_status 1 "$shale_status" "$spelling exit status"
+    assert_contains "$shale_err" \
+      "shale: $HOME/.dotfiles/shale.conf:1: this line contains a carriage return" \
+      "$spelling stderr"
+    assert_contains "$shale_err" 'DOS (CRLF) line endings' "$spelling stderr"
+    assert_contains "$shale_err" \
+      'shale:   a carriage return inside a name or a path is not that, and stripping one renames the layer silently' \
+      "$spelling stderr"
+    assert_not_contains "$shale_err" 'invalid layer path' "$spelling stderr"
+    assert_not_contains "$shale_err" 'invalid layer name' "$spelling stderr"
+    assert_missing "$HOME/.dotfiles/current"
+  done
+}
+
+# One finding per record, because that is what every other record error does and
+# what doctor's stray scan needs; the explanation and the remedy once, because a
+# CRLF file carries the defect on every line and a five-layer config otherwise
+# spends twenty lines saying one thing five times.
+test_config_a_crlf_config_explains_itself_once() {
+  local line findings explained remedies
+  sandbox_target "$HOME/.dotfiles" shale.conf
+  printf 'base personal/base\r\nwsl personal/wsl\r\nlocal local\r\n' >"$sandbox_path" ||
+    fail "could not write $sandbox_path"
+  mklayer personal/base .zshrc
+  mklayer personal/wsl .zshrc
+  mklayer local .zshrc
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  findings=0
+  explained=0
+  remedies=0
+  while IFS= read -r line; do
+    case "$line" in
+      *'this line contains a carriage return'*) findings=$((findings + 1)) ;;
+      *'usually means DOS (CRLF) line endings'*) explained=$((explained + 1)) ;;
+      *'strip them with:'*) remedies=$((remedies + 1)) ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq 3 "$findings" 'the number of carriage-return findings'
+  assert_eq 1 "$explained" 'the number of times the endings are explained'
+  assert_eq 1 "$remedies" 'the number of times the remedy is printed'
+  # One per record, so the count the report ends with is the count of records
+  # refused rather than the count of lines printed.
+  assert_contains "$shale_out" 'shale: 3 problems found' 'stdout'
+  # The lines after the first say which line they are about and nothing else.
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/shale.conf:3: this line contains a carriage return" 'stdout'
+}
+
+# The remedy is a command the reader pastes, so it has to survive a $HOME with a
+# space in it, and it has to leave the file it rewrites where it was: a config
+# reached through a symlink is supported, and 'tr ... > new && mv new conf'
+# replaces the link with a regular file, leaving the repo's copy still carrying
+# the endings for the next pull to restore.  Writing back through the original
+# path keeps the link, the inode and the mode, and needs no second name that
+# might already be a file.
+test_config_the_crlf_remedy_is_quoted_and_writes_back_in_place() {
+  local conf_path
+  conf_path=$HOME/.dotfiles/shale.conf
+  sandbox_target "$HOME/.dotfiles" shale.conf
+  printf 'base personal/base\r\n' >"$sandbox_path" ||
+    fail "could not write $sandbox_path"
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale:   if that is what this file has, strip them with: shale_conf=\$(tr -d '\\r' < '$conf_path') && printf '%s\\n' \"\$shale_conf\" > '$conf_path'" \
+    'stderr'
+  assert_not_contains "$shale_err" '.unix' 'stderr'
+  assert_not_contains "$shale_err" ' mv ' 'stderr'
+}
+
+# One stray carriage return is one bad record, not a bad file: shale reads
+# nothing from a comment or a blank line, so a build that would have succeeded
+# still does.  A CRLF file has one on every line and every record is refused
+# anyway, so nothing is let through by this that was not before.
+test_config_a_carriage_return_off_a_record_changes_nothing() {
+  sandbox_target "$HOME/.dotfiles" shale.conf
+  printf '# a comment\r\n\r\nbase personal/base\n' >"$sandbox_path" ||
+    fail "could not write $sandbox_path"
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_err" 'carriage return' 'stderr'
+  assert_exists "$HOME/.dotfiles/current/.zshrc"
+}
+
+# A record refused for its line ending must not take the records read before it
+# down as well: doctor measures the directories in ~/.dotfiles against the
+# layers it parsed, so a parse that threw them away reported every configured
+# layer root as a stray - "a leftover stow package, a stray clone, or a layer you
+# removed from the config" about four directories the file names on the four
+# lines above the bad one.
+test_config_a_carriage_return_on_one_line_keeps_the_layers_above_it() {
+  local line count
+  sandbox_target "$HOME/.dotfiles" shale.conf
+  printf 'base personal/base\nwsl personal/wsl\nwork work\nlocal local\nlast last\r\n' \
+    >"$sandbox_path" || fail "could not write $sandbox_path"
+  mklayer personal/base .zshrc
+  mklayer personal/wsl .zshrc
+  mklayer work .zshrc
+  mklayer local .zshrc
+  mklayer last .zshrc
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/shale.conf:5: this line contains a carriage return" 'stdout'
+  assert_not_contains "$shale_out" "$HOME/.dotfiles/personal is not a configured layer" 'stdout'
+  assert_not_contains "$shale_out" "$HOME/.dotfiles/work is not a configured layer" 'stdout'
+  assert_not_contains "$shale_out" "$HOME/.dotfiles/local is not a configured layer" 'stdout'
+  count=0
+  while IFS= read -r line; do
+    case "$line" in
+      *'is not a configured layer'*) count=$((count + 1)) ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  # Only the refused record's own root, which is a stray for exactly the reason
+  # every other refused record's root is.
+  assert_eq 1 "$count" 'the number of stray-directory notes'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
 }
 
 test_config_a_config_with_no_records_reports_no_layers() {
@@ -2981,6 +3193,33 @@ test_apply_a_stowrc_in_the_working_directory_is_not_read() {
   assert_missing "$CASE_DIR/elsewhere/.zshrc" 'the directory the resource file named'
 }
 
+# The positive half of the pair above, and what doctor's resource-file check
+# rests on: stow reads ./.stowrc from the directory it is run in, and the
+# directory apply runs it in is ~/.dotfiles - which is why that is the second
+# location doctor looks at.  Move the cd and the check silently starts naming a
+# file stow never reads, with every other case still green.  The stub records the
+# directory rather than the real stow being asked to demonstrate it, so this
+# asserts shale's half of the claim and nothing about any version of stow.
+# shellcheck disable=SC2123  # PATH is prefixed on purpose and restored below
+test_apply_runs_stow_in_the_dotfiles_directory() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$CASE_DIR/stub-bin" stow \
+    '#!/usr/bin/env bash' \
+    "pwd -P >\"$CASE_DIR/stow-cwd\"" \
+    'exit 0'
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+  saved=$PATH
+  PATH=$sandbox_dir:$PATH
+  run_shale apply
+  PATH=$saved
+  assert_status 0 "$shale_status"
+  assert_exists "$CASE_DIR/stow-cwd" 'the marker the stub writes'
+  assert_eq "$HOME/.dotfiles" "$(cat "$CASE_DIR/stow-cwd")" \
+    'the directory stow was run in'
+}
+
 # A build that stopped must not be followed by a stow: current is then either
 # absent or the previous tree, and relinking $HOME at either is worse than doing
 # nothing.  The stub records being run at all, so the claim asserted is that stow
@@ -3327,6 +3566,95 @@ test_doctor_notes_only_unrecognised_directories() {
   assert_status 0 "$shale_status"
   assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The scan is a glob and a -d test, and a directory that cannot be listed or
+# cannot be searched defeats one each: with no read bit the glob expands to
+# itself, with no search bit every -d inside is false.  Both leave the scan
+# silent, which on a directory doctor never read is a clean bill of health for a
+# setup no build can get through.  0111 is the interesting mode because the
+# config is still readable through it, so nothing else in the report says a word.
+test_doctor_a_dotfiles_directory_it_cannot_read_is_a_finding() {
+  local mode
+  skip_if_root
+  for mode in 0111 0444; do
+    conf 'base personal/base'
+    mklayer personal/base .zshrc
+    sandbox_mkdir "$HOME/.dotfiles/stray"
+    chmod "$mode" "$HOME/.dotfiles" || fail "could not set mode $mode"
+    run_shale doctor
+    chmod 0755 "$HOME/.dotfiles" || fail 'could not restore the mode'
+    assert_status 1 "$shale_status" "$mode exit status"
+    assert_contains "$shale_out" \
+      "shale: cannot list $HOME/.dotfiles: permission denied" "$mode stdout"
+    assert_not_contains "$shale_out" 'no problems found' "$mode stdout"
+  done
+}
+
+# The same defect one level down, and the reason doctor cannot settle for '-d':
+# that test is true of a directory nothing can be got out of, so a layer at mode
+# 0000 collected a clean bill of health from a doctor that had not looked in it
+# and could not have.  The three modes are the three ways a walk of it fails, and
+# each is asserted against build's own refusal in the same case: doctor exists to
+# say what build would say before build is run, so a disagreement here is the
+# whole defect however the message is worded.
+test_doctor_a_layer_directory_it_cannot_read_is_a_finding() {
+  local mode dir doctor_out doctor_status
+  skip_if_root
+  dir=$HOME/.dotfiles/personal/base
+  for mode in 0000 0111 0444; do
+    conf 'base personal/base'
+    mklayer personal/base .zshrc
+    chmod "$mode" "$dir" || fail "could not set mode $mode"
+    run_shale doctor
+    doctor_out=$shale_out
+    doctor_status=$shale_status
+    run_shale build
+    chmod 0755 "$dir" || fail 'could not restore the mode'
+    assert_status 1 "$doctor_status" "$mode doctor exit status"
+    assert_contains "$doctor_out" \
+      "shale: layer 'base': cannot read $dir: permission denied" "$mode doctor stdout"
+    assert_contains "$doctor_out" 'shale: 1 problem found' "$mode doctor stdout"
+    assert_not_contains "$doctor_out" 'no problems found' "$mode doctor stdout"
+    assert_status 1 "$shale_status" "$mode build exit status"
+    assert_contains "$shale_err" \
+      "shale: cannot read $dir: permission denied" "$mode build stderr"
+  done
+}
+
+# A trailing slash on HOME is the environment's spelling, not a defect, and every
+# path in the report is doubled by it: '$HOME//.dotfiles/current' is what the
+# reader is told to look at, and it is a different string from the one shale
+# prints for the same home spelt without it.
+#
+# The link audit is here because it is the one check that hands $HOME to another
+# program: chkstow's target must end in exactly one slash - File::Find will not
+# descend a symlinked top directory without one, and a second puts a '//' in the
+# middle of every path it prints back - so a home that arrives with one has to
+# leave this with the same target as a home that does not.
+test_doctor_a_home_with_a_trailing_slash_prints_single_slashes() {
+  local home home_slash
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_mkdir "$HOME/.dotfiles/common"
+  home=$HOME
+  home_slash=$home/
+  HOME=$home_slash
+  run_shale apply
+  assert_status 0 "$shale_status" 'the first apply'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the second apply'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $home/.config/nvim/init.lua points at $home/.dotfiles/current/.config/nvim/init.lua, which the built tree no longer provides" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale: $home/.dotfiles/common is not a configured layer" 'stdout'
+  assert_not_contains "$shale_out" '//' 'stdout'
 }
 
 # Both locations stow reads: ~/.stowrc, and the one in the directory apply runs
@@ -4003,15 +4331,19 @@ EOF
 }
 
 # The self-shadow check reads ${BASH_SOURCE[0]}, so nothing but a script that is
-# genuinely under $HOME exercises it, and the repo's own copy never is.  These
-# are the cases that cannot go through run_shale: each proves the sandbox itself
-# first, and then captures exactly what the wrapper would have captured.
+# genuinely under $HOME exercises it, and the repo's own copy never is.  That is
+# what run_shale's '--script' is for: the copy is still what runs, and the guard,
+# the capture files and the transcript stay in the one place every other case
+# gets them from.
 #
 # The variants are the shapes ${BASH_SOURCE[0]} arrives in and the shapes a
-# layer can provide the path in.  'bare' has no '/' in it at all, which is the
-# one spelling for which the directory cannot be taken from the invocation.
+# layer can provide the path in.  The two relative spellings need the copy's own
+# directory to be the current one, so the case cds and cds back rather than
+# running them in a subshell: run_shale sets globals, and a subshell would drop
+# every one of them.  'bare' has no '/' in it at all, which is the one spelling
+# for which the directory cannot be taken from the invocation.
 test_doctor_a_layer_providing_the_running_script_is_a_finding() {
-  local copy dir variant out err status text
+  local copy dir variant
   conf 'base personal/base' 'local local'
   mklayer personal/base .zshrc
   sandbox_mkdir "$HOME/.local/bin"
@@ -4032,32 +4364,31 @@ test_doctor_a_layer_providing_the_running_script_is_a_finding() {
         ;;
       *) mklayer local .local/bin/shale ;;
     esac
-    sandbox_leaf "$CASE_DIR" "$variant.out" new
-    out=$sandbox_path
-    sandbox_leaf "$CASE_DIR" "$variant.err" new
-    err=$sandbox_path
-    require_sandbox
-    status=0
     case "$variant" in
-      relative) (cd "$dir" && ./shale doctor) >"$out" 2>"$err" || status=$? ;;
-      bare) (cd "$dir" && bash shale doctor) >"$out" 2>"$err" || status=$? ;;
-      *) "$copy" doctor >"$out" 2>"$err" || status=$? ;;
+      relative | bare)
+        cd "$dir" || fail "could not enter $dir"
+        case "$variant" in
+          relative) run_shale --script ./shale doctor ;;
+          bare) run_shale --script shale doctor ;;
+        esac
+        cd "$CASE_DIR" || fail "could not return to $CASE_DIR"
+        ;;
+      *) run_shale --script "$copy" doctor ;;
     esac
-    text=$(cat "$out")
-    assert_status 1 "$status" "$variant exit status"
-    assert_contains "$text" \
+    assert_status 1 "$shale_status" "$variant exit status"
+    assert_contains "$shale_out" \
       "shale: layer 'local' provides the running script itself at $HOME/.dotfiles/local/.local/bin/shale" \
       "$variant stdout"
-    assert_not_contains "$text" "layer 'base' provides" "$variant stdout"
-    assert_contains "$text" 'shale: 1 problem found' "$variant stdout"
-    assert_empty "$(cat "$err")" "$variant stderr"
+    assert_not_contains "$shale_out" "layer 'base' provides" "$variant stdout"
+    assert_contains "$shale_out" 'shale: 1 problem found' "$variant stdout"
+    assert_empty "$shale_err" "$variant stderr"
   done
 }
 
 # A script that sits directly in $HOME: its $HOME-relative path is the bare
 # leaf, with no directory part to strip.
 test_doctor_finds_a_layer_shipping_a_script_that_lives_in_home() {
-  local copy out err status text
+  local copy
   conf 'base personal/base' 'local local'
   mklayer personal/base .zshrc
   mklayer local shale
@@ -4066,19 +4397,29 @@ test_doctor_finds_a_layer_shipping_a_script_that_lives_in_home() {
   copy=$sandbox_path
   cp "$SHALE" "$copy" || fail 'could not copy the script'
   chmod 0755 "$copy" || fail 'could not make the copy executable'
-  sandbox_leaf "$CASE_DIR" copy.out new
-  out=$sandbox_path
-  sandbox_leaf "$CASE_DIR" copy.err new
-  err=$sandbox_path
-  require_sandbox
-  status=0
-  "$copy" doctor >"$out" 2>"$err" || status=$?
-  text=$(cat "$out")
-  assert_status 1 "$status"
-  assert_contains "$text" \
+  run_shale --script "$copy" doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
     "shale: layer 'local' provides the running script itself at $HOME/.dotfiles/local/shale" 'stdout'
-  assert_contains "$text" 'shale: 1 problem found' 'stdout'
-  assert_empty "$(cat "$err")" 'stderr'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# The 'bare' spelling above reaches bash as an operand, and bash reads a leading
+# '-' on one as an option of its own: 'bash -c doctor' runs 'doctor' as a shell
+# command word and never opens the script at all.  The '--' is what stops that,
+# and a copy named '-c' is the only thing that proves it is there.  It is still a
+# bare word, so ${BASH_SOURCE[0]} arrives with no directory part, which is what
+# the self-shadow variants above need from this spelling.
+test_meta_the_script_option_runs_a_leaf_that_looks_like_an_option() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_leaf "$CASE_DIR" -c new
+  cp "$SHALE" "$sandbox_path" || fail 'could not copy the script'
+  run_shale --script -c doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  assert_not_contains "$shale_err" 'command not found' 'stderr'
 }
 
 # The other half of that check: it is skipped when the running script is not
@@ -4252,6 +4593,23 @@ test_which_every_spelling_of_the_path_agrees() {
   done
 }
 
+# which decides what is inside $HOME by comparing it verbatim, so a trailing
+# slash on HOME makes "$HOME"/* match nothing at all and every absolute path is
+# refused as being outside the home it is plainly in - the same message a path
+# in someone else's home gets.
+test_which_a_home_with_a_trailing_slash_still_takes_absolute_paths() {
+  local home home_slash
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  home=$HOME
+  home_slash=$home/
+  HOME=$home_slash
+  run_shale which "$home/.zshrc"
+  assert_status 0 "$shale_status"
+  assert_eq "winner    base  $home/.dotfiles/personal/base/.zshrc" "$shale_out" 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
 # The message matters as much as the status: a normalisation that let the path
 # through would report every layer as providing it, or exit 1 saying no layer
 # does - which is the same status for the opposite reason.
@@ -4422,6 +4780,83 @@ test_which_a_dangling_symlink_provider_is_still_found() {
   assert_status 0 "$shale_status"
   assert_eq "winner    base  $HOME/.dotfiles/personal/base/.netrc -> nowhere" \
     "$shale_out" 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# A directory that cannot be searched fails -e and -L exactly as a layer that
+# provides nothing does, and which then names the layer below it the winner:
+# confidently, silently, and about a setup build refuses outright.
+#
+# The three variants are the three depths at which that directory can sit, and
+# each defeats a narrower check than the one before.  'parent' is missed by a
+# check of the leaf's own directory - what cannot be searched is two levels above
+# the leaf.  'layer-path' is missed by a walk that starts at the layer directory,
+# because the component that cannot be searched is *above* it: 'personal/base' is
+# the shape every example in this project uses, and with ~/.dotfiles/personal shut
+# the layer directory itself answers no to -d, so a walk starting there finds
+# nothing in the way and which answers around the layer it cannot see into.
+#
+# build is run under each of them too.  which refusing is only right because
+# build refuses the same setup: the pair is the claim, not either alone.
+test_which_a_layer_it_cannot_read_is_not_answered_around() {
+  local variant dir layer
+  skip_if_root
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer local .config/git/config
+  for variant in parent root layer-path; do
+    layer=local
+    case "$variant" in
+      parent) dir=$HOME/.dotfiles/local/.config ;;
+      root) dir=$HOME/.dotfiles/local ;;
+      layer-path)
+        dir=$HOME/.dotfiles/personal
+        layer=base
+        ;;
+    esac
+    chmod 0000 "$dir" || fail "could not remove the search bit from $dir"
+    run_shale which .config/git/config
+    assert_status 1 "$shale_status" "$variant exit status"
+    # The refusal replaces the answer rather than standing beside a partial one:
+    # the layer that could not be read may be the one that wins.
+    assert_empty "$shale_out" "$variant stdout"
+    assert_contains "$shale_err" \
+      "shale: layer '$layer': cannot search $dir: permission denied" "$variant stderr"
+    assert_contains "$shale_err" \
+      "shale: cannot say which layer provides '.config/git/config'" "$variant stderr"
+    assert_not_contains "$shale_err" 'winner' "$variant stderr"
+    run_shale build
+    chmod 0755 "$dir" || fail "could not restore the mode on $dir"
+    assert_status 1 "$shale_status" "$variant build exit status"
+    assert_missing "$HOME/.dotfiles/current" "$variant built tree"
+  done
+  # The wording of one of them, so that the pair above is not the only thing
+  # holding build's half of it.
+  chmod 0000 "$HOME/.dotfiles/local/.config" ||
+    fail 'could not remove the search bit'
+  run_shale build
+  chmod 0755 "$HOME/.dotfiles/local/.config" || fail 'could not restore the mode'
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" \
+    "shale: cannot read $HOME/.dotfiles/local/.config: permission denied" 'the build stderr'
+}
+
+# The other half: only the directories on the way to the path asked about are
+# looked at.  A which that refused on any unreadable directory anywhere in a
+# layer would stop answering questions it can answer perfectly well.
+test_which_an_unreadable_directory_off_the_path_still_answers() {
+  skip_if_root
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  mklayer local .config/git/config
+  chmod 0000 "$HOME/.dotfiles/local/.config" ||
+    fail 'could not remove the search bit'
+  run_shale which .zshrc
+  chmod 0755 "$HOME/.dotfiles/local/.config" || fail 'could not restore the mode'
+  assert_status 0 "$shale_status"
+  assert_eq "winner    local  $HOME/.dotfiles/local/.zshrc
+shadowed  base   $HOME/.dotfiles/personal/base/.zshrc" "$shale_out" 'stdout'
   assert_empty "$shale_err" 'stderr'
 }
 
@@ -4667,7 +5102,7 @@ test_meta_no_banned_constructs() {
 # the wrapper's own invocation are allow-listed.  It claims nothing about a
 # path assembled at runtime, which no grep can see.
 test_meta_cases_reach_shale_only_through_the_wrapper() {
-  local hits line trimmed offenders i shapes
+  local hits line trimmed offenders i j shapes s r allowed counts hit
   # shellcheck disable=SC2016  # literal patterns, not expansions
   shapes=(
     # command position, including after a reserved word
@@ -4683,6 +5118,29 @@ test_meta_cases_reach_shale_only_through_the_wrapper() {
     # any other route to the same file
     '\$\{?REPO_ROOT\}?/shale'
   )
+  # The three lines that may name the script, by exact text and assembled from
+  # split names so that these lines are not themselves hits: the definition, the
+  # 'bash -n' that only parses it, and the wrapper's own invocation.
+  #
+  # Each must appear exactly once, checked below.  An entry matched by text is an
+  # entry any case can write for itself, and one that was worth writing twice is
+  # one that runs the script from somewhere the wrapper is not.  The invocation
+  # is the entry that has to stay this shape for another reason: it expands the
+  # positional parameters of whatever function it sits in, so a case that copied
+  # it would run shale with the case's own arguments, which are none.
+  s=SHALE
+  r=REPO
+  allowed=(
+    "${s}=\$${r}_ROOT/shale"
+    "out=\$(bash -n \"\$${s}\" 2>&1)"
+    "\"\$${s}\" \${1+\"\$@\"}"
+  )
+  counts=()
+  j=0
+  while [ "$j" -lt "${#allowed[@]}" ]; do
+    counts[j]=0
+    j=$((j + 1))
+  done
   offenders=
   # shellcheck disable=SC2016  # a literal pattern, not an expansion
   hits=$(grep -nE '\$\{?SHALE\}?([^A-Za-z0-9_]|$)|\$\{?REPO_ROOT\}?/shale' "$SELF")
@@ -4690,17 +5148,21 @@ test_meta_cases_reach_shale_only_through_the_wrapper() {
     [ -n "$line" ] || continue
     trimmed=${line#*:}
     trimmed=${trimmed#"${trimmed%%[![:space:]]*}"}
-    # Comments cannot run anything.  The other three are allow-listed by exact
-    # text, written so the allow-list entries do not themselves name the script
-    # in a shape they would have to allow: the definition matches on its left
-    # side, and 'bash -n' matches on its prefix.
-    # shellcheck disable=SC2016  # a literal to match, not an expansion
+    # Comments cannot run anything.
     case "$trimmed" in
       '#'*) continue ;;
-      SHALE=*) continue ;;
-      'out=$(bash -n '*) continue ;;
-      '"$SHALE" ${1+"$@"}') continue ;;
     esac
+    hit=0
+    j=0
+    while [ "$j" -lt "${#allowed[@]}" ]; do
+      if [ "$trimmed" = "${allowed[$j]}" ]; then
+        counts[j]=$((counts[j] + 1))
+        hit=1
+        break
+      fi
+      j=$((j + 1))
+    done
+    [ "$hit" -eq 0 ] || continue
     i=0
     while [ "$i" -lt "${#shapes[@]}" ]; do
       if printf '%s\n' "$trimmed" | grep -qE "${shapes[$i]}"; then
@@ -4716,6 +5178,13 @@ EOF
   if [ -n "$offenders" ]; then
     fail 'these lines can run the script outside the wrapper:' "$offenders"
   fi
+  j=0
+  while [ "$j" -lt "${#allowed[@]}" ]; do
+    [ "${counts[$j]}" -eq 1 ] ||
+      fail "an allow-listed line appears ${counts[$j]} times, and exactly one is allowed:" \
+        "${allowed[$j]}"
+    j=$((j + 1))
+  done
 }
 
 # run_case validates $HOME immediately before the case body, so reassigning HOME
@@ -4733,6 +5202,7 @@ test_meta_home_reassignments_are_allow_listed() {
   # rest rather than being excluded for sitting in a string.
   allowed="\
 ${h}=\$case_home${nl}\
+${h}=\$home_slash${nl}\
 ${h}=\$trip/unmarked${nl}\
 ${h}=\$trip/root/home${nl}\
 ${h}=\$trip/root/link${nl}\
@@ -5147,6 +5617,30 @@ test_meta_guard_rejects_a_symlinked_transcript() {
       assert_missing "$trip/shale.1.out" 'the capture file'
       assert_missing "$trip/shale.1.err" 'the capture file'
     fi
+  done
+}
+
+# sandbox_leaf proves where a path is, never that anything is at it: its default
+# mode accepts a name with nothing there, because that is what every fixture
+# rewrite needs.  For '--script' that is not enough, and the reason is the
+# fallback: a spelling with no '/' is handed to bash, and bash resolves a bare
+# script operand through PATH, so '--script echo doctor' ran /usr/bin/echo and
+# the case that mistyped its path passed.  The spellings are one for each way of
+# arriving at that: a bare word PATH resolves, one it does not, one bash would
+# take for an option of its own, a directory, and a relative path.
+test_meta_guard_rejects_a_script_that_is_not_a_regular_file() {
+  local trip status spelling
+  trip=$CASE_DIR/trip
+  for spelling in echo no-such-script -c home ./no-such-script; do
+    status=0
+    rm -rf "$trip" || fail "could not clear $trip"
+    mkdir -p "$trip" || fail "could not create $trip"
+    (
+      CASE_DIR=$trip
+      shale --script "$spelling" doctor
+    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    assert_status 99 "$status" "$spelling guard"
+    assert_exists "$trip/guard-tripped" "$spelling guard sentinel"
   done
 }
 
