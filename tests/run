@@ -1698,6 +1698,30 @@ test_build_an_empty_layer_directory_is_a_silent_no_op() {
   assert_missing "$HOME/.dotfiles/current/*"
 }
 
+# The three shapes the compose glob can be handed, at a depth where a matched
+# '.' or '..' would be composed as a path of its own: a directory holding
+# nothing but a dotfile, one holding nothing at all, and the layer root beside
+# them.  The tree is asserted whole rather than file by file, because the defect
+# adds paths rather than losing them - a matched '.' recurses into the directory
+# it is already in, and a matched '..' composes the layer's parent into current.
+test_build_dot_entries_are_never_composed() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/.keep
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/empty"
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_eq '.
+./.config
+./.config/nvim
+./.config/nvim/.keep
+./.stow-local-ignore
+./.zshrc
+./empty' \
+    "$(cd "$HOME/.dotfiles/current" && find . -print | sort)" 'the composed tree'
+}
+
 # Skipped at every depth, because a layer is a working repo.  .gitignore is not
 # skipped: it is a file you want in your home directory, and the whole point of
 # the ignore list build writes.
@@ -2526,6 +2550,36 @@ test_lock_a_non_empty_stale_lock_names_a_remedy_that_works() {
     'stderr'
   assert_not_contains "$shale_err" "rmdir $HOME/.dotfiles/.lock" 'stderr'
   assert_missing "$HOME/.dotfiles/current"
+  # Asserted by running it, which is the only claim the message makes.
+  sandbox_leaf "$HOME/.dotfiles" .lock
+  rm -rf "$sandbox_path" || fail 'could not clear the lock by hand'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+}
+
+# A dotfile inside the lock is the same defect as any other intruder, and the
+# only entry the emptiness test needs a second glob to see at all.  The empty
+# lock is asserted in the same breath because the two answers come from one
+# helper and the interesting failure is it confusing them: '.' and '..' read as
+# entries make every empty lock non-empty, and every message about a stale lock
+# then names rm -rf on a directory rmdir would have cleared.
+test_lock_a_stale_lock_holding_only_a_dotfile_names_rm_rf() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/.lock"
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale:   if no other shale is running, this lock is stale: remove it with: rmdir $HOME/.dotfiles/.lock" \
+    'the empty lock'
+  sandbox_write "$HOME/.dotfiles/.lock" .hidden 'a dotfile, and nothing else'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale:   if no other shale is running, this lock is stale: remove it with: rm -rf $HOME/.dotfiles/.lock" \
+    'the dotfile lock'
+  assert_not_contains "$shale_err" "rmdir $HOME/.dotfiles/.lock" 'the dotfile lock'
   # Asserted by running it, which is the only claim the message makes.
   sandbox_leaf "$HOME/.dotfiles" .lock
   rm -rf "$sandbox_path" || fail 'could not clear the lock by hand'
@@ -3846,6 +3900,22 @@ test_doctor_notes_only_unrecognised_directories() {
     sandbox_mkdir "$HOME/.dotfiles/$name"
   done
   sandbox_write "$HOME/.dotfiles" notes.txt 'a file someone left here'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The scan's glob, handed the two entries every directory has and nothing else
+# it could mistake for a layer.  '.' is $HOME/.dotfiles itself and '..' is
+# $HOME: either one reaching the note tells the reader that their home
+# directory is a stray stow package, which is advice that ends in an unstow.
+test_doctor_dot_entries_are_not_unrecognised_directories() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # A dot-named directory beside the config, so the scan has a dotfile to pass
+  # over as well as the two entries it can never be asked about by name.
+  sandbox_mkdir "$HOME/.dotfiles/.git"
   run_shale doctor
   assert_status 0 "$shale_status"
   assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
@@ -5439,6 +5509,86 @@ test_meta_no_banned_constructs() {
   if [ "$found" -gt 0 ]; then
     fail "$found banned construct(s) in $SHALE" ${report[@]+"${report[@]}"}
   fi
+}
+
+# The gap the case above cannot reach.  A dot-glob matches '.' and '..' on the
+# bash 3.2 floor and skips them on 5.2, from source that is identical on both,
+# so no grep over the script can tell which meaning the run will get.  This case
+# runs the script under the older meaning wherever the interpreter can be made
+# to produce it: '+O globskipdots' turns it back on on 5.2, and on 3.2 that
+# option does not exist and the older meaning is the only one there is.  So it
+# never skips - on the floor itself the plain run is already the run being
+# asserted - and it is the developer container rather than macOS CI that this
+# buys the coverage for.
+#
+# Which is why a refused '+O' is not enough on its own to conclude the plain run
+# will do: an interpreter that skips the two entries and offers no way to stop
+# it can satisfy every assertion below while exercising nothing this case exists
+# for, and it would report 'ok' having become a duplicate of three ordinary
+# cases.  'shopt -q' answers what the option is doing, whether or not it can be
+# changed, so that combination is failed by name rather than passed in silence.
+#
+# The assertions are the answers the two entries would change, one per glob in
+# the script: the composed tree, both remedies dir_is_empty chooses between, and
+# doctor's stray-layer scan.
+test_meta_dot_globs_answer_the_same_under_both_glob_meanings() {
+  local copy shim option
+  sandbox_leaf "$CASE_DIR" shale.copy new
+  copy=$sandbox_path
+  cp "$SHALE" "$copy" || fail 'could not copy the script'
+  # This suite's own interpreter, not PATH's: the macOS job runs the suite under
+  # /bin/bash deliberately, and a brew bash earlier on PATH would put this run
+  # back on the newer meaning without saying so.
+  option=' +O globskipdots'
+  if ! "$BASH" +O globskipdots -c '' 2>/dev/null; then
+    option=
+    # Exit status only: 3.2 answers 'invalid shell option name' on stderr, which
+    # is the same non-zero as 5.2 reporting the option turned off.
+    if "$BASH" -c 'shopt -q globskipdots' 2>/dev/null; then
+      fail "$BASH skips '.' and '..' and has no +O globskipdots to turn that off" \
+        'this case cannot exercise the older meaning on it, and must not report a pass' \
+        'run the suite under an interpreter with the option, or under one without the behaviour'
+    fi
+  fi
+  # The shim is what --script runs, so it needs the exec bit and a shebang of
+  # its own; the copy is run by the shim and needs neither.
+  sandbox_write "$CASE_DIR" shale-dotmatch \
+    '#!/usr/bin/env bash' \
+    "exec \"$BASH\"$option -- \"$copy\" \"\$@\""
+  shim=$sandbox_path
+  chmod 0755 "$shim" || fail 'could not make the shim executable'
+
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/.keep
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/empty"
+  run_shale --script "$shim" build
+  assert_status 0 "$shale_status" 'the build'
+  assert_empty "$shale_err" 'the build stderr'
+  assert_eq '.
+./.config
+./.config/nvim
+./.config/nvim/.keep
+./.stow-local-ignore
+./.zshrc
+./empty' \
+    "$(cd "$HOME/.dotfiles/current" && find . -print | sort)" 'the composed tree'
+
+  sandbox_mkdir "$HOME/.dotfiles/.lock"
+  run_shale --script "$shim" build
+  assert_status 1 "$shale_status" 'the empty lock'
+  assert_contains "$shale_err" "remove it with: rmdir $HOME/.dotfiles/.lock" 'the empty lock'
+  sandbox_write "$HOME/.dotfiles/.lock" .hidden 'a dotfile, and nothing else'
+  run_shale --script "$shim" build
+  assert_status 1 "$shale_status" 'the dotfile lock'
+  assert_contains "$shale_err" "remove it with: rm -rf $HOME/.dotfiles/.lock" 'the dotfile lock'
+  sandbox_leaf "$HOME/.dotfiles" .lock
+  rm -rf "$sandbox_path" || fail 'could not clear the lock by hand'
+
+  sandbox_mkdir "$HOME/.dotfiles/.git"
+  run_shale --script "$shim" doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_not_contains "$shale_out" 'is not a configured layer' 'the doctor stdout'
 }
 
 # noclobber is what makes "nothing may already exist at a path the harness is
