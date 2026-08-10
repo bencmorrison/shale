@@ -7,15 +7,22 @@
 # Cases are functions named test_<area>_<claim>.  Each runs in its own subshell
 # with HOME pointed at a fresh sandbox.
 #
-# The rules the whole safety layer exists to make true: nothing writes to a path
-# that has not been resolved and proven inside the test root immediately before
-# the write, leaf included; nothing may already exist at a path the harness is
-# about to create for itself; and a case that has had a guard trip swallowed does
-# not go on to run anything.  See "guarded writes" below - every write in this
-# file goes through it except two classes, both named there: the guard's own
-# diagnostic channel, which cannot guard itself, and the rigs the guard cases
-# build under $CASE_DIR/trip, unproven because they are what is being proven
-# against.
+# The two rules the whole safety layer exists to make true: nothing writes to a
+# path that has not been resolved and proven inside the test root immediately
+# before the write, leaf included; and nothing may already exist at a path the
+# harness is about to create for itself.  See "guarded writes" below - every
+# write in this file goes through it except two classes, both named there: the
+# guard's own diagnostic channel, which cannot guard itself, and the rigs the
+# guard cases build under $CASE_DIR/trip, unproven because they are what is
+# being proven against.
+#
+# A third rule is a convention rather than an invariant: a case that has had a
+# guard trip swallowed should not go on to run anything.  require_sandbox
+# refuses, so nothing reaching $HOME through the primitives runs - but a case
+# body can remove the sentinel and carry on, or never consult it at all and
+# write with a bare redirection.  That is the same latitude a case has to write
+# under $HOME with a raw printf, described at require_sandbox, and no phrasing
+# of the refusal closes it.
 
 if [ -z "${BASH_VERSION-}" ]; then
   printf 'tests: this script requires bash\n' >&2
@@ -23,6 +30,41 @@ if [ -z "${BASH_VERSION-}" ]; then
 fi
 
 set -uo pipefail
+
+# bash exports SHELLOPTS only when it was already in the environment, and it
+# then hands every option below down to every child process - shale, git, stow
+# and the stubs included.  Dropping the export attribute keeps this shell's
+# options out of the product's.  SHELLOPTS is readonly, so it cannot be unset.
+export -n SHELLOPTS 2>/dev/null
+
+# noclobber makes '>' open with O_CREAT|O_EXCL when the name is free or holds a
+# regular file, so "nothing may already exist at a path the harness is about to
+# create for itself" is answered by the kernel at the open rather than by a check
+# some moments earlier.  That window is real and reachable - a plant landing
+# between sandbox_leaf proving a name free and the redirection that uses it was
+# reproduced - and nothing a path-based check can be rewritten to say will close
+# it.
+#
+# The regular-file target is therefore all it closes, and that is the shape the
+# reproduction planted: a symlink to a file outside the test root, landing in
+# the window, leaves the victim untouched now.  It is not everything.  bash
+# follows symlinks to decide what is at the name and skips O_EXCL when what it
+# finds is not a regular file, so a symlink to a fifo planted in the same window
+# is written through - reproduced, with shale's stdout arriving outside the test
+# root.  The mitigation is that it cannot happen quietly: the open blocks until
+# something reads the other end, so the run hangs where it would otherwise have
+# passed.
+#
+# It does not replace sandbox_leaf's up-front check either, which refuses before
+# shale is started at all rather than after it has been left blocked on an open.
+#
+# The convention that goes with it, everywhere in this file: a plain '>' means
+# the name must not exist and the kernel enforces it; '>|' means the harness is
+# deliberately replacing a file it already has, which is the weak mode of
+# sandbox_leaf and the only mode noclobber cannot speak for.  A meta case holds
+# every override in this file to a named allow-list, so the convention survives
+# the next redirection somebody adds.
+set -C
 
 TESTS_DIR=$(cd "$(dirname "$0")" && pwd -P) || exit 1
 REPO_ROOT=$(cd "$TESTS_DIR/.." && pwd -P) || exit 1
@@ -157,7 +199,15 @@ fail() {
   exit 1
 }
 
+# run_case pre-creates this file, so the write has to land on a name that is
+# already taken.  Unlinking rather than truncating is what stops it writing
+# through a symlink a case body planted at the name: truncation followed one out
+# of the test root, clobbered the target, and the suite still reported SKIP and
+# exited 0.  Dropping the name puts the write back under O_EXCL, which is why
+# the redirection below is a plain '>'.  skip writes once and exits, so there is
+# no second append to lose.
 skip() {
+  rm -f "$CASE_DIR/skip"
   printf '%s\n' "${1-no reason given}" >"$CASE_DIR/skip"
   exit 77
 }
@@ -261,7 +311,9 @@ require_sandbox() {
 # anything already at one of those names was put there by something other than
 # this runner, whatever kind of thing it is - one refusal, no file types named.
 # It applies to what the harness creates for itself, not to fixture content: a
-# case may rewrite $HOME/.dotfiles/shale.conf as often as it likes.
+# case may rewrite $HOME/.dotfiles/shale.conf as often as it likes.  The check
+# is the early half of it; noclobber, set at the top of the file, is the half
+# that holds at the moment of the open.
 #
 # They assign globals rather than printing their result: a guard trip inside
 # $(...) exits only the substitution, and a caller would carry on with an empty
@@ -278,20 +330,34 @@ require_sandbox() {
 # mktemp -d.  What is left is a case that removes one of them first and puts its
 # own file there:
 #
-#   skip           silent: victim truncated, the suite reports SKIP and exits 0
+#   skip           closed: it unlinks the name before writing, so a planted
+#                  symlink is dropped rather than followed, and the write that
+#                  follows is under O_EXCL like every other create here
 #   failure        loud: victim appended, its content quoted into the report
 #   guard-tripped  loud: victim appended, its content printed to stderr, and the
 #                  fallback at $TEST_ROOT is exposed the same way
-#   transcript     a symlink is caught by run_shale's re-proof, which is the
-#                  weak mode; a hardlink is not caught at all, and is silent -
-#                  every invocation is appended to the victim and the run stays
-#                  green.  report_failure quotes whatever is there either way
+#   transcript     three routes and only the first is caught.  A symlink is
+#                  refused by run_shale's re-proof, which is the weak mode.  A
+#                  hardlink is not seen at all and is silent: every invocation
+#                  is appended to the victim and the run stays green.  A fifo
+#                  with a reader attached is silent too - the append does not
+#                  block, and the transcript leaves the test root; with no
+#                  reader it blocks for ever instead.  report_failure quotes
+#                  whatever is there either way
 #
-# Two of the four are therefore silent, and a fifo left at any of them blocks the
-# write for ever.  Removing a file the harness created is a deliberate act, and
-# the same one that would let a case write anywhere with a bare printf; nothing
-# short of proving an inode closes it, and no primitive here can do that without
-# stat.
+# The three that remain all accumulate through '>>', which is why skip's remedy
+# does not travel: noclobber has nothing to say about an append, and unlinking
+# before each one would throw away what the append before it wrote.  Closing them
+# needs a mechanism this file does not have.
+#
+# A fifo at failure or guard-tripped blocks the write for ever with no reader,
+# and skip's leaf blocks a read as well: a case that leaves a fifo at
+# $CASE_DIR/skip and exits 77 without ever calling skip blocks run_case's own
+# 'reason=$(cat ...)', in the main shell, after the case subshell has already
+# gone.  Removing a file the harness created is a deliberate act, and the same
+# one that would let a case write anywhere with a bare printf; nothing short of
+# proving an inode closes the three appends, and no primitive here can do that
+# without stat.
 #
 # The second is the rigs the guard cases build under $CASE_DIR/trip: they are
 # the input being proven against, so they go in with plain mkdir, ln and printf.
@@ -356,11 +422,52 @@ sandbox_leaf() {
 }
 
 # Case-side entry points: the sandbox HOME must be valid too.
+#
+# Descends rather than calling mkdir -p, which follows a symlink anywhere in the
+# path and builds directories inside whatever it points at - and does it before
+# a single component has been resolved, so the guard fires on a tree that
+# already exists outside the root.  A symlinked layer root is the shape that
+# reaches: .dotfiles itself is proven, and the layer directory below it is where
+# the tree lands.
+#
+# The deepest existing prefix is resolved once, which is enough for all of it
+# because pwd -P is physical; each component below that is created with a plain
+# mkdir, which cannot follow a symlink at that name because it fails whenever
+# the name holds anything at all, and is then resolved and proven in turn.
 sandbox_mkdir() {
-  local dir=$1
+  local dir=$1 pending part next
   require_sandbox
-  mkdir -p "$dir" || fail "could not create $dir"
+  [ -n "$dir" ] || guard_trip 'sandbox_mkdir: no path given'
+  pending=
+  while [ ! -d "$dir" ]; do
+    case "$dir" in
+      # Both are directories on any system this can run on, so reaching either
+      # without -d having been true means the walk cannot terminate.
+      / | .) guard_trip "path does not resolve to a directory: $1" ;;
+      */*)
+        pending=${dir##*/}${pending:+/}$pending
+        dir=${dir%/*}
+        [ -n "$dir" ] || dir=/
+        ;;
+      *)
+        pending=$dir${pending:+/}$pending
+        dir=.
+        ;;
+    esac
+  done
   sandbox_resolve "$dir"
+  while [ -n "$pending" ]; do
+    part=${pending%%/*}
+    case "$pending" in
+      */*) pending=${pending#*/} ;;
+      *) pending= ;;
+    esac
+    # Empty from a '//' in the caller's path, and nothing to create.
+    [ -n "$part" ] || continue
+    next=$sandbox_dir/$part
+    [ -d "$next" ] || mkdir "$next" || fail "could not create $next"
+    sandbox_resolve "$next"
+  done
 }
 
 sandbox_target() {
@@ -370,14 +477,32 @@ sandbox_target() {
 }
 
 # sandbox_write DIR LEAF [LINE...] - the whole write, guarded end to end.
+#
+# The name is unlinked rather than truncated, so what gets filled is a file this
+# function created.  Truncation writes through whatever inode is at the name,
+# and a hardlink is invisible to the -L test that the weak mode is: the write
+# reached the victim's content, fixture paths included.  Unlinking drops this
+# name and leaves the victim's other name holding the same content, after which
+# a plain '>' is O_EXCL again.
+#
+# One redirection around the whole loop, not one per line.  Each '>>' is its own
+# open, and every open after the first is a chance for something planted between
+# them to be written through - which would put back, once per fixture line, the
+# window the unlink above exists to close.
 sandbox_write() {
-  local dir=$1 leaf=$2 line
+  local dir=$1 leaf=$2 line wrote
   shift 2
   sandbox_target "$dir" "$leaf"
-  : >"$sandbox_path" || fail "could not write $sandbox_path"
-  for line in ${1+"$@"}; do
-    printf '%s\n' "$line" >>"$sandbox_path" || fail "could not write $sandbox_path"
-  done
+  rm -f "$sandbox_path" || fail "could not clear $sandbox_path"
+  wrote=1
+  {
+    for line in ${1+"$@"}; do
+      printf '%s\n' "$line" || wrote=0
+    done
+  } >"$sandbox_path" || fail "could not write $sandbox_path"
+  # A brace group is not a subshell, so a failure inside the loop is visible
+  # here; the group's own status is only its last command's.
+  [ "$wrote" -eq 1 ] || fail "could not write $sandbox_path"
 }
 
 # Every case reaches shale through this, never through $SHALE or any other path
@@ -442,6 +567,14 @@ run_shale() {
   # exist; the up-front proof is what stops the run before shale does anything,
   # and it is re-proven below because shale's whole job is creating symlinks and
   # the invocation sits inside this check-to-write window.
+  #
+  # The capture files get no re-proof, and one would not buy what it looks like
+  # it buys: a plant that lands in the window and is then withdrawn - which is
+  # what a racing plant does - leaves the name free again, and no predicate short
+  # of an inode identity can tell that file from the one that was proved.  Where
+  # the plant is still there, noclobber has already refused the open, so shale
+  # never runs and the case fails with bash's own 'cannot overwrite existing
+  # file' quoted into the report.
   sandbox_leaf "$CASE_DIR" "shale.$n.out" new
   out=$sandbox_path
   sandbox_leaf "$CASE_DIR" "shale.$n.err" new
@@ -546,10 +679,9 @@ mklayer() {
   else
     content=$layer/$rel
   fi
-  # .dotfiles on its own first, so a symlink there is caught before mkdir -p can
-  # create anything inside whatever it points at.  A symlink deeper in the layer
-  # path still gets empty directories made inside it before the second check
-  # fires; nothing is written there, and the run aborts.
+  # .dotfiles on its own first, so a symlink there is refused before the layer
+  # path below it is looked at.  A symlink deeper in the layer path is refused
+  # by the same descent, one component further down.
   sandbox_mkdir "$HOME/.dotfiles"
   target=$HOME/.dotfiles/$layer/$rel
   sandbox_write "${target%/*}" "${target##*/}" "$content"
@@ -1002,7 +1134,8 @@ test_config_a_crlf_config_names_the_line_endings() {
     case "$spelling" in
       endings) printf 'base personal/base\r\nlocal local\r\n' ;;
       field) printf 'ba\rse\tpersonal/base\n' ;;
-    esac >"$sandbox_path" || fail "could not write $sandbox_path"
+    # '>|': the second iteration rewrites the file the first one left behind.
+    esac >|"$sandbox_path" || fail "could not write $sandbox_path"
     mklayer personal/base .zshrc
     run_shale build
     assert_status 1 "$shale_status" "$spelling exit status"
@@ -1537,7 +1670,8 @@ test_build_warns_when_the_built_tree_was_edited() {
   sandbox_write "$HOME/.dotfiles/current.old" junk 'left behind by an older build'
   sandbox_mkdir "$HOME/.dotfiles/current"
   sandbox_leaf "$sandbox_dir" .zshrc
-  printf 'HAND EDITED\n' >"$sandbox_path" || fail 'could not edit the built tree'
+  # '>|': the build above put this file here, and editing it is the point.
+  printf 'HAND EDITED\n' >|"$sandbox_path" || fail 'could not edit the built tree'
   run_shale build
   assert_status 0 "$shale_status"
   assert_contains "$shale_err" \
@@ -1566,7 +1700,8 @@ test_build_says_nothing_about_divergence_when_the_build_aborts() {
   assert_status 0 "$shale_status"
   sandbox_mkdir "$HOME/.dotfiles/current"
   sandbox_leaf "$sandbox_dir" .zshrc
-  printf 'HAND EDITED\n' >"$sandbox_path" || fail 'could not edit the built tree'
+  # '>|': the build above put this file here, and editing it is the point.
+  printf 'HAND EDITED\n' >|"$sandbox_path" || fail 'could not edit the built tree'
   mklayer personal/base .config/git/config
   mklayer local .config/git 'LOCAL FILE'
   run_shale build
@@ -4455,13 +4590,15 @@ test_doctor_ignores_a_script_that_is_not_under_home() {
 # Every example is checked and the offenders are named together, for the reason
 # parse_config collects config errors rather than dying on the first: a suite
 # that stops at the first broken example makes fixing two of them two runs.
-# That is why the checks below append to the failure report by hand instead of
-# calling the assert_ helpers, which exit the case.
-
+# That is why the checks below collect their findings instead of calling the
+# assert_ helpers, which exit the case, and hand the collection to fail at the
+# end - the failure file is the guard's own diagnostic channel, written by fail
+# and by nothing else.
 test_examples_every_shipped_config_parses() {
-  local example name out found bad
+  local example name out found bad report
   found=0
   bad=0
+  report=()
   for example in "$REPO_ROOT"/examples/*.conf; do
     name=${example##*/}
     # An unmatched glob is the literal pattern.  The count at the end is what
@@ -4474,13 +4611,18 @@ test_examples_every_shipped_config_parses() {
     # can copy, and passing over it would leave it unchecked, uncounted and
     # therefore green.
     if [ ! -f "$example" ]; then
-      printf '%s: not a regular file: %s\n' "$name" "$example" \
-        >>"$CASE_DIR/failure"
+      report[${#report[@]}]="$name: not a regular file: $example"
       bad=$((bad + 1))
       continue
     fi
     found=$((found + 1))
     sandbox_target "$HOME/.dotfiles" shale.conf
+    # cp is a write primitive here like any redirection, and it has no noclobber:
+    # it opens the name and truncates whatever inode is there, which a hardlink
+    # carries out of the sandbox exactly as it did for sandbox_write.  Unlinking
+    # first is the same remedy, and it is what makes the loop's second iteration
+    # a create rather than an overwrite.
+    rm -f "$sandbox_path" || fail "could not clear $sandbox_path"
     cp "$example" "$sandbox_path" || fail "could not copy $example"
     run_shale doctor
     out=$shale_out$shale_err
@@ -4489,8 +4631,8 @@ test_examples_every_shipped_config_parses() {
     # an empty config are the only shapes a parse error can take.
     case "$out" in
       *"$HOME/.dotfiles/shale.conf:"*)
-        printf '%s: config error:\n' "$name" >>"$CASE_DIR/failure"
-        printf '%s\n' "$out" >>"$CASE_DIR/failure"
+        report[${#report[@]}]="$name: config error:"
+        report[${#report[@]}]=$out
         bad=$((bad + 1))
         # The check below asks whether records were parsed, which a file that
         # did not parse cannot answer; reporting both would name one file twice.
@@ -4503,14 +4645,15 @@ test_examples_every_shipped_config_parses() {
     case "$out" in
       *"layer '"*) ;;
       *)
-        printf '%s: no layers parsed:\n' "$name" >>"$CASE_DIR/failure"
-        printf '%s\n' "$out" >>"$CASE_DIR/failure"
+        report[${#report[@]}]="$name: no layers parsed:"
+        report[${#report[@]}]=$out
         bad=$((bad + 1))
         ;;
     esac
   done
   if [ "$bad" -gt 0 ]; then
-    fail "$bad broken example(s) in $REPO_ROOT/examples"
+    fail "$bad broken example(s) in $REPO_ROOT/examples" \
+      ${report[@]+"${report[@]}"}
   fi
   [ "$found" -gt 0 ] || fail "no examples found at $REPO_ROOT/examples/*.conf"
 }
@@ -5043,7 +5186,7 @@ test_meta_no_fragment_conventions() {
 # The bash 3.2 / BSD userland floor is enforced here and by review, never by
 # execution: nothing this suite runs on is that old.
 test_meta_no_banned_constructs() {
-  local i names patterns hits found
+  local i names patterns hits found report
   names=(
     'declare -A or declare -n'
     'case-modifying parameter expansion'
@@ -5075,6 +5218,11 @@ test_meta_no_banned_constructs() {
     '(^[[:space:]]*|[;&|({][[:space:]]*)let[[:space:]]'
   )
   found=0
+  # Collected rather than appended to the failure file as they are found: that
+  # file is the guard's own diagnostic channel, written by fail and by nothing
+  # else, and a case body reaching into it is outside every class the header
+  # names.
+  report=()
   i=0
   while [ "$i" -lt "${#patterns[@]}" ]; do
     # Full-line comments are blanked rather than dropped, so line numbers still
@@ -5083,14 +5231,62 @@ test_meta_no_banned_constructs() {
     # stow decide" otherwise trips the let pattern.
     hits=$(sed 's/^[[:space:]]*#.*//' "$SHALE" | grep -nE "${patterns[$i]}")
     if [ -n "$hits" ]; then
-      printf 'banned construct: %s\n' "${names[$i]}" >>"$CASE_DIR/failure"
-      printf '%s\n' "$hits" >>"$CASE_DIR/failure"
+      report[${#report[@]}]="banned construct: ${names[$i]}"
+      report[${#report[@]}]=$hits
       found=$((found + 1))
     fi
     i=$((i + 1))
   done
   if [ "$found" -gt 0 ]; then
-    fail "$found banned construct(s) in $SHALE"
+    fail "$found banned construct(s) in $SHALE" ${report[@]+"${report[@]}"}
+  fi
+}
+
+# noclobber is what makes "nothing may already exist at a path the harness is
+# about to create for itself" hold at the open, and every override of it is a
+# place where that stops being true.  A convention held by review is one the
+# next redirection forgets, so each override is named here with the reason it is
+# a replacement rather than a create; adding one fails the suite until it is
+# either listed or written as a plain redirection.
+test_meta_noclobber_overrides_are_allow_listed() {
+  local override allowed hits line i matched report found
+  # Assembled from two pieces rather than written out, so this case's own
+  # machinery is not a hit for the pattern it searches for.
+  override='>'
+  override=$override'|'
+  allowed=(
+    # The CRLF-spelling loop: its second iteration rewrites the file the first
+    # iteration left at that name.
+    'esac >'
+    # shale's own build put this file there, and editing it is what the case is
+    # about.
+    'HAND EDITED'
+  )
+  found=0
+  report=()
+  # Full-line comments are blanked, as above, so the prose describing the
+  # convention is not read as a use of it.
+  hits=$(sed 's/^[[:space:]]*#.*//' "$SELF" | grep -nF "$override")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    matched=0
+    i=0
+    while [ "$i" -lt "${#allowed[@]}" ]; do
+      case "$line" in
+        *"${allowed[$i]}"*) matched=1 ;;
+      esac
+      i=$((i + 1))
+    done
+    if [ "$matched" -eq 0 ]; then
+      report[${#report[@]}]=$line
+      found=$((found + 1))
+    fi
+  done <<EOF
+$hits
+EOF
+  if [ "$found" -gt 0 ]; then
+    fail "$found unlisted noclobber override(s) in $SELF" \
+      ${report[@]+"${report[@]}"}
   fi
 }
 
@@ -5473,10 +5669,42 @@ test_meta_guard_rejects_a_symlinked_fixture_path() {
     assert_exists "$trip/guard-tripped" "$helper guard sentinel"
     assert_eq 'PRECIOUS' "$(cat "$trip/decoy/.dotfiles/shale.conf")" \
       "$helper: the decoy config"
-    # Not just the file: mklayer resolves .dotfiles on its own before the deep
-    # mkdir -p, so nothing is created inside the decoy either.
+    # Not just the file: mklayer resolves .dotfiles on its own first, so nothing
+    # is created inside the decoy either.
     assert_missing "$trip/decoy/.dotfiles/personal" \
       "$helper: directories inside the decoy"
+  done
+}
+
+# The class one level deeper, and the one mkdir -p cannot be made safe against:
+# .dotfiles is proven and the layer root below it is the symlink, so a single
+# mkdir -p builds the whole layer tree inside the decoy and the guard then fires
+# on a tree that already exists outside the root.  Both spellings are here
+# because they fail at different points - the first has a component left to
+# create when the link is met, the second does not - and only the first was ever
+# broken.
+test_meta_guard_refuses_to_mkdir_through_a_symlinked_directory() {
+  local trip status link
+  trip=$CASE_DIR/trip
+  for link in personal personal/base; do
+    status=0
+    rm -rf "$trip" || fail "could not clear $trip"
+    mkdir -p "$trip/root/home/.dotfiles/personal" "$trip/decoy" ||
+      fail 'could not build the decoy'
+    : >"$trip/root/home/.shale-test-sandbox" || fail 'could not plant a marker'
+    rm -rf "$trip/root/home/.dotfiles/$link" || fail 'could not clear the link name'
+    ln -s "$trip/decoy" "$trip/root/home/.dotfiles/$link" ||
+      fail 'could not link the decoy'
+    (
+      CASE_DIR=$trip
+      TEST_ROOT=$trip/root
+      HOME=$trip/root/home
+      export HOME
+      mklayer personal/base .zshrc
+    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    assert_status 99 "$status" "$link guard"
+    assert_exists "$trip/guard-tripped" "$link guard sentinel"
+    assert_empty "$(ls -A "$trip/decoy")" "$link: what landed inside the decoy"
   done
 }
 
@@ -5516,6 +5744,60 @@ test_meta_guard_rejects_a_symlinked_write_target() {
     assert_exists "$trip/guard-tripped" "$helper guard sentinel"
     assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$helper: the decoy file"
   done
+}
+
+# The residual the symlink test above cannot reach.  A hardlink is a second name
+# for the victim's inode and -L is false for it, so the weak mode lets it
+# through - and it has to, because the weak mode is what every fixture rewrite
+# uses.  Truncating writes through the inode; unlinking first drops this name
+# only, and the write then lands in a file sandbox_write created.
+test_meta_sandbox_write_replaces_the_name_not_the_inode() {
+  local trip status
+  trip=$CASE_DIR/trip
+  status=0
+  mkdir -p "$trip/root/home" "$trip/decoy" || fail 'could not build the rig'
+  : >"$trip/root/home/.shale-test-sandbox" || fail 'could not plant a marker'
+  printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
+  ln "$trip/decoy/target" "$trip/root/home/hardlink" || fail 'could not link the decoy'
+  (
+    CASE_DIR=$trip
+    TEST_ROOT=$trip/root
+    HOME=$trip/root/home
+    export HOME
+    sandbox_write "$trip/root/home" hardlink 'REPLACED'
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 0 "$status" 'sandbox_write'
+  assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" 'the decoy file'
+  assert_eq 'REPLACED' "$(cat "$trip/root/home/hardlink")" 'the file that was written'
+}
+
+# The window between a check and the write that uses it is reachable: #24
+# reproduced a plant landing inside run_shale's, and the capture file went to a
+# victim outside the test root.  noclobber is what closes it, because O_EXCL is
+# decided in the same operation as the create.  The plant here is placed by hand
+# where the race put it, which is the only way to hit that window every time.
+#
+# The '$-' half is not decoration: every '>' in this file is written on the
+# assumption that noclobber is on, and a run without it would still be green.
+test_meta_noclobber_refuses_a_write_planted_after_the_check() {
+  local trip status
+  trip=$CASE_DIR/trip
+  case $- in
+    *C*) ;;
+    *) fail 'the harness is not running with noclobber set' ;;
+  esac
+  status=0
+  mkdir -p "$trip/root/case" "$trip/decoy" || fail 'could not build the rig'
+  printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
+  (
+    CASE_DIR=$trip
+    TEST_ROOT=$trip/root
+    sandbox_leaf "$trip/root/case" planted new
+    ln -s "$trip/decoy/target" "$sandbox_path" || exit 3
+    printf 'CLOBBERED\n' >"$sandbox_path"
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 1 "$status" 'the write after the plant'
+  assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" 'the decoy file'
 }
 
 # sandbox_leaf builds its result from the resolved directory, and that is a
@@ -5769,6 +6051,30 @@ test_meta_runner_pre_creates_the_diagnostic_leaves() {
   fi
 }
 
+# Pre-creation is a refusal a case can defeat by removing the file first, and
+# skip is where that used to be silent: with a symlink planted at $CASE_DIR/skip
+# the write went straight through it, the victim was clobbered, and the suite
+# reported '0 passed, 0 failed, 1 skipped' and exited 0.  Unlinking the name
+# first is what makes the write land on this case's own file.  The decoy is
+# inside the case directory, so the regression this asserts against writes
+# somewhere the run may write and the assertion is what catches it.
+test_meta_skip_replaces_its_leaf_rather_than_writing_through_it() {
+  local trip status
+  trip=$CASE_DIR/trip
+  status=0
+  mkdir -p "$trip/decoy" || fail 'could not build the rig'
+  printf 'PRECIOUS\n' >"$trip/decoy/target" || fail 'could not plant the decoy file'
+  ln -s "$trip/decoy/target" "$trip/skip" || fail 'could not plant the symlink'
+  (
+    CASE_DIR=$trip
+    skip 'the probe skipped on purpose'
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 77 "$status" 'skip'
+  assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" 'the decoy file'
+  [ ! -L "$trip/skip" ] || fail 'skip wrote through the symlink instead of replacing it'
+  assert_eq 'the probe skipped on purpose' "$(cat "$trip/skip")" 'the skip reason'
+}
+
 # A trip that was swallowed must stop the case, not just the run: by the time
 # run_case sees the sentinel the case body has already finished, and in #7 what
 # runs in between is stow --delete.
@@ -5908,6 +6214,62 @@ PROBE
   assert_status 99 "$inner_status" 'inner suite'
   assert_contains "$inner_out" 'GUARD test_probe_bare_99' 'inner suite output'
   assert_not_contains "$inner_out" 'ok    test_probe_bare_99' 'inner suite output'
+}
+
+# CI fails on any skip, so a green run never calls skip() and nothing else here
+# exercises the reporting path it takes.  A skip is also not a pass, and the
+# report has to say so twice: on the line and in the tail.
+test_meta_runner_reports_a_skip() {
+  local extra
+  sandbox_leaf "$CASE_DIR" probe-skip.sh new
+  extra=$sandbox_path
+  cat >"$extra" <<'PROBE' || fail "could not write $extra"
+test_probe_deliberate_skip() {
+  skip 'the probe skipped on purpose'
+}
+PROBE
+  run_inner_suite probe_deliberate_skip "$extra"
+  assert_status 0 "$inner_status" 'inner suite'
+  assert_contains "$inner_out" \
+    'SKIP  test_probe_deliberate_skip (the probe skipped on purpose)' \
+    'inner suite output'
+  assert_contains "$inner_out" '0 passed, 0 failed, 1 skipped' 'inner suite output'
+  assert_contains "$inner_out" 'skipped, not passed:' 'inner suite output'
+  assert_not_contains "$inner_out" 'ok    test_probe_deliberate_skip' \
+    'inner suite output'
+}
+
+# The harness sets shell options for itself - nounset, pipefail and noclobber -
+# and bash hands every one of them down to every child process, shale and the
+# stubs included, whenever SHELLOPTS was already in the environment.  A product
+# running under options the test harness chose is not the product.
+#
+# No case can observe this from inside a run that was started without SHELLOPTS
+# exported, because then bash never marks it exported and there is nothing to
+# drop.  So the inner suite is started with it in the environment, which is the
+# only shape where the line under test does anything at all.  SHELLOPTS is
+# readonly, but the export attribute can still be set on it.
+test_meta_runner_does_not_export_its_shell_options() {
+  local extra
+  sandbox_leaf "$CASE_DIR" probe-shellopts.sh new
+  extra=$sandbox_path
+  cat >"$extra" <<'PROBE' || fail "could not write $extra"
+test_probe_shell_options_reach_no_child() {
+  local leaked
+  # env, not $SHELLOPTS: bash sets that variable in every shell it starts, so
+  # only a child process can say whether it was inherited or made locally.
+  leaked=$(env | sed -n 's/^SHELLOPTS=//p')
+  [ -z "$leaked" ] ||
+    fail "the harness handed its shell options to a child: SHELLOPTS=$leaked"
+}
+PROBE
+  export SHELLOPTS
+  run_inner_suite probe_shell_options_reach_no_child "$extra"
+  # The output before the status: a leak fails both, and this is the assertion
+  # that quotes the options that got out.
+  assert_contains "$inner_out" 'ok    test_probe_shell_options_reach_no_child' \
+    'inner suite output'
+  assert_status 0 "$inner_status" 'inner suite'
 }
 
 # "run_case validates HOME immediately before the case body" is what lets the
