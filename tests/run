@@ -3499,6 +3499,509 @@ test_doctor_a_missing_chkstow_warns_without_failing() {
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
 }
 
+# ----------------------------------------------- doctor's broken-link cases
+#
+# chkstow exits 0 whatever it found - and whatever it failed to reach - so these
+# cases assert doctor's report and never the tool's status.  An implementation
+# shaped like 'chkstow ... || finding' passes a suite that only checked a clean
+# tree and reports a clean bill of health for ever.
+#
+# What doctor counts is much narrower than what 'chkstow -b' prints, and the
+# narrowing is the check: a link into the built tree at a path the built tree no
+# longer holds.  chkstow names every broken symlink under $HOME, and that walk
+# includes ~/.dotfiles, so both halves need pinning - the orphan is reported, and
+# the link a layer meant to dangle is not, in the layer, in the built tree's copy,
+# and in the link an apply made for it where stow consents to make one.
+#
+# The one case that stubs chkstow asserts 'Bogus link: ' as the format doctor
+# parses.  It is stable across the versions this suite meets: bin/chkstow.in is
+# byte-identical in the 2.3.1 and 2.4.1 releases but for an emacs
+# local-variables line, and that print statement is unchanged in both.
+
+# The planted-link case, and the one the exit-status mutation fails outright.
+test_doctor_a_link_into_the_built_tree_it_no_longer_provides_is_a_finding() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .gone new
+  ln -s "$HOME/.dotfiles/current/.gone" "$sandbox_path" ||
+    fail 'could not plant the link'
+  assert_dangling_symlink "$HOME/.gone" 'the planted link'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.gone points at $HOME/.dotfiles/current/.gone, which the built tree no longer provides" \
+    'stdout'
+  # The delete leads, because it is the half that works on every version of stow;
+  # the sweep under it names the version it needs, and says what happens below it.
+  assert_contains "$shale_out" \
+    'shale:   remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
+    'stdout'
+  assert_contains "$shale_out" \
+    'shale:   stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:     stow -D -p --no-folding -d '$HOME/.dotfiles' -t '$HOME' current && shale apply" \
+    'stdout'
+  assert_contains "$shale_out" \
+    'shale:   earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory' \
+    'stdout'
+  # The remedy is the remedy for the finding, not a second one.
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# The edge case doctor exists for, end to end and through apply's own links,
+# which are relative: nothing here plants anything.  The surviving links are
+# inside a directory that left every layer, which stow's unstow phase never
+# visits, so the apply that orphaned them exited 0.
+test_doctor_reports_the_links_a_directory_that_left_every_layer_kept() {
+  local line seen
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  mklayer local .config/nvim/extra.lua
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/current/.config" 'the built tree'
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the leftover link'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.config/nvim/init.lua points at $HOME/.dotfiles/current/.config/nvim/init.lua, which the built tree no longer provides" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.config/nvim/spell.add points at $HOME/.dotfiles/current/.config/nvim/spell.add, which the built tree no longer provides" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.config/nvim/extra.lua points at $HOME/.dotfiles/current/.config/nvim/extra.lua, which the built tree no longer provides" \
+    'stdout'
+  assert_contains "$shale_out" 'shale: 3 problems found' 'stdout'
+  # The link the built tree still provides is not among them.
+  assert_not_contains "$shale_out" '.zshrc' 'stdout'
+  # The remedy sits under the findings and above the summary, which is the only
+  # order in which it reads as the answer to them.
+  seen=
+  while IFS= read -r line; do
+    case "$line" in
+      *'which the built tree no longer provides')
+        case "$seen" in
+          *finding*) ;;
+          *) seen="$seen finding" ;;
+        esac
+        ;;
+      'shale:   remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying')
+        seen="$seen remedy"
+        ;;
+      'shale: 3 problems found') seen="$seen summary" ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq ' finding remedy summary' "$seen" 'the order of the report'
+}
+
+test_doctor_an_applied_tree_with_no_orphans_reports_no_problems() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status"
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'points at' 'stdout'
+  assert_not_contains "$shale_out" 'sweep the whole target tree' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# A layer may ship a symlink that points at nothing - a path another machine has,
+# a mount that is not up - and shale copies it verbatim.  This is the absolute
+# spelling of one, and it reaches the built tree and stops there: stow refuses to
+# stow a package symlink whose target is absolute, so no link in $HOME ever points
+# at it and the refused apply below is what says so rather than a comment.  What
+# is left is two broken links under ~/.dotfiles - the layer's and the built tree's
+# copy - both of which 'chkstow -b' reports and neither of which is a defect in
+# this setup.
+#
+# The layer link is at the top of the layer because that is where the two stow
+# versions this suite meets agree.  Both refuse in Stow.pm's stow_node(), but
+# 2.3.1 asks '-l $source' with $source relative to the directory the link would be
+# created in while its cwd is the target root, so below the top level it tests a
+# path prefixed '../' that cannot exist, the refusal never fires and the link is
+# stowed; 2.4.1 builds that path from the cwd instead - $pkg_path_from_cwd - and
+# refuses at every depth.  Planted a directory down, this case passes on 2.3.1 and
+# fails on 2.4.1, and that difference is stow's rather than shale's.
+test_doctor_an_absolute_dangling_link_a_layer_ships_is_not_a_finding() {
+  local conflict
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .secrets new
+  ln -s "$HOME/elsewhere/secrets" "$sandbox_path" || fail 'could not plant the layer link'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_dangling_symlink "$HOME/.dotfiles/personal/base/.secrets" 'the layer link'
+  assert_dangling_symlink "$HOME/.dotfiles/current/.secrets" 'the built copy'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'points at' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  # The third place a dangling layer link would appear, and why this spelling has
+  # not got one.  Pinned as fragments: the phrase is the same statement in both
+  # versions of Stow.pm, and the path beside it is the built tree's copy in both,
+  # but the rest of the line is stow's to word.
+  run_shale apply
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'source is an absolute symlink' 'stow stderr'
+  conflict=$(printf '%s\n' "$shale_err" | grep 'source is an absolute symlink')
+  assert_contains "$conflict" '.dotfiles/current/.secrets' 'the target named in stow conflict'
+  assert_missing "$HOME/.secrets" 'the link stow refused to make'
+  # And the state that refusal leaves is the one the user runs doctor in.
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'points at' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# Everything else chkstow finds under $HOME belongs to whoever put it there.
+test_doctor_a_broken_link_that_misses_the_built_tree_is_not_a_finding() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .orphan new
+  ln -s "$HOME/gone" "$sandbox_path" || fail 'could not plant the link'
+  sandbox_mkdir "$HOME/.dotfiles/current.old"
+  sandbox_leaf "$sandbox_dir" .vimrc new
+  ln -s "$sandbox_dir/gone" "$sandbox_path" || fail 'could not plant the link'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'points at' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The audit reads a link's target with readlink, and a command substitution
+# swallows the failure of a missing command: without this check every link
+# arrives with an empty target, misses the built tree, and the audit reports
+# clean on a home full of orphans.  Degraded, so it warns and does not count.
+# shellcheck disable=SC2123
+test_doctor_a_missing_readlink_warns_without_failing() {
+  local tool found stub saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .gone new
+  ln -s "$HOME/.dotfiles/current/.gone" "$sandbox_path" || fail 'could not plant the link'
+  sandbox_mkdir "$CASE_DIR/stub-bin"
+  stub=$sandbox_dir
+  for tool in env bash cat sed git stow chkstow; do
+    found=$(command -v "$tool") || fail "$tool is not on PATH"
+    sandbox_leaf "$stub" "$tool" new
+    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
+  done
+  saved=$PATH
+  PATH=$stub
+  run_shale doctor
+  PATH=$saved
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    'shale: readlink is not installed, and shale reads what a link points at with it' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The mechanical form of the trap: a chkstow that reports an orphan and exits
+# non-zero is still read, and one that reports nothing and exits non-zero finds
+# nothing.  An implementation that read the status fails both halves at once.
+# shellcheck disable=SC2123
+test_doctor_reads_chkstows_output_and_never_its_exit_status() {
+  local stub saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .gone new
+  ln -s "$HOME/.dotfiles/current/.gone" "$sandbox_path" || fail 'could not plant the link'
+  # shellcheck disable=SC2016  # the stub expands $HOME when it runs, not here
+  sandbox_write "$CASE_DIR/stub-bin" chkstow \
+    '#!/usr/bin/env bash' \
+    'printf "Bogus link: %s\n" "$HOME/.gone"' \
+    'exit 1'
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+  stub=$sandbox_dir
+  saved=$PATH
+  PATH=$stub:$PATH
+  run_shale doctor
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the reporting stub exit status'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.gone points at $HOME/.dotfiles/current/.gone, which the built tree no longer provides" \
+    'the reporting stub stdout'
+  sandbox_write "$CASE_DIR/stub-bin" chkstow '#!/usr/bin/env bash' 'exit 1'
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+  PATH=$stub:$PATH
+  run_shale doctor
+  PATH=$saved
+  assert_status 0 "$shale_status" 'the silent stub exit status'
+  assert_not_contains "$shale_out" 'points at' 'the silent stub stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'the silent stub stdout'
+}
+
+# The shape docs/layers.md tells layer authors to use: a link relative to the
+# directory holding it.  In the built tree's copy that target resolves *inside*
+# the built tree, so the copy is judged against itself unless links under
+# ~/.dotfiles are left alone - and the finding that produced could never be
+# cleared, because no remedy may touch what is inside ~/.dotfiles.
+#
+# It is also the only spelling stow will stow, so the applied link is here and in
+# no other case: that one is the trap, a link into the built tree that does not
+# resolve, told from an orphan only by the built tree still providing the path it
+# names.
+test_doctor_a_relative_dangling_link_a_layer_ships_is_not_a_finding() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .exrc new
+  ln -s .vimrc "$sandbox_path" || fail 'could not plant the layer link'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_dangling_symlink "$HOME/.dotfiles/personal/base/.exrc" 'the layer link'
+  assert_dangling_symlink "$HOME/.dotfiles/current/.exrc" 'the built copy'
+  assert_dangling_symlink "$HOME/.exrc" 'the applied link'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'points at' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# Apply creates its links in $HOME and never inside ~/.dotfiles, so nothing there
+# can be one it orphaned, whatever it points at: the layers are the user's, a
+# stray clone is the user's, and the remedy could not reach any of them anyway.
+test_doctor_a_broken_link_inside_the_dotfiles_directory_is_not_a_finding() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  # All three point into the built tree at a path it has not got, which is
+  # exactly the shape a finding has anywhere else under $HOME.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .layerlink new
+  ln -s "$HOME/.dotfiles/current/.absent" "$sandbox_path" ||
+    fail 'could not plant the layer link'
+  sandbox_mkdir "$HOME/.dotfiles"
+  sandbox_leaf "$sandbox_dir" .stray new
+  ln -s "$HOME/.dotfiles/current/.absent" "$sandbox_path" ||
+    fail 'could not plant the stray link'
+  sandbox_mkdir "$HOME/.dotfiles/unconfigured"
+  sandbox_leaf "$sandbox_dir" .clonelink new
+  ln -s "$HOME/.dotfiles/current/.absent" "$sandbox_path" ||
+    fail 'could not plant the clone link'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'points at' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# chkstow walks the target with File::Find, which will not descend a top
+# directory that is itself a symlink unless the path ends in '/'.  Without that
+# slash this whole audit finds nothing at all and doctor reports clean over a
+# home full of orphans, which is the one failure mode worse than not having the
+# check.  Everything the case asserts is spelt through the link, because that is
+# how $HOME is spelt and how every path shale prints is built.
+test_doctor_walks_a_home_reached_through_a_symlink() {
+  local home_link
+  sandbox_leaf "$CASE_DIR" homelink new
+  home_link=$sandbox_path
+  ln -s "$HOME" "$home_link" || fail 'could not link the home directory'
+  HOME=$home_link
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the leftover link'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.config/nvim/init.lua points at $HOME/.dotfiles/current/.config/nvim/init.lua, which the built tree no longer provides" \
+    'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+}
+
+# A '.stow' or a '.notstowed' makes chkstow leave a directory unwalked and say
+# 'skipping <dir>' on stderr - its own line, not perl's - and File::Find says
+# "Can't cd to ..." on the same stream for one it cannot enter.  Discard that and
+# the walk truncates silently: the orphan below is inside the skipped directory,
+# so the audit finds nothing and the only honest report is that it looked at less
+# than $HOME.
+test_doctor_says_when_chkstow_could_not_walk_the_whole_of_home() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.cache"
+  sandbox_leaf "$sandbox_dir" .gone new
+  ln -s "$HOME/.dotfiles/current/.gone" "$sandbox_path" || fail 'could not plant the link'
+  sandbox_write "$HOME/.cache" .stow
+  assert_dangling_symlink "$HOME/.cache/.gone" 'the planted link'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: chkstow could not walk all of $HOME, so this audit did not reach everything under it:" 'stdout'
+  assert_contains "$shale_out" "shale:     skipping $HOME/.cache" 'stdout'
+  # Uncounted: an unwalked directory is not itself a defect in the setup.
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# Nothing else in doctor's report mentions the built tree, so without this the
+# links below - every one of them an orphan - are passed over in silence and the
+# user is told the setup is sound.
+test_doctor_says_when_there_is_no_built_tree_to_check_links_against() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .zshrc new
+  ln -s "$HOME/.dotfiles/current/.zshrc" "$sandbox_path" || fail 'could not plant the link'
+  assert_missing "$HOME/.dotfiles/current" 'the built tree'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: there is no built tree at $HOME/.dotfiles/current, so shale cannot tell a link into it from any other broken link" \
+    'stdout'
+  assert_contains "$shale_out" 'shale:   build one with: shale build' 'stdout'
+  # Uncounted: an unbuilt tree is a state 'shale build' makes, not a defect.
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The same silence, and a state 'shale build' refuses rather than repairs.
+test_doctor_says_when_the_built_tree_is_not_a_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME/.dotfiles" current 'not a tree'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current exists but is not a directory, so there is no built tree to check the links in $HOME against" \
+    'stdout'
+  assert_contains "$shale_out" 'shale:   shale builds into it: remove it, or move it aside' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The remedy doctor leads with, carried out exactly as written, on the stow this
+# suite is running against: the paths are the ones doctor printed and the delete
+# is the whole of it.  It leads because it works on every version, which the
+# sweep under it does not - 2.3.1 abandons that walk at the first thing in the
+# target that is neither a link nor a directory, and the ordinary file this case
+# leaves in $HOME is that thing.  Nothing here asserts the sweep's behaviour:
+# that is the version's, not shale's.
+test_doctor_removing_the_links_it_names_clears_the_findings() {
+  local line link removed
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_write "$HOME" notes.txt 'an ordinary file, as every home has'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
+    'stdout'
+  removed=0
+  while IFS= read -r line; do
+    case "$line" in
+      'shale: /'*' points at '*', which the built tree no longer provides')
+        link=${line#'shale: '}
+        link=${link%% points at *}
+        ;;
+      *) continue ;;
+    esac
+    sandbox_mkdir "${link%/*}"
+    rm "$sandbox_dir/${link##*/}" || fail "could not remove $link"
+    removed=$((removed + 1))
+  done <<EOF
+$shale_out
+EOF
+  assert_eq 2 "$removed" 'the links the report named'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'points at' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  # Nothing else went with them: the built tree still holds what it built, and
+  # the ordinary file the sweep would have refused to walk past is untouched.
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc" 'the applied link'
+  assert_exists "$HOME/notes.txt" 'the ordinary file'
+}
+
+# A path is not a word: $HOME may hold a space, a bracket, a dollar or a quote,
+# and the sweep is printed for a person to paste into a shell.  The literal is
+# asserted, and then read back the way a shell would read it - which is what says
+# the quoting works rather than merely being present.
+test_doctor_the_remedy_it_prints_survives_a_space_in_the_home_path() {
+  local home_ok line cmd
+  sandbox_mkdir "$CASE_DIR/my [home] dir"
+  home_ok=$sandbox_dir
+  sandbox_leaf "$home_ok" .shale-test-sandbox new
+  : >"$sandbox_path" || fail 'could not mark the sandbox home'
+  HOME=$home_ok
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .gone new
+  ln -s "$HOME/.dotfiles/current/.gone" "$sandbox_path" || fail 'could not plant the link'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale:     stow -D -p --no-folding -d '$HOME/.dotfiles' -t '$HOME' current && shale apply" \
+    'stdout'
+  cmd=
+  while IFS= read -r line; do
+    case "$line" in
+      'shale:     stow -D '*)
+        cmd=${line#'shale:     '}
+        # Only the flags and their values are read back; the '&&' and everything
+        # after it would run a command rather than describe one.
+        cmd=${cmd%% current && shale apply}
+        ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  [ -n "$cmd" ] || fail 'the report printed no sweep command'
+  eval "set -- $cmd" || fail "a shell could not read the printed line: $cmd"
+  assert_eq 8 "$#" 'the words a shell reads the printed line as'
+  assert_eq "$HOME/.dotfiles" "$6" "the sweep's -d value"
+  assert_eq "$HOME" "$8" "the sweep's -t value"
+}
+
 # The self-shadow check reads ${BASH_SOURCE[0]}, so nothing but a script that is
 # genuinely under $HOME exercises it, and the repo's own copy never is.  These
 # are the cases that cannot go through run_shale: each proves the sandbox itself
@@ -4234,6 +4737,7 @@ ${h}=\$trip/unmarked${nl}\
 ${h}=\$trip/root/home${nl}\
 ${h}=\$trip/root/link${nl}\
 ${h}=\$trip/root/sub/../../outside${nl}\
+${h}=\$home_link${nl}\
 ${h}=\$home_ok${nl}\
 ${h}=\$CASE_DIR/unmarked${nl}"
   offenders=
