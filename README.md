@@ -44,6 +44,9 @@ shale apply                        # clones what is missing, builds, links
 
 `examples/minimal.conf` is the smaller starting point — one repository layer and one local directory.
 
+Already stowing dotfiles by hand? Unstow the old packages before the first apply:
+[docs/migrating.md](docs/migrating.md).
+
 ## Configuration
 
 `~/.dotfiles/shale.conf` lists one layer per line, lowest precedence first:
@@ -99,6 +102,9 @@ it. Git, SSH and tmux have native include mechanisms and should use those direct
 That convention lives in your layers, not in shale — shale has no knowledge of it and treats a
 fragment as an ordinary file. A higher layer therefore *replaces* a fragment by reusing its exact
 filename, or *adds* alongside it with a new one.
+
+[docs/layers.md](docs/layers.md) writes the convention out in full, alongside the rest of what goes
+into authoring a layer.
 
 ## Uninstalling
 
