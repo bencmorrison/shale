@@ -76,10 +76,6 @@ usage_error() {
   exit 2
 }
 
-not_implemented() {
-  die "$1 is not implemented yet"
-}
-
 # ------------------------------------------------------------------ the config
 
 config_error() {
@@ -1098,7 +1094,108 @@ cmd_build() {
 }
 
 cmd_apply() {
-  not_implemented apply
+  local status
+
+  parse_config || exit 1
+
+  # Before the lock and before anything is composed, in the way rmdir and git
+  # are: a machine with no stow must not rebuild the tree and only then find out
+  # that nothing can be done with it.
+  command -v stow >/dev/null 2>&1 ||
+    die 'stow is not installed, and apply links the built tree with it' \
+      'install it with your system package manager: shale installs nothing'
+
+  # Taken here, once, and covering the build and the stow together: a second
+  # shale that rebuilt $CUR between them would leave this stow linking $HOME at
+  # files that had already been replaced.  cmd_build's own acquire_lock finds it
+  # held by this process and returns.  Nothing releases it here - cleanup does,
+  # on every path out.
+  acquire_lock
+
+  # Only if the build succeeded, so a failed build never relinks anything.  Its
+  # own failures exit; this covers a non-zero return.
+  cmd_build || exit 1
+
+  # Re-checked here rather than taken on trust from the acquire above: a whole
+  # build sits in that window, and the message a refused shale prints tells its
+  # reader how to remove a stale lock by hand.  A lock removed there means
+  # another shale may be rebuilding $CUR at this moment, and linking $HOME at a
+  # tree being rewritten is the failure the lock exists to prevent.  LOCKED is
+  # blanked first because this process is no longer holding anything: cleanup
+  # would otherwise fail to remove a directory that is already gone and advise
+  # removing it again.
+  #
+  # The -x is what tells a lock that was removed from a $DOTFILES that can no
+  # longer be looked into: without search permission on it every test of a path
+  # inside is false, and that is the cd's failure to report a few lines below,
+  # not a missing lock.
+  if [ ! -d "$LOCKED" ] && [ -x "$DOTFILES" ]; then
+    LOCKED=
+    die "the lock at $LOCK is gone, and this apply was holding it" \
+      "another shale may be rebuilding $CUR, which is what the lock prevents" \
+      "nothing in $HOME was relinked: apply again once no other shale is running"
+  fi
+
+  # -t "$HOME" is mandatory even though stow's default target - the parent of
+  # the stow directory - is that same path.  man stow, RESOURCE FILES: stow reads
+  # ./.stowrc and ~/.stowrc, and for a single-valued option such as --target the
+  # command line is what overrides them, so without this a stray resource file
+  # silently redirects the whole apply and exits 0.  The cd makes ./.stowrc a
+  # known file rather than whichever directory the user happened to run shale
+  # from; nothing can stop --ignore in one of them from being appended to, which
+  # is what doctor's note about them is for.
+  #
+  # -R is what prunes links to files that have disappeared from the layers: its
+  # unstow phase sweeps each target directory it visits and removes the links
+  # into this package it finds there, and the stow phase puts back only what the
+  # tree still holds.
+  #
+  # --no-folding is documented in man stow and does not appear in stow --help,
+  # so it reads like a mistake to anyone checking the flag against the help
+  # text.  It is real.  Without it stow links a directory that does not yet
+  # exist in $HOME as one symlink back into the package, and an application that
+  # writes a runtime file into that directory then writes it into the built
+  # tree, which the next build discards.
+  #
+  # --compat is deliberately not passed.  Its unstow phase walks the whole
+  # target tree, which would find the links left inside a directory that
+  # vanished from every layer, but info stow warns that it "can be prohibitive
+  # if your target tree is very large" and $HOME is exactly that.  Finding those
+  # links is doctor's job rather than apply's.
+  #
+  # 125 is what tells a cd that failed from a stow that ran.  stow exits 0, or 1
+  # when it refuses - a conflict, or an invocation it would not accept - and
+  # every other failure of it is a perl die carrying the errno of the call that
+  # failed, none of which is 125 for the symlink, unlink and mkdir stow makes.
+  # The cd's own diagnostic is dropped so that the message below is the only
+  # voice on the subject.
+  status=0
+  (
+    cd "$DOTFILES" 2>/dev/null || exit 125
+    stow -d "$DOTFILES" -t "$HOME" -R --no-folding current
+  ) || status=$?
+  if [ "$status" -eq 125 ]; then
+    die "could not enter $DOTFILES to run stow" \
+      "$CUR is built; nothing in $HOME was relinked"
+  fi
+  # stow's own diagnostic is left exactly as it wrote it: it names the paths it
+  # could not handle, and shale knows nothing about them that stow does not say
+  # better.  What shale adds is the state $HOME is now in, and only the refusal
+  # is all-or-nothing: the conflicts are found while both phases are planned, and
+  # planning changes nothing.  Any other status is a call that failed while that
+  # plan was being carried out, one task at a time, with nothing to undo the
+  # tasks that already ran.  The remedy cannot assume the fix is in $HOME either:
+  # a layer that ships an absolute symlink is refused every time, and there is
+  # nothing in $HOME to clear.
+  if [ "$status" -eq 1 ]; then
+    die "stow failed; nothing in $HOME was relinked" \
+      'stow plans the whole operation and abandons all of it rather than half-applying one' \
+      "$CUR is built and correct: fix what stow reported above, in $HOME or in a layer, then apply again"
+  fi
+  [ "$status" -eq 0 ] ||
+    die "stow failed part-way: $HOME may be partly relinked" \
+      'stow changes nothing until the whole operation is planned, but nothing undoes the part it had carried out' \
+      "$CUR is built and correct: fix what stow reported above, in $HOME or in a layer, then apply again"
 }
 
 # Ordered cheapest and most fundamental first.  Nothing here exits early or
