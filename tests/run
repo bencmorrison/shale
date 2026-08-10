@@ -592,6 +592,36 @@ assert_symlink_to() {
   fail "$label: $link does not resolve to $target" "readlink: $(readlink "$link")"
 }
 
+# A directory in its own right, not a symlink to one.  -d alone answers yes for
+# a link to a directory, which is exactly what a folded stow leaves behind, so
+# every assertion that --no-folding took effect needs both halves.
+assert_real_dir() {
+  local path=$1 label=${2-directory}
+  if [ -L "$path" ]; then
+    fail "$label: $path is a symlink, not a directory of its own" \
+      "readlink: $(readlink "$path")"
+  fi
+  if [ ! -d "$path" ]; then
+    fail "$label: not a directory: $path"
+  fi
+  return 0
+}
+
+# A symlink with nothing at the end of it.  -e follows the link, so it is false
+# for a dangling one and for a path that holds nothing at all; -L is what tells
+# those two apart.
+assert_dangling_symlink() {
+  local link=$1 label=${2-symlink}
+  if [ ! -L "$link" ]; then
+    fail "$label: not a symlink: $link"
+  fi
+  if [ -e "$link" ]; then
+    fail "$label: $link still resolves, and should not" \
+      "readlink: $(readlink "$link")"
+  fi
+  return 0
+}
+
 # ----------------------------------------------------------------- usage cases
 
 test_usage_bare_prints_usage_on_stdout() {
@@ -675,7 +705,8 @@ test_usage_which_accepts_a_dashed_path() {
   assert_not_contains "$shale_err" 'usage:' 'stderr'
 }
 
-# The command surface is closed.  This claim outlives every stub below it.
+# The command surface is closed: four commands, and every other word in that
+# position is a usage error whatever those four grow into.
 test_usage_command_surface_is_closed() {
   local command
   for command in build apply doctor which; do
@@ -688,13 +719,6 @@ test_usage_command_surface_is_closed() {
     assert_contains "$shale_err" 'shale' "$command stderr"
     assert_empty "$shale_out" "$command stdout"
   done
-}
-
-test_usage_apply_is_stubbed() {
-  run_shale apply
-  assert_status 1 "$shale_status"
-  assert_contains "$shale_err" 'shale: apply is not implemented yet' 'stderr'
-  assert_empty "$shale_out" 'stdout'
 }
 
 # --------------------------------------------------------------- config cases
@@ -2146,6 +2170,98 @@ test_lock_that_cannot_be_released_names_a_remedy_that_works() {
   assert_empty "$shale_err" 'stderr'
 }
 
+# apply takes the lock once, for its build and its stow together.  Held only for
+# the build, it would be released before the stow, and a second shale could then
+# rebuild current out from under the stow that is linking $HOME at it - which is
+# the truncated-tree failure of the build case above, with deleted symlinks in
+# $HOME as the result rather than a wrong current.  The hold is inside stow,
+# after the real one has run, so the links exist while the second shale is
+# refused.
+# shellcheck disable=SC2123  # PATH is prefixed on purpose and restored below
+test_lock_apply_holds_it_across_the_stow() {
+  local saved first first_status first_out first_err
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # No space in the pattern: it is written into a case arm in the stub, where an
+  # unquoted one is a syntax error rather than a match on two words.
+  stub_hold stow '*--no-folding*'
+  sandbox_leaf "$CASE_DIR" first.out new
+  first_out=$sandbox_path
+  sandbox_leaf "$CASE_DIR" first.err new
+  first_err=$sandbox_path
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  shale apply >"$first_out" 2>"$first_err" &
+  first=$!
+  if ! wait_for "$stub_path/holding"; then
+    release_hold
+    PATH=$saved
+    fail 'the apply never reached its stow'
+  fi
+  run_shale build
+  release_hold
+  first_status=0
+  wait "$first" || first_status=$?
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the build during the stow'
+  assert_contains "$shale_err" \
+    "shale: another shale has the lock at $HOME/.dotfiles/.lock" 'the build stderr'
+  assert_empty "$shale_out" 'the build stdout'
+  assert_status 0 "$first_status" 'the apply'
+  assert_empty "$(cat "$first_err")" 'the apply stderr'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_missing "$HOME/.dotfiles/.lock"
+}
+
+# Neither acquire notices a lock that goes away under its holder: the first
+# returns on the strength of its own mkdir, and the re-entrant one apply's build
+# makes returns on the strength of LOCKED alone, without asking whether the
+# directory it names is still there.  What notices is the check apply makes
+# before it stows, which is the case below; a build has nothing after it to
+# check, so there the whole notice is still the release warning at the end.
+#
+# The stub removes the lock the instant it is created, which is the earliest
+# point in the window and the one that exercises the re-entrant return; the case
+# below removes it at the latest, after the build has finished.
+# shellcheck disable=SC2123  # PATH is prefixed on purpose and restored below
+test_lock_a_lock_removed_under_its_holder_is_noticed_only_before_the_stow() {
+  local saved real stub
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  real=$(command -v mkdir) || fail 'mkdir is not on PATH'
+  # shellcheck disable=SC2016  # the body is written for the stub's shell
+  sandbox_write "$CASE_DIR/stub-bin" mkdir \
+    '#!/usr/bin/env bash' \
+    "real=$real" \
+    'case "$*" in' \
+    '  */.lock)' \
+    '    "$real" "$@" || exit $?' \
+    '    rmdir "$@" || exit 1' \
+    '    exit 0' \
+    '    ;;' \
+    'esac' \
+    'exec "$real" "$@"'
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+  stub=$sandbox_dir
+  saved=$PATH
+  PATH=$stub:$PATH
+  # A build runs to the end holding nothing, and says so only when it cannot
+  # give back what it never had.
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not remove the lock at $HOME/.dotfiles/.lock" 'stderr'
+  # An apply crosses the same window and is stopped by the check before its stow,
+  # having reached it through both acquires without either objecting.
+  run_shale apply
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: the lock at $HOME/.dotfiles/.lock is gone, and this apply was holding it" 'stderr'
+  assert_missing "$HOME/.zshrc"
+  assert_missing "$HOME/.dotfiles/.lock"
+}
+
 # ---------------------------------------------------------------- clone cases
 #
 # Every url here is a path to a repository the case created; no case names a
@@ -2557,6 +2673,480 @@ test_clone_a_root_that_appears_during_the_clone_is_not_nested_into() {
   assert_eq 'personal/.zshrc' \
     "$(cat "$HOME/.dotfiles/.personal.cloning/.zshrc")" 'the kept clone'
   assert_missing "$HOME/.dotfiles/current"
+}
+
+# ---------------------------------------------------------------- apply cases
+#
+# apply is a build followed by one stow invocation, so what these cases are about
+# is the shape of the link tree that invocation leaves and the states in which it
+# refuses to make one.  Every claim is asserted against the links themselves,
+# never against stow's output: 'the file is readable through $HOME' is true of a
+# folded directory link and of a copy, neither of which is what apply must
+# produce.
+
+test_apply_links_every_file_of_the_built_tree_into_home() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/git/config
+  mklayer local .netrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_symlink_to "$HOME/.netrc" "$HOME/.dotfiles/current/.netrc"
+  assert_symlink_to "$HOME/.config/git/config" \
+    "$HOME/.dotfiles/current/.config/git/config"
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.zshrc")" 'the linked file'
+  assert_eq 'local/.netrc' "$(cat "$HOME/.netrc")" 'the linked file'
+  assert_missing "$HOME/.dotfiles/.lock"
+}
+
+# What --no-folding buys, and the only assertion that can tell it took effect:
+# without it stow links a directory that does not yet exist in $HOME as a single
+# symlink back into the package, and every file below is then reachable through
+# $HOME exactly as it is here.
+test_apply_makes_real_directories_with_per_file_links() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/git/config
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_real_dir "$HOME/.config" 'the target directory'
+  assert_real_dir "$HOME/.config/nvim" 'the target directory'
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua"
+  assert_symlink_to "$HOME/.config/git/config" \
+    "$HOME/.dotfiles/current/.config/git/config"
+  # The consequence, rather than only the shape: an application writing a
+  # runtime file beside a linked one writes it into $HOME.  Through a folded
+  # directory link the same write lands inside the built tree, which the next
+  # build discards.
+  sandbox_write "$HOME/.config/nvim" shada 'runtime state'
+  assert_missing "$HOME/.dotfiles/current/.config/nvim/shada" 'the built tree'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_eq 'runtime state' "$(cat "$HOME/.config/nvim/shada")" 'the runtime file'
+  assert_missing "$HOME/.dotfiles/current/.config/nvim/shada" 'the built tree'
+}
+
+# stow's built-in ignore list matches .gitignore by basename at any depth, so
+# this link exists only because build replaced that list wholesale with one of
+# its own.  Without it an ordinary global gitignore never reaches $HOME and
+# every command still reports success.
+test_apply_links_a_layers_gitignore_into_home() {
+  conf 'base personal/base'
+  mklayer personal/base .gitignore
+  mklayer personal/base .config/git/config
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_symlink_to "$HOME/.gitignore" "$HOME/.dotfiles/current/.gitignore"
+  assert_eq 'personal/base/.gitignore' "$(cat "$HOME/.gitignore")" 'the linked file'
+  # The list itself is stow's own file and is never one of the links.
+  assert_missing "$HOME/.stow-local-ignore"
+}
+
+# The other half of that list: the files a layer keeps for its readers stay in
+# the layer.  Anchored at the package root, so a README a user asked for inside
+# a config directory is still linked.
+test_apply_a_layer_root_readme_does_not_reach_home() {
+  conf 'base personal/base'
+  mklayer personal/base README.md
+  mklayer personal/base LICENSE
+  mklayer personal/base .config/nvim/README.md
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_exists "$HOME/.dotfiles/current/README.md" 'the built tree'
+  assert_missing "$HOME/README.md"
+  assert_missing "$HOME/LICENSE"
+  assert_symlink_to "$HOME/.config/nvim/README.md" \
+    "$HOME/.dotfiles/current/.config/nvim/README.md"
+}
+
+# A link into current is what makes an edit to a layer live without a relink,
+# and the second apply must not disturb it.
+test_apply_a_content_change_is_seen_through_the_existing_link() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc 'first'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_eq 'first' "$(cat "$HOME/.zshrc")" 'the linked file'
+  mklayer personal/base .zshrc 'second'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the second apply stderr'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_eq 'second' "$(cat "$HOME/.zshrc")" 'the linked file'
+}
+
+# -R is what does this: its unstow phase sweeps the target directories it visits
+# and takes back the links into this package, and the stow phase puts back only
+# what the tree still holds.
+test_apply_a_file_deleted_from_a_layer_has_its_link_pruned() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .vimrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_symlink_to "$HOME/.vimrc" "$HOME/.dotfiles/current/.vimrc"
+  sandbox_leaf "$HOME/.dotfiles/personal/base" .vimrc
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  sandbox_leaf "$HOME/.dotfiles/personal/base/.config/nvim" spell.add
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/current/.vimrc" 'the built tree'
+  assert_missing "$HOME/.vimrc" 'the pruned link'
+  assert_missing "$HOME/.config/nvim/spell.add" 'the pruned link'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua"
+}
+
+# The known edge case, asserted rather than wished away.  The unstow phase visits
+# the directories the package still holds, and a directory that has left every
+# layer is not among them, so the links inside it are never taken back.  --compat
+# would find them by walking the whole target tree, which info stow warns "can be
+# prohibitive if your target tree is very large"; finding them is doctor's job.
+test_apply_a_directory_removed_from_every_layer_leaves_a_dangling_link() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/current/.config" 'the built tree'
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the leftover link'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
+# stow plans both phases before it changes anything, so a conflict costs the
+# whole apply and nothing of $HOME.  That is the one state in which current and
+# $HOME legitimately disagree, and the message has to say so rather than leave
+# the reader looking for a half-applied tree.  It is also the only failure that
+# can claim it - see the case below - so the claim is tied to the status stow
+# uses for a refusal and to nothing else.
+test_apply_an_unmanaged_file_at_a_target_path_leaves_home_untouched() {
+  local conflict
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  mklayer personal/base .bashrc
+  sandbox_write "$HOME" .bashrc 'not shale'
+  run_shale apply
+  assert_status 1 "$shale_status"
+  # stow's own diagnostic, passed through: it names the path, and shale knows
+  # nothing about it that stow does not say better.
+  #
+  # Pinned as fragments on purpose.  stow rewrote the sentence between 2.3.1
+  # ("existing target is neither a link nor a directory: .bashrc") and 2.4.1
+  # ("cannot stow .dotfiles/current/.bashrc over existing target .bashrc since
+  # neither a link nor a directory and --adopt not specified"), and the two put
+  # the target on opposite sides of the phrase, so no single literal matches
+  # both.  What is common to both is the phrase, the target named on that same
+  # line, the package heading and the abort line, and that is the whole of what
+  # this case may assert.  Restoring either version's full sentence makes a
+  # green Linux CI red on macOS and says nothing more than this does.
+  assert_contains "$shale_err" \
+    'WARNING! stowing current would cause conflicts:' 'stow stderr'
+  assert_contains "$shale_err" 'neither a link nor a directory' 'stow stderr'
+  conflict=$(printf '%s\n' "$shale_err" | grep 'neither a link nor a directory')
+  assert_contains "$conflict" '.bashrc' 'the target named in stow conflict'
+  assert_contains "$shale_err" 'All operations aborted.' 'stow stderr'
+  assert_contains "$shale_err" \
+    "shale: stow failed; nothing in $HOME was relinked" 'stderr'
+  # The remedy names both places the fix can be, because it is not always in
+  # $HOME: a layer shipping an absolute symlink is refused on every apply with
+  # nothing in $HOME to clear.
+  assert_contains "$shale_err" \
+    "shale:   $HOME/.dotfiles/current is built and correct: fix what stow reported above, in $HOME or in a layer, then apply again" \
+    'stderr'
+  assert_eq 'not shale' "$(cat "$HOME/.bashrc")" 'the unmanaged file'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  # Built, and built correctly: the build ran to completion before stow refused.
+  assert_eq 'personal/base/.bashrc' \
+    "$(cat "$HOME/.dotfiles/current/.bashrc")" 'the built tree'
+  assert_missing "$HOME/.dotfiles/current.new"
+  assert_missing "$HOME/.dotfiles/.lock"
+}
+
+# The other half of that: stow's all-or-nothing belongs to its planning phase,
+# where the conflicts are found and nothing has been touched.  Once the plan is
+# carried out the tasks run one at a time and the first call that fails aborts
+# with every task before it already on disk, so a failure there must not be told
+# to the user as a $HOME that was never relinked.  A target directory stow can
+# plan into and cannot write to reaches that deterministically: the plan is
+# valid, and the symlink call inside it returns EACCES.
+#
+# What is already on disk by then must not depend on the order stow happens to
+# walk a directory in, which is readdir order and differs between filesystems.
+# It does not here.  stow plans the whole unstow, then the whole stow, then runs
+# the tasks in the order they were planned, so every removal the unstow phase
+# decided on has already happened before the first link the stow phase wanted is
+# attempted.  A file that has left the layers is removed in that unstow phase -
+# its link is now dangling, and the sweep of each directory the phase visits
+# takes dangling links into the package back - while the file that provokes the
+# failure is a creation, and creations are all in the second phase.  So the link
+# that vanishes and the link that is never made are on opposite sides of a phase
+# boundary, whatever order either directory is read in.
+#
+# A vanished link is also the worse consequence of the two, and the one a user
+# notices: $HOME had a working link before this apply and does not now.
+test_apply_a_stow_that_fails_after_planning_reports_a_partly_relinked_home() {
+  local dir
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .vimrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_symlink_to "$HOME/.vimrc" "$HOME/.dotfiles/current/.vimrc"
+  # Two changes to one apply: .zshrc leaves the layers, so the unstow phase has a
+  # link to take back, and a new file arrives under a directory $HOME already
+  # holds and stow cannot write to, so the stow phase has a link it cannot make.
+  sandbox_leaf "$HOME/.dotfiles/personal/base" .zshrc
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_mkdir "$HOME/.config/nvim"
+  dir=$sandbox_dir
+  chmod 0555 "$dir" || fail 'could not take the write bit off the target directory'
+  run_shale apply
+  chmod 0755 "$dir" || fail 'could not restore the mode'
+  assert_status 1 "$shale_status"
+  # stow's own diagnostic, passed through, and the proof that this is a call that
+  # failed rather than a conflict it planned around.  This one line stow has
+  # spelt the same way since at least 2.3.1: it is the errno text of the failed
+  # symlink call, not a description of a conflict.
+  assert_contains "$shale_err" 'stow: ERROR: Could not create symlink' 'stow stderr'
+  assert_contains "$shale_err" \
+    "shale: stow failed part-way: $HOME may be partly relinked" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   $HOME/.dotfiles/current is built and correct: fix what stow reported above, in $HOME or in a layer, then apply again" \
+    'stderr'
+  # The refusal's wording is a lie about this run, which is why the status decides
+  # which of the two is printed.
+  assert_not_contains "$shale_err" "nothing in $HOME was relinked" 'stderr'
+  # The two halves of "partly": one link stow could not make, and one link that
+  # was there before this apply and is not there after it.  Without the second
+  # this case would pass against a stow that had changed nothing at all.
+  assert_missing "$HOME/.config/nvim/init.lua" 'the link stow could not make'
+  assert_missing "$HOME/.zshrc" 'the link the unstow phase had already taken back'
+  # Built and correct, as with a refusal: the build finished before stow ran, and
+  # it holds the file whose link stow could not make.
+  assert_eq 'personal/base/.vimrc' \
+    "$(cat "$HOME/.dotfiles/current/.vimrc")" 'the built tree'
+  assert_eq 'personal/base/.config/nvim/init.lua' \
+    "$(cat "$HOME/.dotfiles/current/.config/nvim/init.lua")" 'the built tree'
+  assert_missing "$HOME/.dotfiles/current/.zshrc" 'the built tree'
+  assert_missing "$HOME/.dotfiles/current.new"
+  assert_missing "$HOME/.dotfiles/.lock"
+}
+
+# man stow, RESOURCE FILES: ~/.stowrc is read on every run, and a --target in it
+# redirects the entire apply - exit 0, every link in a directory nobody asked
+# for.  The command line overrides a single-valued option, which is the whole
+# reason -t is passed at all.
+test_apply_a_home_stowrc_does_not_redirect_it() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$CASE_DIR/elsewhere"
+  sandbox_write "$HOME" .stowrc "--target=$CASE_DIR/elsewhere"
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_missing "$CASE_DIR/elsewhere/.zshrc" 'the directory the resource file named'
+}
+
+# The other resource file is ./.stowrc, read from whatever directory stow was
+# started in.  run_case leaves the case in $CASE_DIR, which stands for the
+# arbitrary directory a user runs shale from; apply cd's into ~/.dotfiles, so
+# this file is never the one stow reads.
+test_apply_a_stowrc_in_the_working_directory_is_not_read() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$CASE_DIR/elsewhere"
+  sandbox_write "$CASE_DIR" .stowrc "--target=$CASE_DIR/elsewhere"
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_missing "$CASE_DIR/elsewhere/.zshrc" 'the directory the resource file named'
+}
+
+# A build that stopped must not be followed by a stow: current is then either
+# absent or the previous tree, and relinking $HOME at either is worse than doing
+# nothing.  The stub records being run at all, so the claim asserted is that stow
+# was never invoked rather than that it happened to change nothing.
+# shellcheck disable=SC2123  # PATH is prefixed on purpose and restored below
+test_apply_a_failed_build_never_reaches_stow() {
+  local saved
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer local .config/git 'a file where the lower layer has a directory'
+  sandbox_write "$CASE_DIR/stub-bin" stow \
+    '#!/usr/bin/env bash' \
+    ": >\"$CASE_DIR/stow-ran\"" \
+    'exit 0'
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+  saved=$PATH
+  PATH=$sandbox_dir:$PATH
+  run_shale apply
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: conflict at .config/git' 'stderr'
+  assert_missing "$CASE_DIR/stow-ran" 'the marker the stub writes'
+  assert_missing "$HOME/.config"
+  assert_missing "$HOME/.dotfiles/current"
+  assert_missing "$HOME/.dotfiles/.lock"
+}
+
+# The cd into ~/.dotfiles is what makes the ./.stowrc stow reads a known file,
+# and a cd that fails must not be reported as a stow that ran and refused: stow's
+# diagnostic is the whole of what the failure message points at, and there would
+# be none.  The rig takes the search bit off ~/.dotfiles at the last moment the
+# build can be interrupted from outside, which is the only way to reach a failing
+# cd on a directory a build has just written to.
+# shellcheck disable=SC2123  # PATH is prefixed on purpose and restored below
+test_apply_a_directory_it_cannot_enter_is_not_reported_as_a_stow_failure() {
+  local saved real dir
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  real=$(command -v rm) || fail 'rm is not on PATH'
+  # The build removes current.old twice: once reaping a stale one before the
+  # swap, and once after it, which is the last external command it runs.  Taking
+  # the directory away at the first would break the swap instead of the cd.
+  # shellcheck disable=SC2016  # the body is written for the stub's shell
+  sandbox_write "$CASE_DIR/stub-bin" rm \
+    '#!/usr/bin/env bash' \
+    "real=$real" \
+    "fired=$CASE_DIR/stub-bin/fired" \
+    'case "$*" in' \
+    '  */current.old)' \
+    '    "$real" "$@" || exit $?' \
+    '    if [ -e "$fired" ]; then' \
+    "      chmod 0666 $HOME/.dotfiles" \
+    '    else' \
+    '      : >"$fired"' \
+    '    fi' \
+    '    exit 0' \
+    '    ;;' \
+    'esac' \
+    'exec "$real" "$@"'
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+  saved=$PATH
+  PATH=$sandbox_dir:$PATH
+  run_shale apply
+  PATH=$saved
+  dir=$HOME/.dotfiles
+  chmod 0755 "$dir" || fail 'could not restore the mode'
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: could not enter $dir to run stow" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   $dir/current is built; nothing in $HOME was relinked" 'stderr'
+  assert_not_contains "$shale_err" 'stow failed' 'stderr'
+  # bash writes its own diagnostic for a failing cd to the same stream, and it
+  # arrives first: right stream, wrong voice, and it names a line number of the
+  # script.  shale's message is the only one about this.
+  assert_not_contains "$shale_err" ': cd: ' 'stderr'
+  assert_missing "$HOME/.zshrc"
+  assert_eq 'personal/base/.zshrc' "$(cat "$dir/current/.zshrc")" 'the built tree'
+  # The same directory is what the lock lives in, so the release fails too and
+  # says so.  Both messages are the run's output and neither replaces the other.
+  assert_contains "$shale_err" "shale: could not remove the lock at $dir/.lock" 'stderr'
+  sandbox_leaf "$HOME/.dotfiles" .lock
+  rmdir "$sandbox_path" || fail 'could not clear the lock by hand'
+}
+
+# The lock is acquired at the top of apply and a whole build happens before the
+# stow, so holding it is re-established rather than assumed.  The realistic way
+# it goes missing is a user following shale's own advice for a stale lock after a
+# second shale was refused: the lock is then removed while its holder is still
+# building, and the shale that took it next is rebuilding current while this one
+# would be linking $HOME at it.
+# shellcheck disable=SC2123  # PATH is prefixed on purpose and restored below
+test_apply_refuses_when_the_lock_it_holds_is_removed_before_the_stow() {
+  local saved real dir
+  dir=$HOME/.dotfiles
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  real=$(command -v rm) || fail 'rm is not on PATH'
+  # The build removes current.old twice, and the second is the last external
+  # command it runs, which lands this inside the window between the acquire and
+  # the stow rather than before either.
+  # shellcheck disable=SC2016  # the body is written for the stub's shell
+  sandbox_write "$CASE_DIR/stub-bin" rm \
+    '#!/usr/bin/env bash' \
+    "real=$real" \
+    "fired=$CASE_DIR/stub-bin/fired" \
+    'case "$*" in' \
+    '  */current.old)' \
+    '    "$real" "$@" || exit $?' \
+    '    if [ -e "$fired" ]; then' \
+    "      rmdir $dir/.lock" \
+    '    else' \
+    '      : >"$fired"' \
+    '    fi' \
+    '    exit 0' \
+    '    ;;' \
+    'esac' \
+    'exec "$real" "$@"'
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+  saved=$PATH
+  PATH=$sandbox_dir:$PATH
+  run_shale apply
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: the lock at $dir/.lock is gone, and this apply was holding it" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   nothing in $HOME was relinked: apply again once no other shale is running" \
+    'stderr'
+  assert_missing "$HOME/.zshrc"
+  assert_eq 'personal/base/.zshrc' "$(cat "$dir/current/.zshrc")" 'the built tree'
+  # No release warning with it: the directory was taken away from this process,
+  # and telling its user to remove a lock that is not there would be the wrong
+  # message twice over.
+  assert_not_contains "$shale_err" 'could not remove the lock' 'stderr'
+  assert_missing "$dir/.lock"
+}
+
+# Lazily, and before the lock and the build, in the way rmdir and git are: a
+# machine with no stow must be told that before it rebuilds a tree it cannot
+# apply.
+# shellcheck disable=SC2123  # PATH is replaced on purpose and restored below
+test_apply_refuses_when_stow_is_not_installed() {
+  local tool found stub saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$CASE_DIR/stub-bin"
+  stub=$sandbox_dir
+  # Everything shale and the harness run except stow, which is the point.
+  for tool in env bash cat sed rm rmdir mkdir cp mv; do
+    found=$(command -v "$tool") || fail "$tool is not on PATH"
+    sandbox_leaf "$stub" "$tool" new
+    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
+  done
+  saved=$PATH
+  PATH=$stub
+  run_shale apply
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    'shale: stow is not installed, and apply links the built tree with it' 'stderr'
+  assert_contains "$shale_err" \
+    'shale:   install it with your system package manager: shale installs nothing' 'stderr'
+  # Nothing built and nothing taken, so there is nothing to undo.
+  assert_missing "$HOME/.dotfiles/current"
+  assert_missing "$HOME/.dotfiles/.lock"
 }
 
 # --------------------------------------------------------------- doctor cases
