@@ -2536,6 +2536,83 @@ test_doctor_ignores_a_script_that_is_not_under_home() {
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
 }
 
+# -------------------------------------------------------------- examples cases
+#
+# The shipped examples are the format's documentation, and documentation rots
+# against the parser that has to accept it.  The glob is the assertion's whole
+# point: an example added later is checked without anyone remembering to name it
+# here, and one that stops parsing fails the suite rather than a reader.
+#
+# doctor is the observer because it is the only command that parses a config
+# without also acting on it.  build would clone the urls these files carry, and
+# no layer directory can be created for them without re-implementing the parser
+# in the harness to learn the paths - so every layer is missing here and doctor
+# says so.  What is asserted is the absence of a parse error, not a clean bill
+# of health.
+#
+# Every example is checked and the offenders are named together, for the reason
+# parse_config collects config errors rather than dying on the first: a suite
+# that stops at the first broken example makes fixing two of them two runs.
+# That is why the checks below append to the failure report by hand instead of
+# calling the assert_ helpers, which exit the case.
+
+test_examples_every_shipped_config_parses() {
+  local example name out found bad
+  found=0
+  bad=0
+  for example in "$REPO_ROOT"/examples/*.conf; do
+    name=${example##*/}
+    # An unmatched glob is the literal pattern.  The count at the end is what
+    # reports that; naming it as a broken example would name a file that does
+    # not exist.
+    if [ ! -e "$example" ] && [ ! -L "$example" ]; then
+      continue
+    fi
+    # A .conf that is a directory or a dangling symlink is an example nobody
+    # can copy, and passing over it would leave it unchecked, uncounted and
+    # therefore green.
+    if [ ! -f "$example" ]; then
+      printf '%s: not a regular file: %s\n' "$name" "$example" \
+        >>"$CASE_DIR/failure"
+      bad=$((bad + 1))
+      continue
+    fi
+    found=$((found + 1))
+    sandbox_target "$HOME/.dotfiles" shale.conf
+    cp "$example" "$sandbox_path" || fail "could not copy $example"
+    run_shale doctor
+    out=$shale_out$shale_err
+    # Every per-line config error carries 'path:LINE:'.  The file exists, is a
+    # regular file and is readable by the time shale sees it, so that prefix and
+    # an empty config are the only shapes a parse error can take.
+    case "$out" in
+      *"$HOME/.dotfiles/shale.conf:"*)
+        printf '%s: config error:\n' "$name" >>"$CASE_DIR/failure"
+        printf '%s\n' "$out" >>"$CASE_DIR/failure"
+        bad=$((bad + 1))
+        # The check below asks whether records were parsed, which a file that
+        # did not parse cannot answer; reporting both would name one file twice.
+        continue
+        ;;
+    esac
+    # Proof it parsed as records rather than passing vacuously as comments:
+    # doctor reports every configured layer, and none of them exists here.  An
+    # example with no records at all trips this rather than the check above.
+    case "$out" in
+      *"layer '"*) ;;
+      *)
+        printf '%s: no layers parsed:\n' "$name" >>"$CASE_DIR/failure"
+        printf '%s\n' "$out" >>"$CASE_DIR/failure"
+        bad=$((bad + 1))
+        ;;
+    esac
+  done
+  if [ "$bad" -gt 0 ]; then
+    fail "$bad broken example(s) in $REPO_ROOT/examples"
+  fi
+  [ "$found" -gt 0 ] || fail "no examples found at $REPO_ROOT/examples/*.conf"
+}
+
 # ------------------------------------------------------------------ meta cases
 
 test_meta_script_is_syntactically_valid() {
