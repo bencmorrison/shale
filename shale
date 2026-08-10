@@ -699,6 +699,224 @@ self_relative_path() {
   return 0
 }
 
+# $1 with its '.' and '..' components resolved by text, in NORMALISED.  The
+# argument must be absolute; a relative one comes back with a '/' on the front,
+# which is why every caller below tests for that first.
+#
+# Lexical, and deliberately so: the path a broken link points at need not exist,
+# nothing portable resolves one that does not - readlink -f and realpath are both
+# GNU spellings absent from a BSD userland - and shale normalises paths rather
+# than resolving them everywhere else too.  The one case it gets wrong is a '..'
+# below a symlinked directory, which the kernel would follow elsewhere; the paths
+# given to it here are inside a tree stow built with --no-folding, where every
+# directory above a link is a real one.
+normalise_path() {
+  local rest=${1-} component out
+  out=
+  while [ -n "$rest" ]; do
+    component=${rest%%/*}
+    case "$rest" in
+      */*) rest=${rest#*/} ;;
+      *) rest= ;;
+    esac
+    case "$component" in
+      '' | '.') ;;
+      '..') out=${out%/*} ;;
+      *) out=$out/$component ;;
+    esac
+  done
+  NORMALISED=${out:-/}
+}
+
+# $1 wrapped so that a shell reading the line shale printed gets the path back
+# exactly, in QUOTED.  Single quotes around the whole of it, with an embedded
+# quote spelled '\'' - the one form that needs no character class and survives a
+# space, a bracket, a dollar and a backslash alike.
+#
+# The replacement is held in a variable rather than written into the expansion:
+# the same escape spelt inline is read differently by bash 3.2 and by bash 5,
+# and only this spelling gives both the same answer.
+shell_quote() {
+  local s=${1-} q r
+  q=\'
+  r="'\\''"
+  QUOTED="'${s//$q/$r}'"
+}
+
+# Every link under $HOME that points into the built tree at a path the built tree
+# no longer holds: one finding each, and the remedy once under them.  This is the
+# only report of the design's known edge case - stow's unstow phase sweeps the
+# target directories the package still holds, so a directory that has left every
+# layer keeps its links, and the apply that orphaned them exits 0.
+#
+# chkstow's exit status carries no information.  Run against a target it cannot
+# even reach it prints "Can't stat /no/such/dir: No such file or directory" and
+# still exits 0 - verified on 2.3.1 - so the status is not tested at all and the
+# output is what is read.  Its stderr is read as well, and separately: a
+# 'skipping <dir>' there is chkstow's own line, printed where a .stow or a
+# .notstowed marker made it leave a directory unwalked, and a "Can't cd to ..."
+# is File::Find reporting one it could not enter.  Either means the walk covered
+# less than $HOME, so a clean audit says less than it appears to.
+#
+# -t is mandatory, and the argument carries a trailing slash.  chkstow's default
+# target is $STOW_DIR or /usr/local, which is the environment's choice rather
+# than shale's; and File::Find will not descend a top directory that is itself a
+# symlink unless the path ends in '/', so a $HOME reached through one would make
+# the whole audit walk nothing and report clean.
+#
+# What counts is much narrower than what chkstow reports, and the narrowing is
+# the whole check.  'chkstow -b' names every broken symlink anywhere under the
+# target, $DOTFILES included, and nothing under $DOTFILES is ever a link apply
+# made: the layers are the user's, and the built tree's copy of a symlink a layer
+# meant to dangle would otherwise be judged against itself and reported for ever,
+# since no remedy may touch it.  What is a finding is a link elsewhere under
+# $HOME into $CUR at a path $CUR does not hold, which only an apply creates and
+# only a rebuild orphans.
+audit_broken_links() {
+  local out err marker line link dest target cur dots home qdots qhome n lines
+
+  # Uncounted, and before every other check here, which all need a built tree to
+  # mean anything: nothing else in doctor mentions one, so a home full of links
+  # into a tree that is not there would otherwise be reported without a word
+  # about the cause.
+  if [ -d "$DOTFILES" ] && [ ! -d "$CUR" ]; then
+    if [ -e "$CUR" ] || [ -L "$CUR" ]; then
+      note "$CUR exists but is not a directory, so there is no built tree to check the links in ${HOME-} against" \
+        'shale builds into it: remove it, or move it aside'
+    else
+      note "there is no built tree at $CUR, so shale cannot tell a link into it from any other broken link" \
+        'build one with: shale build'
+    fi
+  fi
+
+  command -v chkstow >/dev/null 2>&1 || return 0
+  # Nothing to be orphaned from, and nothing to measure a link against: with no
+  # built tree, every link an apply ever made points at a path it no longer
+  # holds, and the answer to all of them is one 'shale build'.
+  [ -d "$CUR" ] || return 0
+  # An empty HOME would make the target '/', and this walk is the whole of it.
+  [ -n "${HOME-}" ] || return 0
+  # Checked rather than assumed, because the substitution below swallows the
+  # failure of a missing command: every link would arrive with an empty target,
+  # be judged to point outside the built tree, and the audit would report clean.
+  if ! command -v readlink >/dev/null 2>&1; then
+    note 'readlink is not installed, and shale reads what a link points at with it' \
+      "without it shale cannot audit $HOME for broken links"
+    return 0
+  fi
+
+  normalise_path "$CUR"
+  cur=$NORMALISED
+  normalise_path "$DOTFILES"
+  dots=$NORMALISED
+
+  # Exactly one trailing slash.  File::Find strips one from the path it was
+  # given and leaves the rest in every path it prints, so a second would put a
+  # '//' in the middle of every link this reports.
+  home=$HOME
+  case "$home" in
+    */) ;;
+    *) home=$home/ ;;
+  esac
+
+  # Both streams matter and a shell can capture only one of them per run.  fd 3
+  # carries chkstow's stdout - the findings - straight out to the outer
+  # substitution while the inner one takes its stderr, and the marker is printed
+  # only once chkstow has exited, so everything before it is stdout and
+  # everything after it is stderr with no interleaving possible.
+  marker="chkstow-stderr-$$-${RANDOM-0}"
+  out=$( { err=$(chkstow -b -t "$home" 2>&1 1>&3 3>&-); printf '%s\n%s' "$marker" "$err"; } 3>&1 )
+  err=${out#*"$marker"}
+  out=${out%%"$marker"*}
+  if [ -n "$err" ]; then
+    # The newline the marker was printed with.
+    err=${err#?}
+    lines=("chkstow could not walk all of $HOME, so this audit did not reach everything under it:")
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      lines[${#lines[@]}]="  $line"
+    done <<EOF
+$err
+EOF
+    note ${lines[@]+"${lines[@]}"}
+  fi
+
+  n=0
+  # A heredoc rather than a pipe: a pipeline would run this loop in a subshell
+  # and every finding it counted would be lost with it.
+  while IFS= read -r line; do
+    # Not exhaustive, and chkstow's format cannot be made to be: it prints one
+    # unquoted path per line, so a link whose name holds a newline arrives as two
+    # lines and is dropped here.  Nothing is fabricated by that - the tail of
+    # such a name fails this prefix, and a forged 'Bogus link: ' line fails the
+    # readlink below - but the parser sees fewer links than chkstow found.
+    case "$line" in
+      'Bogus link: '*) link=${line#'Bogus link: '} ;;
+      *) continue ;;
+    esac
+    # Everything below concatenates and compares absolute paths, and normalise
+    # would put a '/' on the front of anything else.
+    case "$link" in
+      /*) ;;
+      *) continue ;;
+    esac
+    normalise_path "$link"
+    case "$NORMALISED" in
+      "$dots" | "$dots"/*) continue ;;
+    esac
+    dest=$(readlink "$link") || continue
+    [ -n "$dest" ] || continue
+    # A relative target is what stow writes, and it is relative to the directory
+    # holding the link rather than to anywhere shale is.
+    case "$dest" in
+      /*) ;;
+      *) dest=${link%/*}/$dest ;;
+    esac
+    normalise_path "$dest"
+    target=$NORMALISED
+    case "$target" in
+      "$cur" | "$cur"/*) ;;
+      *) continue ;;
+    esac
+    # What tells an orphan from a dangling symlink a layer ships deliberately:
+    # the layer's is still provided by the built tree, as a link that points
+    # nowhere, and this one is not provided at all.  -L as well as -e, or every
+    # link a layer meant to dangle is reported as a defect in the setup.
+    { [ ! -e "$target" ] && [ ! -L "$target" ]; } || continue
+    finding "$link points at $target, which the built tree no longer provides"
+    n=$((n + 1))
+  done <<EOF
+$out
+EOF
+
+  [ "$n" -gt 0 ] || return 0
+  # Uncounted: this is the remedy for the findings above rather than another of
+  # them, and it leads with deleting them because every finding above names the
+  # path of one and a delete works on every version of stow there is.
+  #
+  # The sweep is second because it does not.  -p/--compat is what would make it
+  # work - its unstow phase walks the whole target tree instead of only the
+  # directories the package still holds, so it takes the orphans back, and plain
+  # 'stow -D' leaves every one of them - but on 2.3.1 that same walk calls every
+  # file in the target that is neither a link nor a directory a conflict and
+  # abandons the whole run before removing anything, which one ~/notes.txt is
+  # enough to cause.  Both were run: 2.3.1 refuses that line and 2.4.1 takes the
+  # orphan back with it.  Nothing here probes for the version - the line says
+  # which one it needs, and a version test belongs in the reader's shell if
+  # anywhere.  It also unstows everything else, hence the apply after it, and
+  # info stow warns the walk "can be prohibitive if your target tree is very
+  # large", which $HOME is - so it stays a remedy rather than what apply does.
+  shell_quote "$DOTFILES"
+  qdots=$QUOTED
+  shell_quote "$HOME"
+  qhome=$QUOTED
+  note 'stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links' \
+    'remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
+    'stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' \
+    "  stow -D -p --no-folding -d $qdots -t $qhome current && shale apply" \
+    'earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory'
+}
+
 # -------------------------------------------------------------------- the query
 
 # The path to look for in each layer, relative to $HOME, in WHICH_REL.  Assigns
@@ -1314,6 +1532,10 @@ cmd_doctor() {
         "so it can silently drop files from an apply"
     fi
   done
+
+  # Last, because it is the only check that walks the whole of $HOME and the only
+  # one that means anything only once everything above it is sound.
+  audit_broken_links
 
   if [ "$FINDINGS" -eq 0 ]; then
     report 'no problems found'

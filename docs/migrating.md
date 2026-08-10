@@ -147,21 +147,44 @@ When a file leaves a layer, the next `shale apply` prunes its link. When an enti
 every layer, the links inside it are left dangling and the apply still exits 0: stow's unstow phase
 only visits directories the package still has.
 
-Find them, and delete the ones that point into `~/.dotfiles/current`:
+`shale doctor` finds them:
 
-```sh
-chkstow -b -t ~
-readlink ~/.config/foo/a.conf
-rm ~/.config/foo/a.conf
+```
+shale: /home/you/.config/foo/a.conf points at /home/you/.dotfiles/current/.config/foo/a.conf, which the built tree no longer provides
+shale: stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links
+shale:   remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying
+shale:   stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:
+shale:     stow -D -p --no-folding -d '/home/you/.dotfiles' -t '/home/you' current && shale apply
+shale:   earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory
 ```
 
-`chkstow` ships with GNU stow and `-b` reports every symlink under the target whose target does not
-exist, as `Bogus link: /home/you/.config/foo/a.conf`. Every one, not only stow's: it walks the whole
-of `$HOME`, which includes `~/.dotfiles`, so a deliberately dangling link inside one of your own
-layers and anything under `current.old` are on the list beside the links an apply orphaned. Check
-each with `readlink` and delete only those whose target is under `~/.dotfiles/current`. The walk is
-not quick. `stow -D` will not clear them either — it visits only the directories the package still
-has.
+Delete the links it names. Each one points at a path that is not there, `current` is already correct,
+and nothing has to be rebuilt or reapplied afterwards.
+
+The sweep is the alternative, and only on stow 2.4 or later. `-p` is what would make it work: it
+walks the whole target tree on unstow rather than only the directories the package still has, and
+plain `stow -D` leaves every orphan in place. On 2.3.1 that same walk treats every ordinary file in
+the target as a conflict — one `~/notes.txt` is enough — and abandons the run before removing
+anything:
+
+```
+WARNING! unstowing current would cause conflicts:
+  * existing target is neither a link nor a directory: notes.txt
+All operations aborted.
+```
+
+It also unstows everything else, hence the `shale apply` after it, and the walk is `$HOME`, which
+`info stow` warns "can be prohibitive if your target tree is very large" — so it is a remedy rather
+than what every apply does.
+
+The audit needs `chkstow`, which ships with GNU stow; `doctor` says so and skips it if it is missing.
+Running `chkstow -b -t ~` yourself lists more than `doctor` does — every broken symlink under `$HOME`
+as `Bogus link: /home/you/.config/foo/a.conf`, which includes your own layers and anything under
+`current.old`, and a symlink a layer ships that points at nothing is not a fault. Doctor reports only
+the links outside `~/.dotfiles` that point into `~/.dotfiles/current` at a path the built tree no
+longer holds. It also says when `chkstow` could not walk all of `$HOME` — a `.stow` or `.notstowed`
+marker makes it skip a directory — because a walk that stopped early has nothing to say about what it
+did not reach. Either way the walk is not quick.
 
 ## Uninstalling
 
