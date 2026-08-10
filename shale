@@ -703,6 +703,167 @@ self_relative_path() {
   return 0
 }
 
+# -------------------------------------------------------------------- the query
+
+# The path to look for in each layer, relative to $HOME, in WHICH_REL.  Assigns
+# a global and returns a status rather than printing its answer: a diagnostic
+# raised inside $(...) would exit only the substitution, the caller would carry
+# on with an empty path, and '[ -e "$dir/" ]' is true for every layer.
+#
+# Normalise, never resolve.  Resolving symlinks answers a different question -
+# which file the path ends at, rather than which layer put that path there -
+# and the tools for it are not portable.
+which_normalise() {
+  local arg=${1-} path rest component prefix longest root i
+
+  WHICH_REL=
+
+  if [ -z "$arg" ]; then
+    emit 'no path given' \
+      "give a path under $HOME, absolute or relative to it"
+    return 1
+  fi
+
+  path=$arg
+  # A '~' only reaches shale unexpanded because it was quoted, and it means
+  # exactly what $HOME does.  Rewritten here rather than stripped below, so the
+  # layer prefixes see one spelling: '~/.dotfiles/personal/base/.zshrc' and
+  # "$HOME/.dotfiles/personal/base/.zshrc" must answer alike.  The quotes in the
+  # patterns are what keep the tilde literal - bash expands an unquoted one in a
+  # case pattern, which would make the pattern $HOME twice over.
+  # shellcheck disable=SC2088  # a tilde to match, not one to expand
+  case "$path" in
+    '~') path=$HOME ;;
+    '~/'*) path=$HOME/${path#'~/'} ;;
+  esac
+
+  # A path inside the built tree or inside a layer, which is what tab completion
+  # produces and the form people actually type.  Before the $HOME strip, not
+  # after it: $DOTFILES is itself under $HOME, so stripping $HOME first leaves
+  # every one of these with a '.dotfiles/...' prefix that matches no layer.
+  # The longest match wins, so a layer nested inside another names the deeper
+  # one - the only reading under which the answer is about the file named.
+  #
+  # The root itself matches too, with or without its trailing '/'.  Both spell
+  # a directory shale composes from rather than a path inside one, and both are
+  # refused below - but only once this has recognised which root was named, or
+  # the message is about $HOME or about a layer that provides nothing.
+  longest=
+  root=
+  for prefix in current ${LAYER_PATHS[@]+"${LAYER_PATHS[@]}"}; do
+    case "$path" in
+      "$DOTFILES/$prefix" | "$DOTFILES/$prefix"/*)
+        if [ "${#prefix}" -gt "${#longest}" ]; then
+          longest=$prefix
+        fi
+        ;;
+    esac
+  done
+  if [ -n "$longest" ]; then
+    path=${path#"$DOTFILES/$longest"}
+    path=${path#/}
+    # Named by its layer wherever one is configured at it, because that is the
+    # name the rest of shale's output uses; 'current' is the only other thing
+    # this loop can have matched.
+    root="the built tree at $DOTFILES/current"
+    i=0
+    while [ "$i" -lt "${#LAYER_PATHS[@]}" ]; do
+      if [ "${LAYER_PATHS[$i]}" = "$longest" ]; then
+        root="layer '${LAYER_NAMES[$i]}' at $DOTFILES/$longest"
+        break
+      fi
+      i=$((i + 1))
+    done
+  fi
+
+  case "$path" in
+    "$HOME"/*) path=${path#"$HOME"/} ;;
+    "$HOME") path= ;;
+    # A well-formed invocation naming a state shale will not act on, so this is
+    # a diagnosis and not a usage error.  It must also never fall through: an
+    # absolute path left in place would be tested as "$dir/$path", which is the
+    # path itself, and every layer would be reported as providing it.
+    /*)
+      emit "$path is not under $HOME" \
+        'shale only composes paths inside your home directory'
+      return 1
+      ;;
+  esac
+
+  while :; do
+    case "$path" in
+      './'*) path=${path#./} ;;
+      *) break ;;
+    esac
+  done
+  while :; do
+    case "$path" in
+      */) path=${path%/} ;;
+      *) break ;;
+    esac
+  done
+
+  # '.' is here for the same reason the absolute arm above is: '$dir/.' exists
+  # wherever $dir does, so left alone it names every layer.
+  case "$path" in
+    '' | '.')
+      if [ -n "$root" ]; then
+        emit "'$arg' names $root, not a path in it"
+      else
+        emit "'$arg' names $HOME itself, not a path in it"
+      fi
+      return 1
+      ;;
+  esac
+
+  rest=$path
+  while :; do
+    component=${rest%%/*}
+    if [ "$component" = '..' ]; then
+      emit "'$arg' contains a '..' component" \
+        'shale normalises the path it is given and never resolves one'
+      return 1
+    fi
+    case "$rest" in
+      */*) rest=${rest#*/} ;;
+      *) break ;;
+    esac
+  done
+
+  WHICH_REL=$path
+  return 0
+}
+
+# How $1 is composed, in WHICH_KIND, and how it is shown, in WHICH_SHOW.
+#
+# A symlink is a leaf whatever it points at, which is how the composer treats
+# one: a layer's symlink to a directory replaces a lower layer's directory
+# rather than merging into it, and build calls that a file-versus-directory
+# conflict.  Reporting it as a directory here would promise a merge that build
+# refuses to perform.
+which_describe() {
+  local path=$1 target
+  if [ -L "$path" ]; then
+    WHICH_KIND='file'
+    # Lazily, in the way git is: an answer with no symlink in it needs no
+    # readlink.  Checked rather than assumed, because the substitution below
+    # swallows the failure of a missing command - the line would be printed with
+    # an empty target, claiming a link to nothing, and which would exit 0.
+    command -v readlink >/dev/null 2>&1 ||
+      die "readlink is not installed, and $path is a symlink" \
+        'shale shows what a link in a layer points at, and reads it with readlink' \
+        'install it with your system package manager: shale installs nothing'
+    target=$(readlink "$path") || die "could not read the symlink at $path"
+    WHICH_SHOW="$path -> $target"
+  elif [ -d "$path" ]; then
+    WHICH_KIND='directory'
+    WHICH_SHOW=$path/
+  else
+    WHICH_KIND='file'
+    WHICH_SHOW=$path
+  fi
+}
+
 # ----------------------------------------------------------------- the commands
 
 cmd_build() {
@@ -1069,8 +1230,99 @@ cmd_doctor() {
   exit 1
 }
 
+# Reads no build output but the one note at the end: the answer is what the
+# layers say, so it is the same before the first build as after it.
 cmd_which() {
-  not_implemented which
+  local arg=${1-} rel path i n lower upper keyword column width
+
+  parse_config || exit 1
+  which_normalise "$arg" || exit 1
+  rel=$WHICH_REL
+
+  # Highest precedence first, which is the order the answer is printed in and
+  # the reverse of the order the config lists.
+  WHICH_NAMES=()
+  WHICH_KINDS=()
+  WHICH_SHOWS=()
+  i=${#LAYER_NAMES[@]}
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    path=$DOTFILES/${LAYER_PATHS[$i]}/$rel
+    # -L as well as -e: a layer may legitimately ship a symlink whose target is
+    # not inside the tree, and -e alone reports that layer as not providing it.
+    { [ -e "$path" ] || [ -L "$path" ]; } || continue
+    which_describe "$path"
+    WHICH_NAMES+=("${LAYER_NAMES[$i]}")
+    WHICH_KINDS+=("$WHICH_KIND")
+    WHICH_SHOWS+=("$WHICH_SHOW")
+  done
+
+  n=${#WHICH_NAMES[@]}
+  if [ "$n" -eq 0 ]; then
+    emit "no layer provides '$rel'"
+    if [ -e "$CUR/$rel" ] || [ -L "$CUR/$rel" ]; then
+      emit "note: present in current/ but no layer provides it — current/ is stale, run 'shale build'"
+    fi
+    exit 1
+  fi
+
+  # The two adjacent providers, lowest pair first, whose kinds differ.  That is
+  # the pair build names and no other: build composes in config order and
+  # collides when a layer's kind differs from what the composed tree already
+  # holds, which is what the *nearest* provider below it put there.  Naming the
+  # lowest provider instead would send someone to remove a layer build never
+  # mentions, leaving the build failing exactly as it did.
+  lower=-1
+  upper=-1
+  i=$((n - 1))
+  while [ "$i" -gt 0 ]; do
+    if [ "${WHICH_KINDS[$i]}" != "${WHICH_KINDS[$((i - 1))]}" ]; then
+      lower=$i
+      upper=$((i - 1))
+      break
+    fi
+    i=$((i - 1))
+  done
+
+  # No differing pair at all means every provider is of one kind, so all of them
+  # being directories means they merge rather than shadow and no line may claim
+  # to have won: printing 'winner' there states the exact opposite of what build
+  # does with them.
+  keyword=
+  if [ "$upper" -lt 0 ] && [ "${WHICH_KINDS[0]}" = directory ]; then
+    keyword=merged
+  fi
+
+  # Both columns are fixed for a given config, so two answers read one after the
+  # other line up: the keyword column is the width of the longest keyword there
+  # is, and the name column the width of the longest configured layer name -
+  # measuring only the providers moves the paths from one answer to the next.
+  # Two spaces between columns, and the keyword first because it is the answer
+  # and this output is read by grep and by eye alike.
+  width=0
+  i=0
+  while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
+    [ "${#LAYER_NAMES[$i]}" -le "$width" ] || width=${#LAYER_NAMES[$i]}
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    if [ -n "$keyword" ]; then
+      pad_right "$keyword" 8
+    elif [ "$i" -eq 0 ]; then
+      pad_right winner 8
+    else
+      pad_right shadowed 8
+    fi
+    column=$PADDED
+    pad_right "${WHICH_NAMES[$i]}" "$width"
+    printf '%s  %s  %s\n' "$column" "$PADDED" "${WHICH_SHOWS[$i]}"
+    i=$((i + 1))
+  done
+
+  if [ "$upper" -ge 0 ]; then
+    emit "note: 'build' would fail here — $rel is a ${WHICH_KINDS[$lower]} in '${WHICH_NAMES[$lower]}' and a ${WHICH_KINDS[$upper]} in '${WHICH_NAMES[$upper]}'"
+  fi
 }
 
 # A bare invocation is a question; an explicitly empty command word is not, and

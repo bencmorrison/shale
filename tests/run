@@ -697,13 +697,6 @@ test_usage_apply_is_stubbed() {
   assert_empty "$shale_out" 'stdout'
 }
 
-test_usage_which_is_stubbed() {
-  run_shale which .zshrc
-  assert_status 1 "$shale_status"
-  assert_contains "$shale_err" 'shale: which is not implemented yet' 'stderr'
-  assert_empty "$shale_out" 'stdout'
-}
-
 # --------------------------------------------------------------- config cases
 #
 # parse_config has no output of its own, so these cases observe it through
@@ -3086,6 +3079,387 @@ test_examples_every_shipped_config_parses() {
     fail "$bad broken example(s) in $REPO_ROOT/examples"
   fi
   [ "$found" -gt 0 ] || fail "no examples found at $REPO_ROOT/examples/*.conf"
+}
+
+# ---------------------------------------------------------------- which cases
+#
+# The answer is on stdout with no 'shale: ' prefix - it is the command's result,
+# and the keyword is its first token so a line of it can be grepped or cut.
+# Notes and diagnostics are on stderr as everywhere else.  Most of these never
+# build: which reads the layers, not the built tree.
+
+test_which_names_the_winner_and_the_layers_it_shadows() {
+  conf 'base personal/base' 'personalised personal/personalised' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer personal/personalised .config/git/config
+  run_shale which .config/git/config
+  assert_status 0 "$shale_status"
+  # 'local' is configured and provides nothing, so it is absent: the report is
+  # the providers, not the layer list.
+  assert_eq "winner    personalised  $HOME/.dotfiles/personal/personalised/.config/git/config
+shadowed  base          $HOME/.dotfiles/personal/base/.config/git/config" \
+    "$shale_out" 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+test_which_a_single_provider_prints_one_line() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  run_shale which .zshrc
+  assert_status 0 "$shale_status"
+  assert_eq "winner    base   $HOME/.dotfiles/personal/base/.zshrc" "$shale_out" 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# The name column is the widest configured layer name, not the widest provider,
+# so two answers read one after the other line up under each other.
+# 'personalised' provides neither path here, and a column measured over the
+# providers would put the second answer's paths in a different place from the
+# first's.
+test_which_the_name_column_fits_the_widest_configured_layer() {
+  conf 'base personal/base' 'personalised personal/personalised' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer local .config/nvim/init.lua
+  run_shale which .config
+  assert_status 0 "$shale_status"
+  assert_eq "merged    local         $HOME/.dotfiles/local/.config/
+merged    base          $HOME/.dotfiles/personal/base/.config/" "$shale_out" 'stdout'
+  assert_empty "$shale_err" 'stderr'
+  run_shale which .config/git/config
+  assert_status 0 "$shale_status" 'the second answer'
+  assert_eq "winner    base          $HOME/.dotfiles/personal/base/.config/git/config" \
+    "$shale_out" 'the second answer'
+  assert_empty "$shale_err" 'the second answer stderr'
+}
+
+# Every spelling anyone can reach the same file by - typed, completed from
+# $HOME, or completed from inside the built tree or a layer - answers alike.
+# The layer and current forms are the ones the order of normalisation exists
+# for: $DOTFILES is under $HOME, so stripping $HOME first leaves them naming
+# '.dotfiles/...', which no layer provides.
+test_which_every_spelling_of_the_path_agrees() {
+  local expected spelling
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .config/x
+  mklayer local .config/x
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale which .config/x
+  assert_status 0 "$shale_status" 'the relative spelling'
+  expected=$shale_out
+  assert_contains "$expected" "winner    local  $HOME/.dotfiles/local/.config/x" 'stdout'
+  # shellcheck disable=SC2088  # unexpanded tildes are the input under test
+  for spelling in "$HOME/.config/x" '~/.config/x' './.config/x' \
+    '~/.dotfiles/current/.config/x' "$HOME/.dotfiles/current/.config/x" \
+    '~/.dotfiles/personal/base/.config/x' "$HOME/.dotfiles/local/.config/x"; do
+    run_shale which "$spelling"
+    assert_status 0 "$shale_status" "'$spelling' exit status"
+    assert_eq "$expected" "$shale_out" "'$spelling' stdout"
+    assert_empty "$shale_err" "'$spelling' stderr"
+  done
+}
+
+# The message matters as much as the status: a normalisation that let the path
+# through would report every layer as providing it, or exit 1 saying no layer
+# does - which is the same status for the opposite reason.
+test_which_a_path_outside_home_exits_1_without_matching_a_layer() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  run_shale which /etc/hosts
+  assert_status 1 "$shale_status"
+  assert_empty "$shale_out" 'stdout'
+  assert_contains "$shale_err" "shale: /etc/hosts is not under $HOME" 'stderr'
+  assert_not_contains "$shale_err" 'no layer provides' 'stderr'
+}
+
+# The same hazard from the other side: each of these normalises to nothing, and
+# '[ -e "$dir/" ]' is true for every layer there is.
+test_which_a_path_that_names_home_itself_is_refused() {
+  local arg
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  for arg in '.' './' '~' "$HOME" "$HOME/"; do
+    run_shale which "$arg"
+    assert_status 1 "$shale_status" "'$arg' exit status"
+    assert_empty "$shale_out" "'$arg' stdout"
+    assert_contains "$shale_err" 'itself, not a path in it' "'$arg' stderr"
+  done
+  run_shale which ''
+  assert_status 1 "$shale_status" 'the empty path exit status'
+  assert_empty "$shale_out" 'the empty path stdout'
+  assert_contains "$shale_err" 'shale: no path given' 'the empty path stderr'
+}
+
+# A layer root and the built tree are directories shale composes from rather
+# than paths inside one, and stripping the prefix leaves nothing.  Both the
+# other readings are false: with the trailing '/' the remainder is empty and
+# looks like $HOME, and without it nothing is stripped at all and the path looks
+# like a '.dotfiles/...' no layer provides.
+test_which_a_root_is_named_as_the_root_it_is() {
+  local arg
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  # shellcheck disable=SC2088  # unexpanded tildes are the input under test
+  for arg in "$HOME/.dotfiles/personal/base" "$HOME/.dotfiles/personal/base/" \
+    '~/.dotfiles/personal/base' '~/.dotfiles/personal/base/'; do
+    run_shale which "$arg"
+    assert_status 1 "$shale_status" "'$arg' exit status"
+    assert_empty "$shale_out" "'$arg' stdout"
+    assert_eq "shale: '$arg' names layer 'base' at $HOME/.dotfiles/personal/base, not a path in it" \
+      "$shale_err" "'$arg' stderr"
+  done
+  for arg in "$HOME/.dotfiles/current" "$HOME/.dotfiles/current/"; do
+    run_shale which "$arg"
+    assert_status 1 "$shale_status" "'$arg' exit status"
+    assert_empty "$shale_out" "'$arg' stdout"
+    assert_eq "shale: '$arg' names the built tree at $HOME/.dotfiles/current, not a path in it" \
+      "$shale_err" "'$arg' stderr"
+  done
+}
+
+test_which_rejects_a_dot_dot_component() {
+  local arg
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  # shellcheck disable=SC2088  # an unexpanded tilde is the input under test
+  for arg in '../.zshrc' '.config/../.zshrc' '~/.config/../.zshrc' \
+    "$HOME/.dotfiles/personal/base/../base/.zshrc"; do
+    run_shale which "$arg"
+    assert_status 1 "$shale_status" "'$arg' exit status"
+    assert_empty "$shale_out" "'$arg' stdout"
+    assert_contains "$shale_err" "contains a '..' component" "'$arg' stderr"
+  done
+}
+
+# Directories are merged by the composer rather than replaced, so no layer wins
+# one.  Printing 'winner' here would send someone looking for a conflict that
+# does not exist.
+test_which_an_all_directory_path_reports_merged() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer local .config/nvim/init.lua
+  run_shale which .config
+  assert_status 0 "$shale_status"
+  assert_eq "merged    local  $HOME/.dotfiles/local/.config/
+merged    base   $HOME/.dotfiles/personal/base/.config/" "$shale_out" 'stdout'
+  assert_not_contains "$shale_out" 'winner' 'stdout'
+  assert_not_contains "$shale_out" 'shadowed' 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# The note and the build it predicts, in one case: the note is worth nothing if
+# build does not in fact fail on the pair it names.
+test_which_mixed_kinds_note_that_build_would_fail() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer local .config/git 'LOCAL FILE'
+  run_shale which .config/git
+  assert_status 0 "$shale_status"
+  assert_eq "winner    local  $HOME/.dotfiles/local/.config/git
+shadowed  base   $HOME/.dotfiles/personal/base/.config/git/" "$shale_out" 'stdout'
+  assert_eq "shale: note: 'build' would fail here — .config/git is a directory in 'base' and a file in 'local'" \
+    "$shale_err" 'stderr'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" 'shale: conflict at .config/git' 'the build stderr'
+}
+
+# Three layers, because with two the pair cannot differ: build collides between
+# a layer and the nearest provider *below* it, and a note naming the lowest
+# provider instead agrees by accident whenever there is only one below.  Here
+# 'base' is the lowest and build never mentions it, so a note that named it
+# would have someone remove a layer and find the build failing identically.
+test_which_the_note_names_the_pair_build_names() {
+  conf 'base personal/base' 'extra personal/extra' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer personal/extra .config/git/config
+  mklayer local .config/git 'LOCAL FILE'
+  run_shale which .config/git
+  assert_status 0 "$shale_status"
+  assert_eq "shale: note: 'build' would fail here — .config/git is a directory in 'extra' and a file in 'local'" \
+    "$shale_err" 'stderr'
+  # Every provider is still listed: the note is about the collision, the answer
+  # is about the path.
+  assert_eq "winner    local  $HOME/.dotfiles/local/.config/git
+shadowed  extra  $HOME/.dotfiles/personal/extra/.config/git/
+shadowed  base   $HOME/.dotfiles/personal/base/.config/git/" "$shale_out" 'stdout'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" 'shale: conflict at .config/git' 'the build stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'local' provides a file" 'the build stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'extra' provides a directory" 'the build stderr'
+  # The layer the note used to name, and the one build has nothing to say about.
+  assert_not_contains "$shale_err" "layer 'base'" 'the build stderr'
+}
+
+# A symlink is a leaf whatever it points at, so it is a file here as it is to
+# the composer - and the target is shown, because for a link that is the whole
+# content of the file the layer provides.
+test_which_a_symlink_provider_shows_its_target() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .netrc
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  sandbox_leaf "$sandbox_dir" .netrc new
+  ln -s ../secrets/netrc "$sandbox_path" || fail 'could not create the symlink'
+  run_shale which .netrc
+  assert_status 0 "$shale_status"
+  assert_eq "winner    local  $HOME/.dotfiles/local/.netrc -> ../secrets/netrc
+shadowed  base   $HOME/.dotfiles/personal/base/.netrc" "$shale_out" 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# -e is false for a link whose target is not there, and a layer may legitimately
+# ship one: the target is often created by the machine, not by the layer.
+test_which_a_dangling_symlink_provider_is_still_found() {
+  conf 'base personal/base'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .netrc new
+  ln -s nowhere "$sandbox_path" || fail 'could not create the symlink'
+  [ ! -e "$HOME/.dotfiles/personal/base/.netrc" ] ||
+    fail 'the fixture link is not dangling'
+  run_shale which .netrc
+  assert_status 0 "$shale_status"
+  assert_eq "winner    base  $HOME/.dotfiles/personal/base/.netrc -> nowhere" \
+    "$shale_out" 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# The target comes out of a command substitution, which swallows the failure of
+# a missing command: without this check the line is printed with an empty
+# target, claiming a link that points nowhere, and which exits 0.  Checked where
+# git is checked, at the point of use - an answer with no symlink in it needs no
+# readlink at all, which the second run here is.
+# shellcheck disable=SC2123
+test_which_a_missing_readlink_stops_it() {
+  local tool found stub saved
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .netrc
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  sandbox_leaf "$sandbox_dir" .netrc new
+  ln -s ../secrets/netrc "$sandbox_path" || fail 'could not create the symlink'
+  sandbox_mkdir "$CASE_DIR/stub-bin"
+  stub=$sandbox_dir
+  # Everything shale and the harness run except readlink, which is the point.
+  for tool in env bash cat sed rm mkdir rmdir cp mv; do
+    found=$(command -v "$tool") || fail "$tool is not on PATH"
+    sandbox_leaf "$stub" "$tool" new
+    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
+  done
+  saved=$PATH
+  PATH=$stub
+  run_shale which .netrc
+  assert_status 1 "$shale_status"
+  # The refusal replaces the answer rather than standing beside a partial one.
+  assert_empty "$shale_out" 'stdout'
+  assert_contains "$shale_err" \
+    "shale: readlink is not installed, and $HOME/.dotfiles/local/.netrc is a symlink" 'stderr'
+  assert_contains "$shale_err" \
+    'shale:   install it with your system package manager: shale installs nothing' 'stderr'
+  run_shale which .zshrc
+  PATH=$saved
+  assert_status 0 "$shale_status" 'the path with no symlink'
+  assert_eq "winner    base   $HOME/.dotfiles/personal/base/.zshrc" \
+    "$shale_out" 'the path with no symlink'
+  assert_empty "$shale_err" 'the path with no symlink stderr'
+}
+
+# which composes nothing, so it takes no lock and no lock may keep it from
+# answering: the question 'which layer provides this?' is the one being asked
+# while a build is running, and the answer does not depend on the build.
+test_which_neither_takes_the_lock_nor_waits_for_it() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  run_shale which .zshrc
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/.lock" 'the lock'
+  sandbox_mkdir "$HOME/.dotfiles/.lock"
+  run_shale which .zshrc
+  assert_status 0 "$shale_status" 'with the lock held'
+  assert_eq "winner    local  $HOME/.dotfiles/local/.zshrc
+shadowed  base   $HOME/.dotfiles/personal/base/.zshrc" "$shale_out" 'with the lock held'
+  assert_empty "$shale_err" 'with the lock held'
+  # Left exactly as its holder made it: not taken, and not given back.
+  assert_exists "$HOME/.dotfiles/.lock" 'the lock'
+}
+
+test_which_a_path_no_layer_provides_exits_1() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  run_shale which .config/nvim/init.lua
+  assert_status 1 "$shale_status"
+  assert_empty "$shale_out" 'stdout'
+  assert_eq "shale: no layer provides '.config/nvim/init.lua'" "$shale_err" 'stderr'
+}
+
+# The one place which looks at the built tree, and only to explain a path it
+# could not otherwise account for.
+test_which_a_path_only_in_current_notes_a_stale_tree() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .vimrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .vimrc
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale which .vimrc
+  assert_status 1 "$shale_status"
+  assert_empty "$shale_out" 'stdout'
+  assert_contains "$shale_err" "shale: no layer provides '.vimrc'" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: note: present in current/ but no layer provides it — current/ is stale, run 'shale build'" \
+    'stderr'
+}
+
+test_which_works_before_the_first_build() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  assert_missing "$HOME/.dotfiles/current" 'the built tree'
+  run_shale which .zshrc
+  assert_status 0 "$shale_status"
+  assert_eq "winner    local  $HOME/.dotfiles/local/.zshrc
+shadowed  base   $HOME/.dotfiles/personal/base/.zshrc" "$shale_out" 'stdout'
+  assert_empty "$shale_err" 'stderr'
+  assert_missing "$HOME/.dotfiles/current" 'the built tree'
+  assert_missing "$HOME/.dotfiles/current.new" 'the scratch tree'
+}
+
+# Layer paths may nest, and then two prefixes match one argument.  The deeper
+# one is the answer: the shallower strip leaves 'base/.zshrc', which names a
+# path no layer provides at all.
+test_which_a_layer_inside_another_strips_the_deeper_path() {
+  conf 'outer personal' 'inner personal/base'
+  mklayer personal .zshrc
+  mklayer personal/base .zshrc
+  run_shale which "$HOME/.dotfiles/personal/base/.zshrc"
+  assert_status 0 "$shale_status"
+  assert_eq "winner    inner  $HOME/.dotfiles/personal/base/.zshrc
+shadowed  outer  $HOME/.dotfiles/personal/.zshrc" "$shale_out" 'stdout'
+}
+
+# which needs the layer list to answer at all, so it takes the config the same
+# way build does: every error, and then a refusal.
+test_which_a_broken_config_stops_it() {
+  run_shale which .zshrc
+  assert_status 1 "$shale_status"
+  assert_empty "$shale_out" 'stdout'
+  assert_contains "$shale_err" "shale: no config file at $HOME/.dotfiles/shale.conf" 'stderr'
+  conf 'base personal/base' 'base local'
+  run_shale which .zshrc
+  assert_status 1 "$shale_status" 'the duplicate-name exit status'
+  assert_empty "$shale_out" 'the duplicate-name stdout'
+  assert_contains "$shale_err" "duplicate layer name 'base'" 'the duplicate-name stderr'
 }
 
 # ------------------------------------------------------------------ meta cases
