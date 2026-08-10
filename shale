@@ -119,6 +119,76 @@ usage_error() {
   exit 2
 }
 
+# The first directory on the way down to $1 that is there and cannot be
+# searched, in UNSEARCHABLE.  Non-zero when every directory above $1 can be
+# searched, which is the only case in which a '-e' or a '-d' answer of 'no'
+# about $1 means that nothing is there.
+#
+# Downwards rather than up, and the first one rather than the nearest: an
+# unsearchable directory makes every test of every path below it false, so the
+# highest one is the cause and each one under it is a symptom of that.  The last
+# component is not tested at all - it is the path being asked about, and
+# reaching it needs search permission on the directories above it and none of
+# its own.
+#
+# A relative path is joined to the working directory rather than refused: HOME
+# need not be absolute, and every caller here reaches its path from the same
+# directory this walk would start from.  Refusing one instead sent the callers
+# to their 'nothing is there' arm, which is the whole defect this exists to stop.
+# The joined path is what UNSEARCHABLE is reported as, so the reader is given a
+# path that means the same thing from anywhere.
+#
+# PWD is what that join is tested on, never its result: bash leaves PWD unset
+# where the directory it named has been removed, and an empty one joins to
+# '/relative/path', which is absolute enough to pass any test made afterwards
+# while naming a top-level directory nobody referred to - '/root' for a $HOME of
+# 'root'.  Nothing shale does reaches that state, both of its cd's being inside
+# a subshell, but the walk is not what should be relied on to keep it so.
+#
+# obscured_ancestor is the same test walking a path relative to a directory
+# already known to be searchable.
+#
+# Nothing here reaches for denied_verb, which picks a verb from whichever of
+# '! -r || ! -x' is missing.  There is no choice to make: this tests the search
+# bit and never the read bit, so a directory at mode 0444 stops the walk while
+# listing perfectly well, and 'cannot search' is the only word its callers can
+# say that is true of every directory it names.
+first_unsearchable_ancestor() {
+  local path=${1-} here rest component
+  UNSEARCHABLE=
+  case "$path" in
+    '') return 1 ;;
+    /*) ;;
+    *)
+      case "${PWD-}" in
+        /*) path=$PWD/$path ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  here=
+  rest=${path#/}
+  while :; do
+    # The root is spelt '/' and every directory below it is spelt without a
+    # trailing slash, which is what the empty $here stands for on the first pass.
+    if [ -d "${here:-/}" ] && [ ! -x "${here:-/}" ]; then
+      UNSEARCHABLE=${here:-/}
+      return 0
+    fi
+    case "$rest" in
+      */*)
+        component=${rest%%/*}
+        rest=${rest#*/}
+        ;;
+      *) return 1 ;;
+    esac
+    # A '//' in the path leaves an empty component, which names the directory
+    # already reached rather than one below it.
+    [ -n "$component" ] || continue
+    here=$here/$component
+  done
+}
+
 # ------------------------------------------------------------------ the config
 
 config_error() {
@@ -178,15 +248,17 @@ parse_config() {
 
   if [ ! -e "$CONF" ]; then
     # -e cannot tell 'nothing is there' from 'nothing can be learnt about it':
-    # a $DOTFILES that cannot be searched fails every test of a path inside it,
-    # and reporting that as a missing config sends the reader to create a file
-    # that is already there.  Search permission on the directory holding it is
-    # what tells the two apart.
-    if [ -d "$DOTFILES" ] && [ ! -x "$DOTFILES" ]; then
+    # a directory on the way down to the config that cannot be searched fails
+    # every test of a path inside it, and reporting that as a missing config
+    # sends the reader to create a file that is already there.  Search
+    # permission on the directories above it is what tells the two apart, and
+    # $DOTFILES is only the last of them: with $HOME or anything above it
+    # unsearchable, every test in this function is false for the same reason.
+    if first_unsearchable_ancestor "$CONF"; then
       # 'search' rather than 'read': this arm is reached on the search bit
       # alone, and at mode 0444 the directory is perfectly readable - it is
       # opening a file inside it that the missing bit refuses.
-      config_error "cannot search $DOTFILES: permission denied" \
+      config_error "cannot search $UNSEARCHABLE: permission denied" \
         "shale cannot tell whether there is a config file at $CONF" \
         "check the permissions on that directory"
       return 1
@@ -1685,8 +1757,27 @@ cmd_doctor() {
 
   if [ ! -d "$DOTFILES" ]; then
     if [ -e "$DOTFILES" ] || [ -L "$DOTFILES" ]; then
+      # One input reaches this arm and is told something false: a symlink whose
+      # target sits under a directory that cannot be searched, where -e answers
+      # no about a directory that may be perfectly good.  Naming that cause
+      # needs the link's target, which needs readlink - an optional dependency
+      # shale checks for lazily, so a check here would either drag that check
+      # forward for every run or say a third thing where it is missing.  The
+      # line prescribes nothing, which is what keeps the cost of being wrong
+      # here to the diagnosis rather than to what the reader then does.
       finding "$DOTFILES exists but is not a directory" \
         "shale keeps your layers, your config and its build output there"
+    elif first_unsearchable_ancestor "$DOTFILES"; then
+      # Every test of every path under an unsearchable directory answers no, so
+      # without this doctor states that there is no dotfiles directory - which
+      # may well be there - and prints a mkdir that fails for the same reason
+      # the test did.  doctor is the command run when nothing works, so naming
+      # the cause is the whole of its job here.
+      #
+      # No remedy line: parse_config's arm names this same directory and this
+      # same cause a moment later, and one is enough for both.
+      finding "cannot search $UNSEARCHABLE: permission denied" \
+        "shale cannot tell whether there is a dotfiles directory at $DOTFILES"
     else
       finding "no dotfiles directory at $DOTFILES" \
         "create it with: mkdir -p $DOTFILES"
