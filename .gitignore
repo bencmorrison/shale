@@ -1,6 +1,9 @@
 # Working copy of the implementation plan; the tracking issue holds the canonical one.
 PLAN.md
 
+# Machine-local dev container variant; mounts a personal credential.
+.devcontainer/local/
+
 .DS_Store
 *~
 *.swp
