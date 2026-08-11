@@ -3605,6 +3605,37 @@ shale: composed layer 'work' from $HOME/.dotfiles/work" "$shale_out" 'stdout'
   assert_eq 'work/.gitconfig' "$(cat "$HOME/.dotfiles/current/.gitconfig")" 'the built tree'
 }
 
+# The config error that costs most to learn late: a layer whose root has no url
+# is in the state it will still be in when every clone has finished, and the
+# reader was made to wait through two of them to hear about a mkdir.  The
+# assertions are on the filesystem and on the recording git, not on the absence
+# of shale's own line: the roots are not there and git was never run, which
+# 'cloning' being missing from stdout on its own would not say.
+# shellcheck disable=SC2123  # PATH is prefixed on purpose and restored below
+test_clone_a_layer_that_cannot_be_cloned_stops_the_build_before_any_clone() {
+  local personal_url saved
+  mkrepo personal .zshrc
+  personal_url=$repo_url
+  mkrepo work .gitconfig
+  conf "base personal $personal_url" "work work $repo_url" 'local local'
+  stub_git
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: layer 'local' has no directory at $HOME/.dotfiles/local and no url for 'local'" 'stderr'
+  assert_contains "$shale_err" 'shale:   add a url on that line, or create the directory' 'stderr'
+  assert_empty "$(cat "$git_log")" 'git invocations'
+  assert_empty "$shale_out" 'stdout'
+  assert_missing "$HOME/.dotfiles/personal"
+  assert_missing "$HOME/.dotfiles/work"
+  assert_missing "$HOME/.dotfiles/.personal.cloning"
+  assert_missing "$HOME/.dotfiles/.work.cloning"
+  assert_missing "$HOME/.dotfiles/current"
+}
+
 # The case that keeps a sync command cut from scope: shale obtains a layer it
 # has not got and never touches one it has.  git is not run at all on the second
 # build, which is the same claim the lazy prerequisite check makes.
