@@ -492,6 +492,17 @@ LOCKED=
 # dotfile, where on 3.2 it always has '.' and '..' to match.
 dir_is_empty() {
   local dir=$1 entry
+  # Three answers, not two, and this is the third: a directory that cannot be
+  # listed or searched answers every glob below with nothing at all, which is
+  # exactly what an empty one answers.  'Empty' is the one reading it must never
+  # take - every caller turns that into rmdir, and rmdir fails on the contents
+  # it could not see - so not knowing is reported as not empty, which is the
+  # answer all three callers are safe to act on.  The read bit is the one that
+  # decides: at mode 0444 the globs list the directory perfectly well, and it is
+  # 0111 and 0000 that come back empty-looking with a file inside.  Search is
+  # required too, because a directory shale cannot enter is one it could not
+  # confirm the emptiness of either.
+  { [ -r "$dir" ] && [ -x "$dir" ]; } || return 1
   for entry in "$dir"/* "$dir"/.*; do
     case "${entry##*/}" in
       . | ..) continue ;;
@@ -510,7 +521,7 @@ dir_is_empty() {
 # a refusing branch rather than deleting a layer or a home directory.  Blanking
 # comes first so a second call does nothing even if a removal failed.
 cleanup() {
-  local scratch=${SCRATCH-} cloning=${CLONING-} locked=${LOCKED-} remedy
+  local scratch=${SCRATCH-} cloning=${CLONING-} locked=${LOCKED-} remedy qlocked
   SCRATCH=
   CLONING=
   LOCKED=
@@ -531,8 +542,16 @@ cleanup() {
         # rmdir is the remedy for the lock shale makes, which is always empty.
         # Something that wrote inside it makes rmdir fail with 'Directory not
         # empty', and advising it again would print a command that errors.
-        remedy="rmdir $locked"
-        dir_is_empty "$locked" || remedy="rm -rf $locked"
+        #
+        # Quoted, like every other command shale prints to be pasted: a home
+        # with a space in it otherwise yields an rm -rf over two paths that are
+        # not the lock.  Clobbering the global QUOTED is safe here and nowhere
+        # else in this function: cleanup runs from a trap, and every path that
+        # reaches it ends the process.
+        shell_quote "$locked"
+        qlocked=$QUOTED
+        remedy="rmdir $qlocked"
+        dir_is_empty "$locked" || remedy="rm -rf $qlocked"
         warn "could not remove the lock at $locked" \
           "remove it with: $remedy, or no later build will run"
       fi
@@ -580,7 +599,7 @@ arm_traps
 # the command: apply takes it for its build and its stow together, and the
 # release belongs on the paths cleanup already covers.
 acquire_lock() {
-  local remedy
+  local remedy qlock
   # Already held by this process, which is how apply's own build reaches this
   # without meeting the lock apply took for it.
   [ -z "$LOCKED" ] || return 0
@@ -620,8 +639,13 @@ acquire_lock() {
   # about the tree another process is composing.  The message carries the
   # command that clears it by hand, which is the honest remedy.
   if [ -d "$LOCK" ]; then
-    remedy="rmdir $LOCK"
-    dir_is_empty "$LOCK" || remedy="rm -rf $LOCK"
+    # Quoted, because this line exists to be pasted: a home with a space in it
+    # otherwise yields an rm -rf over two paths that are not the lock, and one
+    # with a quote in it yields a command the shell will not even parse.
+    shell_quote "$LOCK"
+    qlock=$QUOTED
+    remedy="rmdir $qlock"
+    dir_is_empty "$LOCK" || remedy="rm -rf $qlock"
     die "another shale has the lock at $LOCK" \
       "build and apply take it so that two of them cannot rebuild $CUR at once" \
       "if no other shale is running, this lock is stale: remove it with: $remedy"
@@ -651,7 +675,7 @@ acquire_lock() {
 # reason a url attaches to the root rather than to the layer.  A checkout that
 # is already there is left exactly as it is: updating one is git's job.
 clone_missing_roots() {
-  local i root url dir tmp have_git
+  local i root url dir tmp have_git qtmp qdir
   have_git=0
   i=0
   while [ "$i" -lt "${#CLONE_ROOTS[@]}" ]; do
@@ -707,9 +731,16 @@ clone_missing_roots() {
       # The next build reaps it and fetches again, so keeping it silently would
       # save nothing: what makes it worth keeping is being told it is there.
       CLONING=
+      # Quoted, like every command shale prints for a reader to run: a home with
+      # a space in it otherwise makes this an mv of four paths, none of them
+      # these two.
+      shell_quote "$tmp"
+      qtmp=$QUOTED
+      shell_quote "$dir"
+      qdir=$QUOTED
       die "could not move the clone into place at $dir" \
         "the clone is at $tmp" \
-        "move it into place with: mv $tmp $dir, or the next build fetches it again"
+        "move it into place with: mv $qtmp $qdir, or the next build fetches it again"
     fi
     CLONING=
   done
@@ -1340,7 +1371,7 @@ which_describe() {
 # ----------------------------------------------------------------- the commands
 
 cmd_build() {
-  local i name path root dir errors n had_current
+  local i name path root dir errors n had_current qcur qold
 
   parse_config || exit 1
 
@@ -1547,9 +1578,16 @@ cmd_build() {
       die "could not move $NEW into place" \
         "$CUR is the previous tree again, and $NEW is the one that was not installed"
     fi
+    # Quoted, and this is the printed command it matters most for: it is an
+    # rm -rf, it is pasted by someone whose home is half-swapped, and unquoted
+    # under a home with a space in it the rm takes a path that is not $CUR.
+    shell_quote "$CUR"
+    qcur=$QUOTED
+    shell_quote "$OLD"
+    qold=$QUOTED
     die "could not move $NEW into place" \
       "the previous tree is at $OLD, and $CUR is missing or incomplete" \
-      "put it back with: rm -rf $CUR && mv $OLD $CUR"
+      "put it back with: rm -rf $qcur && mv $qold $qcur"
   fi
   SCRATCH=
   arm_traps
@@ -1754,7 +1792,7 @@ cmd_apply() {
 # short-circuits: every check runs whatever the ones before it found, and only
 # the finding count decides the exit status.
 cmd_doctor() {
-  local tool i name path root dir entry leaf known
+  local tool i name path root dir entry leaf known remedy qlock
 
   FINDINGS=0
 
@@ -1809,9 +1847,62 @@ cmd_doctor() {
       finding "cannot search $UNSEARCHABLE: permission denied" \
         "shale cannot tell whether there is a dotfiles directory at $DOTFILES"
     else
+      # Quoted, as every printed command is.  A misread mkdir -p is the harmless
+      # one, and it is quoted anyway: one convention is what lets a reader take
+      # any of these lines as a command rather than guessing which are safe.
+      shell_quote "$DOTFILES"
       finding "no dotfiles directory at $DOTFILES" \
-        "create it with: mkdir -p $DOTFILES"
+        "create it with: mkdir -p $QUOTED"
     fi
+  fi
+
+  # The lock build and apply take, in acquire_lock's order and with its
+  # remedies: a reader who ran doctor because a build was refused meets one
+  # account of the lock rather than two.  doctor takes no lock of its own -
+  # nothing in it composes or relinks - so anything found here was already
+  # there.
+  #
+  # Every state acquire_lock refuses is an arm here, the last of them being the
+  # one with nothing at the lock path at all.  The exception is the missing
+  # rmdir it refuses on before any of this, which is a tool that is not
+  # installed rather than a fact about these two paths.
+  #
+  # Counted, because while it is there shale will not work at all, which is the
+  # state doctor exists to name.  What it cannot do is say whose lock it is: the
+  # liveness test that would tell a running holder from a killed one is the
+  # guess acquire_lock refuses to make, so the finding states both readings and
+  # leaves the reader, who knows whether they are running a build, to choose.
+  if [ -L "$LOCK" ]; then
+    # Before the -d arm, which a link to a directory answers as readily as a
+    # directory does.
+    finding "$LOCK is a symlink" \
+      'build and apply take their lock by creating that directory, and will not follow a link to one' \
+      'remove it, or move it aside, or neither will run'
+  elif [ -d "$LOCK" ]; then
+    # Quoted, as acquire_lock's copy of this is and for the same reason: it is
+    # a line printed to be pasted, and an rm -rf over an unquoted home with a
+    # space in it names two paths that are not the lock.
+    shell_quote "$LOCK"
+    qlock=$QUOTED
+    remedy="rmdir $qlock"
+    dir_is_empty "$LOCK" || remedy="rm -rf $qlock"
+    finding "a shale has the lock at $LOCK, or a killed one left it behind" \
+      "build and apply take it so that two of them cannot rebuild $CUR at once, and both refuse while it is there" \
+      'nothing shale can read tells a live holder from a dead one, so this is a lock to remove only if no other shale is running' \
+      "remove it with: $remedy"
+  elif [ -e "$LOCK" ]; then
+    finding "$LOCK exists but is not a directory" \
+      'build and apply take their lock by creating that directory' \
+      'remove it, or move it aside, or neither will run'
+  elif [ -d "$DOTFILES" ] && [ -x "$DOTFILES" ] && [ ! -w "$DOTFILES" ]; then
+    # acquire_lock's last refusal, and the only one with nothing at the lock
+    # path to look at: mkdir fails on the directory holding it.  Reached where
+    # build reaches it and no further - a $DOTFILES that cannot be searched
+    # stops build in the parser, above the lock, and the config finding is what
+    # says so there.  The last line is build's own remedy, word for word.
+    finding "no build or apply can create the lock at $LOCK" \
+      'they take their lock by creating that directory, and stop where they cannot' \
+      "check that $DOTFILES is writable"
   fi
 
   # Bare, where every other command calls it as 'parse_config || exit 1': doctor
