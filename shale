@@ -865,6 +865,34 @@ normalise_path() {
   NORMALISED=${out:-/}
 }
 
+# The deepest directory holding both the file $1 and everything ANCESTOR already
+# stands for, in ANCESTOR; an empty ANCESTOR takes the directory holding $1.
+#
+# $1 is a link's path as chkstow printed it, which is the spelling the findings
+# name, and the answer has to agree with them: fed the normalised form of what a
+# link points at instead, this would name a directory in the built tree and be
+# wrong without looking wrong.  Text only, and nothing it returns need exist.
+common_ancestor() {
+  local dir=${1-}
+  dir=${dir%/*}
+  [ -n "$dir" ] || dir=/
+  if [ -z "$ANCESTOR" ]; then
+    ANCESTOR=$dir
+    return 0
+  fi
+  # The quoted expansion in the case pattern is what keeps a '[' or a '*' in a
+  # path a character rather than a glob.
+  while [ "$ANCESTOR" != / ]; do
+    [ "$ANCESTOR" != "$dir" ] || return 0
+    case "$dir" in
+      "$ANCESTOR"/*) return 0 ;;
+    esac
+    ANCESTOR=${ANCESTOR%/*}
+    [ -n "$ANCESTOR" ] || ANCESTOR=/
+  done
+  return 0
+}
+
 # $1 wrapped so that a shell reading the line shale printed gets the path back
 # exactly, in QUOTED.  Single quotes around the whole of it, with an embedded
 # quote spelled '\'' - the one form that survives a space, a bracket, a dollar
@@ -1001,7 +1029,9 @@ EOF
 }
 
 # Every link under $HOME that points into the built tree at a path the built
-# tree no longer holds: one finding each, and the remedy once under them.
+# tree no longer holds: one finding each, and the remedy once.  Up to $cap of
+# them the remedy follows the findings; past it the count, the directory they
+# are under and the remedy come first and only $cap of the links are named.
 #
 # chkstow's exit status carries no information - run against a target it cannot
 # reach it prints "Can't stat ...: No such file or directory" and still exits 0,
@@ -1015,6 +1045,7 @@ EOF
 # own dangling symlink judged against itself would be reported for ever.
 audit_broken_links() {
   local out err marker line link dest target cur dots home qdots qhome n lines
+  local stream cap rest msg samples remedy where
 
   # Uncounted, and before every other check here, which all need a built tree to
   # mean anything.
@@ -1060,25 +1091,47 @@ audit_broken_links() {
   # everything after it is stderr with no interleaving possible.
   marker="chkstow-stderr-$$-${RANDOM-0}"
   out=$( { err=$(chkstow -b -t "$home" 2>&1 1>&3 3>&-); printf '%s\n%s' "$marker" "$err"; } 3>&1 )
-  err=${out#*"$marker"}
-  out=${out%%"$marker"*}
-  if [ -n "$err" ]; then
-    # The newline the marker was printed with.
-    err=${err#?}
-    lines=("chkstow could not walk all of $HOME, so this audit did not reach everything under it:")
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      lines[${#lines[@]}]="  $line"
-    done <<EOF
-$err
-EOF
-    note ${lines[@]+"${lines[@]}"}
-  fi
 
   n=0
-  # A heredoc rather than a pipe: a pipeline would run this loop in a subshell
-  # and every finding it counted would be lost with it.
+  lines=()
+  samples=()
+  stream=out
+  # Above this many, the report changes shape rather than growing: the count and
+  # the directory holding them are what a home full of orphans can be acted on
+  # with, and a remedy printed under 1700 paths is one nobody reads.  Ten keeps
+  # the whole block inside a short terminal and well above the three that a
+  # directory leaving one layer produces.
+  cap=10
+  ANCESTOR=
+  # One pass over both streams, switching at the marker, rather than cutting the
+  # capture in two around it: ${out#*"$marker"} rescans from the anchored end for
+  # every candidate position, so its cost is quadratic in the bytes before the
+  # marker - which is the whole of chkstow's output, and this audit exists for
+  # the trees where that is large.  Reading the marker as a line costs nothing.
+  # No stdout line can equal it: under -b every one of them begins 'Bogus
+  # link: '.
+  #
+  # A heredoc rather than a pipe: a pipeline would run this loop in a subshell,
+  # and the count, the sample, the stderr lines and the ancestor would all go
+  # with it.
   while IFS= read -r line; do
+    if [ "$stream" = err ]; then
+      [ -n "$line" ] || continue
+      lines+=("  $line")
+      continue
+    fi
+    # The marker is on a line of its own only because chkstow's stdout ends in a
+    # newline and it is printed after it - true of every stdout write in 2.3.1's
+    # chkstow and in 2.4.1's, which differ in nothing but a shebang placeholder
+    # and an editor comment.  A chkstow that ever stopped doing that would glue
+    # the marker to a partial line, this switch would never fire, and the audit
+    # would lose the last finding and the whole of the truncated-walk note
+    # without saying so.  Not defended against: a substring test per line buys
+    # nothing against a failure the tool cannot produce.
+    if [ "$line" = "$marker" ]; then
+      stream=err
+      continue
+    fi
     # Not exhaustive, and chkstow's format cannot be made to be: it prints one
     # unquoted path per line, so a link whose name holds a newline arrives as
     # two lines and is dropped.  Nothing is fabricated; some links are missed.
@@ -1113,28 +1166,80 @@ EOF
     # -L as well as -e: a dangling symlink a layer ships deliberately is still
     # provided by the built tree, and only an unprovided path is an orphan.
     { [ ! -e "$target" ] && [ ! -L "$target" ]; } || continue
-    finding "$link points at $target, which the built tree no longer provides"
+    # Collected rather than printed: how it is reported depends on how many
+    # there turn out to be, and nothing has counted them yet.  Only the first
+    # $cap are kept - growing an array to 1700 entries is the other way to make
+    # this quadratic - and the ancestor is folded in one link at a time.
     n=$((n + 1))
+    [ "$n" -gt "$cap" ] || samples+=("$link points at $target, which the built tree no longer provides")
+    common_ancestor "$link"
   done <<EOF
 $out
 EOF
 
+  # Still ahead of the findings, as it was when it was printed on the way past:
+  # a truncated walk qualifies everything below it.
+  if [ "${#lines[@]}" -gt 0 ]; then
+    note "chkstow could not walk all of $HOME, so this audit did not reach everything under it:" \
+      ${lines[@]+"${lines[@]}"}
+  fi
+
   [ "$n" -gt 0 ] || return 0
-  # Uncounted: this is the remedy for the findings above rather than another of
-  # them, and delete leads because it works on every version of stow.  Both
-  # halves were run: 2.3.1 abandons the -p sweep at the first file in the target
-  # that is neither a link nor a directory - one ~/notes.txt is enough - and
-  # 2.4.1 takes the orphan back with it.  Nothing here probes for the version;
-  # the line says which one it needs.
+  # Uncounted: this is the remedy for the findings rather than another of them,
+  # and delete leads because it works on every version of stow.  Both halves
+  # were run: 2.3.1 abandons the -p sweep at the first file in the target that
+  # is neither a link nor a directory - one ~/notes.txt is enough - and 2.4.1
+  # takes the orphan back with it.  Nothing here probes for the version; the
+  # line says which one it needs.
   shell_quote "$DOTFILES"
   qdots=$QUOTED
   shell_quote "$HOME"
   qhome=$QUOTED
-  note 'stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links' \
-    'remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
-    'stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' \
+  remedy=('stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links')
+  if [ "$n" -le "$cap" ]; then
+    remedy+=('remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying')
+  else
+    # The findings are below the remedy in this shape, and most of them are not
+    # printed at all, so there is nothing 'named above' to point at.
+    remedy+=('remove them; the built tree is correct, and nothing needs rebuilding or reapplying')
+  fi
+  remedy+=('stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' \
     "  stow -D -p --no-folding -d $qdots -t $qhome current && shale apply" \
-    'earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory'
+    'earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory')
+
+  if [ "$n" -le "$cap" ]; then
+    for msg in ${samples[@]+"${samples[@]}"}; do
+      finding "$msg"
+    done
+    note ${remedy[@]+"${remedy[@]}"}
+    return 0
+  fi
+
+  # Named on its own line unless it is $HOME, which the line above it has
+  # already said: the same trailing slash $home carries, so the two spellings
+  # compare rather than the strings as they arrived.
+  where=()
+  target=$ANCESTOR
+  case "$target" in
+    */) ;;
+    *) target=$target/ ;;
+  esac
+  [ "$target" = "$home" ] || where=("all of them are under $ANCESTOR")
+
+  # Above the cap the count and the directory lead, and the remedy sits under
+  # them where it can be read without scrolling past the sample.
+  note "$n links under $HOME point into the built tree at paths it no longer provides" \
+    ${where[@]+"${where[@]}"} \
+    ${remedy[@]+"${remedy[@]}"}
+  for msg in ${samples[@]+"${samples[@]}"}; do
+    finding "$msg"
+  done
+  rest=$((n - cap))
+  note "and $rest more, not named here"
+  # Every one of them is a link that has to go, so every one of them is a
+  # finding: the cap changes what is printed and never what is wrong.  The loop
+  # above counted $cap of them.
+  FINDINGS=$((FINDINGS + rest))
 }
 
 # ------------------------------------------------------------------- the query
