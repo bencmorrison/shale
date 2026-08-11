@@ -238,6 +238,19 @@ shale:   your version is kept at /home/you/.dotfiles/current.old/.zshrc
 Copy your version back into the layer from `current.old`. The next build reaps `current.old`, so do
 it before then. Never version `current/`, and never point a layer symlink into it.
 
+A file that arrives in the built tree from somewhere else keeps its own timestamp rather than
+gaining a new one, so it can be *older* than the layer copy that replaces it — which is what
+`stow --adopt` does, and it is the shape a lost file usually has. A build reports those together:
+
+```
+shale: 2 files in /home/you/.dotfiles/current were older than the layer copies that replaced them
+shale:   either something moved them into the built tree, which is what stow --adopt does, or a layer changed and this is the first build since
+shale:   what was in /home/you/.dotfiles/current before this build is kept at /home/you/.dotfiles/current.old
+```
+
+Shale cannot tell that from a built tree its layers have moved past, and does not guess. Look in
+`current.old` if you were not expecting it.
+
 ## Updating layers after the first run
 
 Shale clones a layer root that is missing and never touches it again; updating a checkout is git's
@@ -249,4 +262,6 @@ git -C ~/.dotfiles/work pull
 shale apply
 ```
 
-There is no `shale sync`.
+The first build after a pull that changed anything reports the files in `current` that were older
+than their new layer copies, and keeps `current.old`. That is expected here and nothing to act on;
+the build after it is quiet again. There is no `shale sync`.

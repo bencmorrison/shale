@@ -2158,6 +2158,75 @@ test_build_warns_when_the_built_tree_was_edited() {
   assert_missing "$HOME/.dotfiles/current.old/junk"
 }
 
+# The half of that path an mtime comparison cannot name.  stow --adopt moves the
+# user's own file into the built tree keeping its mtime, so a five-year-old
+# .zshrc lands there *older* than the layer copy about to overwrite it and the
+# newer-direction check above never fires.  The message may not say the tree was
+# edited: an older copy is equally a build the layers have moved past.
+test_build_warns_when_the_built_tree_is_older_than_its_layer() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the first build stderr'
+  assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  # '>|': the build above put this file here, and replacing it is the point.
+  # Dated into the past because that is what an adopted file arrives with.
+  printf 'FIVE YEARS OF ZSH\n' >|"$sandbox_path" || fail 'could not adopt into the built tree'
+  touch -t 200001010000 "$sandbox_path" || fail 'could not date the adopted file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: 1 file in $HOME/.dotfiles/current was older than the layer copy that replaced it" \
+    'stderr'
+  assert_contains "$shale_err" 'which is what stow --adopt does' 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   what was in $HOME/.dotfiles/current before this build is kept at $HOME/.dotfiles/current.old" \
+    'stderr'
+  assert_not_contains "$shale_err" 'you edited' 'stderr'
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the rebuilt file'
+  assert_eq 'FIVE YEARS OF ZSH' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
+}
+
+# One group however many files: a pull that changed fifty of them must not print
+# a hundred and fifty lines.  The count is a count of files, so .zshrc coming
+# from two layers still counts once, and the two untouched files count not at
+# all.  Retention is one build deep - the rebuild leaves every copy the age of
+# the layer file it came from, so the next build has nothing left to re-detect.
+test_build_summarises_older_files_in_one_group_and_forgets_them_next_build() {
+  local name groups
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  mklayer personal/base .vimrc
+  mklayer personal/base .inputrc
+  mklayer personal/base .netrc
+  mklayer personal/base .gitconfig
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the first build stderr'
+  for name in .zshrc .vimrc .inputrc; do
+    sandbox_mkdir "$HOME/.dotfiles/current"
+    sandbox_leaf "$sandbox_dir" "$name"
+    touch -t 200001010000 "$sandbox_path" || fail "could not date $name"
+  done
+  run_shale build
+  assert_status 0 "$shale_status"
+  groups=$(printf '%s\n' "$shale_err" | grep -c 'were older than')
+  assert_eq 1 "$groups" 'summary lines'
+  assert_contains "$shale_err" \
+    "shale: 3 files in $HOME/.dotfiles/current were older than the layer copies that replaced them" \
+    'stderr'
+  assert_not_contains "$shale_err" 'you edited' 'stderr'
+  assert_exists "$HOME/.dotfiles/current.old/.zshrc" 'the previous tree'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the next build stderr'
+  assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
+}
+
 # The warning names current.old, which only the swap creates.  Reported during
 # the walk it would promise a path that an aborted build never makes - or worse,
 # point at a stale current.old holding something else entirely.
@@ -3277,6 +3346,11 @@ test_doctor_a_lock_left_behind_is_a_finding_naming_builds_remedy() {
   for shape in empty occupied; do
     conf 'base personal/base'
     mklayer personal/base .zshrc
+    # Both passes share one $HOME, so without a fixed date the second pass's
+    # rewrite of this file leaves the tree the first pass built older than the
+    # layer, and the build below reports that rather than nothing.
+    sandbox_mkdir "$HOME/.dotfiles/personal/base"
+    touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
     case "$shape" in
       empty)
         sandbox_mkdir "$HOME/.dotfiles/.lock"
@@ -4041,13 +4115,28 @@ test_apply_a_layer_root_readme_does_not_reach_home() {
 test_apply_a_content_change_is_seen_through_the_existing_link() {
   conf 'base personal/base'
   mklayer personal/base .zshrc 'first'
+  # Dated into the past so the comparison below cannot come down to filesystem
+  # timestamp granularity: this file's mtime is what the first apply copies into
+  # the built tree, and the rewrite of it two lines down has to be strictly
+  # newer than that copy in whole seconds - which is all bash 3.2's -nt compares.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
   run_shale apply
   assert_status 0 "$shale_status"
   assert_eq 'first' "$(cat "$HOME/.zshrc")" 'the linked file'
   mklayer personal/base .zshrc 'second'
   run_shale apply
   assert_status 0 "$shale_status"
-  assert_empty "$shale_err" 'the second apply stderr'
+  # The price of the adopted-file guard, paid here: an edited layer leaves the
+  # tree it replaces older than itself, which is indistinguishable from a file
+  # moved into that tree, so the first build after an edit says so.  It is a
+  # line on stderr and a retained current.old, not a failure.
+  assert_contains "$shale_err" \
+    "shale: 1 file in $HOME/.dotfiles/current was older than the layer copy that replaced it" \
+    'the second apply stderr'
+  # Nothing else on stderr: the tree was not edited, and a diverged record
+  # firing alongside the summary would otherwise pass unnoticed here.
+  assert_not_contains "$shale_err" 'you edited' 'the second apply stderr'
   assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
   assert_eq 'second' "$(cat "$HOME/.zshrc")" 'the linked file'
 }
@@ -7034,6 +7123,8 @@ test_meta_noclobber_overrides_are_allow_listed() {
     # shale's own build put this file there, and editing it is what the case is
     # about.
     'HAND EDITED'
+    # The same, for the file an adopt would have put there in its place.
+    'FIVE YEARS OF ZSH'
   )
   found=0
   report=()
