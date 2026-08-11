@@ -398,13 +398,22 @@ CLONING=
 # releases only a lock this process took and never one another shale is holding.
 LOCKED=
 
+# The rule for every glob in this script that lists a directory, stated here
+# because this is the first of them and repeated at none of them: drop '.' and
+# '..' by name, whatever the pattern and whatever the glob options.  bash 5.2
+# has globskipdots on by default and never returns those two; bash 3.2, the
+# floor, returns both from '.*' and neither from '*'.  The source is identical
+# on the two, so nothing that reads it can tell the meanings apart - a glob whose
+# answer depends on which one ran is simply wrong on one of them, and the whole
+# of the difference is those two names.  Drop them and the question cannot arise.
+#
 # Non-zero when directory $1 holds an entry of any kind, dotfiles included.
 # Written so that dotglob and nullglob may be set either way round: build sets
 # both partway through, and this runs from a trap at a moment nothing chose.
 # With nullglob off an unmatched pattern arrives as itself, which the -e and -L
 # tests tell from a file genuinely called '*' or '.*'.  Both spellings need that
-# arm: bash 3.2 matches '.' and '..' with '.*' and bash 5.2 skips them, so on the
-# newer one the pattern is unmatched in a directory holding no other dotfile.
+# arm: '.*' matches nothing at all on 5.2 in a directory holding no other
+# dotfile, where on 3.2 it always has '.' and '..' to match.
 dir_is_empty() {
   local dir=$1 entry
   for entry in "$dir"/* "$dir"/.*; do
@@ -729,6 +738,10 @@ compose_dir() {
   fi
   for e in "$here"/*; do
     base=${e##*/}
+    # The dot-entry rule, stated at dir_is_empty.
+    case "$base" in
+      . | ..) continue ;;
+    esac
     # At every depth, not just the layer root: a layer is a working repo.
     [ "$base" = .git ] && continue
     srel=${rel:+$rel/}$base
@@ -1693,6 +1706,10 @@ cmd_doctor() {
       # Also the arm the unmatched glob lands in.
       [ -d "$entry" ] || continue
       leaf=${entry##*/}
+      # The dot-entry rule, stated at dir_is_empty.
+      case "$leaf" in
+        . | ..) continue ;;
+      esac
       case "$leaf" in
         current | current.new | current.old | "${CONF##*/}") continue ;;
       esac
