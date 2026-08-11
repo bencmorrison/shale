@@ -54,8 +54,10 @@ The url says how to obtain `personal`, the clone root — not how to obtain the 
 repository has to *hold* `base/` rather than *be* it. Rename the checkout straight to
 `personal/base` and leave the url on the line, and this machine tells you nothing: shale clones only
 where nothing exists, so the url is never used, and `doctor` sees two real directories and reports
-clean. The next machine clones the repository to `~/.dotfiles/personal`, finds no `base` inside it,
-and stops on the config line rather than on the repository:
+clean. `~/.dotfiles/local` has to exist on the next machine before any of this: a layer with no url
+is one shale cannot obtain, and the build stops on it before it clones anything. With it there, that
+machine clones the repository to `~/.dotfiles/personal`, finds no `base` inside it, and stops on the
+config line rather than on the repository:
 
 ```
 shale: layer 'base' has no directory at /home/you/.dotfiles/personal/base, but its clone at /home/you/.dotfiles/personal exists

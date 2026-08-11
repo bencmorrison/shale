@@ -554,6 +554,19 @@ acquire_lock() {
 
 # ------------------------------------------------------------------ the clones
 
+# Non-zero unless this build is going to fetch clone root $1: it has a url, and
+# nothing of any kind is at its path.  The layer checks ask this too, so that
+# they and the clone loop cannot drift over which roots a build obtains.
+will_clone() {
+  local root=$1 dir
+  clone_url "$root" || return 1
+  dir=$DOTFILES/$root
+  # -L as well as -e: a dangling symlink is something someone else put there,
+  # and the layer check names it rather than this cloning over it.
+  { [ ! -e "$dir" ] && [ ! -L "$dir" ]; } || return 1
+  return 0
+}
+
 # Clones every configured clone root that has a url and nothing at its path,
 # before anything is composed, so a clone that fails costs nothing composed.
 # One clone per root, however many layers derive from it.
@@ -566,9 +579,7 @@ clone_missing_roots() {
     url=${CLONE_URLS[$i]}
     dir=$DOTFILES/$root
     i=$((i + 1))
-    # -L as well as -e: a dangling symlink is something someone else put there,
-    # and the layer check below names it rather than this cloning over it.
-    { [ ! -e "$dir" ] && [ ! -L "$dir" ]; } || continue
+    will_clone "$root" || continue
     # Lazily, and once: a machine holding every layer builds with no git at all.
     if [ "$have_git" -eq 0 ]; then
       command -v git >/dev/null 2>&1 ||
@@ -577,7 +588,11 @@ clone_missing_roots() {
       have_git=1
     fi
     # The leading dot keeps this name out of the layer namespace: a configured
-    # path component must start with a letter, digit or '_'.
+    # path component must start with a letter, digit or '_'.  git names it in
+    # its own 'Cloning into' line, which is a path nobody wrote and which is
+    # gone by the time it is looked for; that stays as it is.  Redirecting git's
+    # stderr to hide it would take the network error, the bad host key and the
+    # wrong url with it, which is every reason a clone fails.
     tmp=$DOTFILES/.$root.cloning
     # Named before anything touches it, reaping included: a signal delivered
     # partway through the rm would otherwise run cleanup with CLONING still
@@ -1257,29 +1272,24 @@ which_describe() {
 
 # ---------------------------------------------------------------- the commands
 
-cmd_build() {
-  local i name path root dir errors n had_current qcur qold
-
-  parse_config || exit 1
-
-  # After the parse and before everything that writes: taking it first would
-  # answer a missing config with a message about a lock.
-  acquire_lock
-
-  # dotglob because dotfiles are the ordinary case here, nullglob because an
-  # empty layer directory - the day-one state of a local layer - must expand to
-  # nothing rather than to a literal '*'.  Never restored.
-  shopt -s dotglob nullglob
-
-  clone_missing_roots
-
+# Reports every layer that has no usable directory, and returns non-zero when it
+# reported any.  With $1 'settled' it passes over the layers under a root this
+# build is about to fetch, whose state nothing can tell until the clone has run;
+# with 'all' it checks every layer.
+check_layers() {
+  local mode=${1-} i name path lineno root dir errors
   errors=0
   i=0
   while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
     name=${LAYER_NAMES[$i]}
     path=${LAYER_PATHS[$i]}
+    lineno=${LAYER_LINES[$i]}
+    i=$((i + 1))
     root=${path%%/*}
     dir=$DOTFILES/$path
+    if [ "$mode" = settled ] && will_clone "$root"; then
+      continue
+    fi
     if [ -d "$dir" ]; then
       :
     elif obscured_ancestor "$DOTFILES" "$path"; then
@@ -1294,25 +1304,49 @@ cmd_build() {
       errors=$((errors + 1))
     elif [ -d "$DOTFILES/$root" ]; then
       emit "layer '$name' has no directory at $dir, but its clone at $DOTFILES/$root exists" \
-        "check the path on line ${LAYER_LINES[$i]}"
+        "check the path on line $lineno"
       errors=$((errors + 1))
     elif [ -e "$DOTFILES/$root" ] || [ -L "$DOTFILES/$root" ]; then
-      # Reachable despite the clone above: shale removes nothing it did not
-      # create, so a root that is not a directory is never cloned over.
+      # Reachable despite the clone: shale removes nothing it did not create, so
+      # a root that is not a directory is never cloned over.
       emit "layer '$name' has no directory at $dir" \
         "its clone root $DOTFILES/$root exists but is not a directory" \
         'remove it, or move it aside'
       errors=$((errors + 1))
     else
-      # No branch for a root with a url and nothing at its path: cloning has
-      # already run, and it either obtained that root or stopped the build.
+      # No branch for a root with a url and nothing at its path: the settled
+      # pass passes such a layer over, and by the second the clone has either
+      # obtained the root or stopped the build.
       emit "layer '$name' has no directory at $dir and no url for '$root'" \
         "add a url on that line, or create the directory"
       errors=$((errors + 1))
     fi
-    i=$((i + 1))
   done
-  [ "$errors" -eq 0 ] || exit 1
+  [ "$errors" -eq 0 ] || return 1
+  return 0
+}
+
+cmd_build() {
+  local i dir n had_current qcur qold
+
+  parse_config || exit 1
+
+  # After the parse and before everything that writes: taking it first would
+  # answer a missing config with a message about a lock.
+  acquire_lock
+
+  # dotglob because dotfiles are the ordinary case here, nullglob because an
+  # empty layer directory - the day-one state of a local layer - must expand to
+  # nothing rather than to a literal '*'.  Never restored.
+  shopt -s dotglob nullglob
+
+  # Every layer no clone can affect is already in the state it will be in when
+  # the last one has finished, so it is reported before the first one starts.
+  check_layers settled || exit 1
+
+  clone_missing_roots
+
+  check_layers all || exit 1
 
   if [ -L "$CUR" ]; then
     die "$CUR is a symlink" \
