@@ -5658,6 +5658,166 @@ EOF
   assert_eq ' finding remedy summary' "$seen" 'the order of the report'
 }
 
+# plant_orphans DIR N - N links in $HOME/DIR into the built tree at paths it has
+# not got, named f0 upwards; an empty DIR puts them in $HOME itself.  A directory
+# that left every layer leaves as many of these as it held files, which is the
+# volume the cases below are about.
+plant_orphans() {
+  local dir=${1-} n=${2-} i rel
+  rel=${dir:+$dir/}
+  sandbox_mkdir "$HOME${dir:+/$dir}"
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    sandbox_leaf "$sandbox_dir" "f$i" new
+    ln -s "$HOME/.dotfiles/current/${rel}f$i" "$sandbox_path" ||
+      fail "could not plant ${rel}f$i"
+    i=$((i + 1))
+  done
+}
+
+# report_shape - the order of the parts of doctor's report in report_seen, one
+# word per part and one word per run of adjacent finding lines, and the number of
+# finding lines in report_findings.
+report_shape() {
+  local line
+  report_seen=
+  report_findings=0
+  while IFS= read -r line; do
+    case "$line" in
+      *'which the built tree no longer provides')
+        report_findings=$((report_findings + 1))
+        case "$report_seen" in
+          *finding) ;;
+          *) report_seen="$report_seen finding" ;;
+        esac
+        ;;
+      'shale: '*' links under '*' point into the built tree at paths it no longer provides')
+        report_seen="$report_seen count"
+        ;;
+      'shale:   all of them are under '*) report_seen="$report_seen where" ;;
+      'shale:   remove '*) report_seen="$report_seen remedy" ;;
+      'shale: and '*' more, not named here') report_seen="$report_seen rest" ;;
+      'shale: '*' problems found') report_seen="$report_seen summary" ;;
+    esac
+  done <<EOF
+$1
+EOF
+}
+
+# The volume the audit was written for and the shape it has to take there: a
+# directory that left every layer leaves one orphan per file it held, and 1700
+# of them printed above their remedy is a report nobody can act on.  Above the
+# cap the count and the directory lead, the remedy is on screen with them, and
+# the links themselves are a sample under it.
+#
+# Twelve, in two sibling directories: the cap is ten, so this is the smallest
+# tree that both crosses it and has an ancestor that is neither directory.
+test_doctor_many_broken_links_lead_with_the_count_and_where_they_are() {
+  local report_seen report_findings
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  plant_orphans .config/nvim/pack/start 6
+  plant_orphans .config/nvim/pack/opt 6
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 12 links under $HOME point into the built tree at paths it no longer provides" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   all of them are under $HOME/.config/nvim/pack" 'stdout'
+  # The remedy is the same remedy, and it no longer says 'above': what is above
+  # it is the count, and ten of the twelve are printed nowhere at all.
+  assert_contains "$shale_out" \
+    'shale:   remove them; the built tree is correct, and nothing needs rebuilding or reapplying' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' 'stdout'
+  assert_contains "$shale_out" 'shale: and 2 more, not named here' 'stdout'
+  # Counted one per link either side of the cap: the cap decides what is printed
+  # and never what is wrong with the setup.
+  assert_contains "$shale_out" 'shale: 12 problems found' 'stdout'
+  report_shape "$shale_out"
+  assert_eq 10 "$report_findings" 'the number of links named'
+  assert_eq ' count where remedy finding rest summary' "$report_seen" 'the order of the report'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# The one ancestor the line naming it says nothing about, because the line above
+# it has already named $HOME.  Every other directory in the report is worth a
+# line; this one is the count line again, in the block a user reads first.
+test_doctor_many_broken_links_directly_in_home_do_not_name_home_twice() {
+  local report_seen report_findings
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  plant_orphans '' 11
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 11 links under $HOME point into the built tree at paths it no longer provides" 'stdout'
+  assert_not_contains "$shale_out" 'all of them are under' 'stdout'
+  assert_contains "$shale_out" 'shale: and 1 more, not named here' 'stdout'
+  report_shape "$shale_out"
+  assert_eq 10 "$report_findings" 'the number of links named'
+  assert_eq ' count remedy finding rest summary' "$report_seen" 'the order of the report'
+}
+
+# The other side of the cap, and the promise that goes with it: below it nothing
+# about this report has changed, so the three-orphan case above and this one at
+# exactly ten read the same way - every link named, then the remedy under them.
+test_doctor_broken_links_up_to_the_cap_are_all_named_with_the_remedy_under_them() {
+  local report_seen report_findings
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  plant_orphans .config/nvim/pack 10
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    'shale:   remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' 'stdout'
+  assert_not_contains "$shale_out" 'point into the built tree at paths it no longer provides' 'stdout'
+  assert_not_contains "$shale_out" 'not named here' 'stdout'
+  assert_contains "$shale_out" 'shale: 10 problems found' 'stdout'
+  report_shape "$shale_out"
+  assert_eq 10 "$report_findings" 'the number of links named'
+  assert_eq ' finding remedy summary' "$report_seen" 'the order of the report'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# chkstow's stderr arrives after the whole of its stdout, so the note that the
+# walk was short is now held back and printed rather than written on the way
+# past.  It has to come out ahead of the findings all the same: it says the list
+# below it is not the whole list, which after the list is no use.
+test_doctor_says_the_walk_was_short_before_the_links_it_did_find() {
+  local line seen
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.cache"
+  sandbox_write "$HOME/.cache" .stow
+  plant_orphans .config/nvim/pack 3
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  seen=
+  while IFS= read -r line; do
+    case "$line" in
+      'shale: chkstow could not walk all of '*) seen="$seen walk" ;;
+      *'which the built tree no longer provides')
+        case "$seen" in
+          *finding*) ;;
+          *) seen="$seen finding" ;;
+        esac
+        ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq ' walk finding' "$seen" 'the order of the report'
+}
+
 test_doctor_an_applied_tree_with_no_orphans_reports_no_problems() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
