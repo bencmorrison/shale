@@ -129,6 +129,31 @@ cleanup() {
   case "${FAILED-}:${ABORTED-}" in
     0:0) ;;
     *)
+      # This branch only, where the sandbox is kept and a person has to remove
+      # it by hand: a case interrupted between taking the search bit off a
+      # directory and putting it back leaves one that no rm -rf can remove, and
+      # an interrupted run always lands here.  Never in the delete branch below,
+      # where a case that took a bit off and simply forgot to restore it
+      # announces itself as 'rm: cannot remove ...: Permission denied' on an
+      # otherwise green run - repairing that quietly would spend the harness's
+      # one signal about a case that misbehaved.
+      #
+      # The owner's bits on directories are the whole of what blocks a delete,
+      # and the owner's are all this restores - never the group's or the
+      # world's, and never a file's.  find rather than 'chmod -R': GNU's is
+      # documented to ignore a symbolic link it meets during a traversal, the
+      # BSD one's handling of the same link could not be checked from here, and
+      # '-type d' matches neither a link nor a file on either.  One pass, which
+      # reaches the one shape a case leaves behind - a single locked directory,
+      # named from a parent that is still searchable.  Gated on the mktemp
+      # template like the rm below, so a corrupted TEST_ROOT chmods nothing, and
+      # silenced because find reports every directory it could not descend and
+      # none of that is news here.
+      case "${TEST_ROOT-}" in
+        */shale-tests.??????)
+          find "$TEST_ROOT" -type d -exec chmod u+rwx {} + 2>/dev/null
+          ;;
+      esac
       printf 'tests: sandbox kept at %s\n' "${TEST_ROOT-(unset)}" >&2
       return 0
       ;;
@@ -370,9 +395,16 @@ sandbox_path=
 # as contained: run_case proves each case directory as a leaf of it before
 # creating it, and the leaf test needs the parent resolved first.  $HOME is held
 # to the stricter "under the root" test, in require_sandbox.
+#
+# 'cd --', because cd reads a leading '-' as its own option: a directory named
+# '-L' or '-P' is cd's own flag with no operand after it, which sends it to
+# $HOME and resolves a path the caller never named.  Containment still holds -
+# a resolved $HOME outside the root is refused below - but every caller then
+# acts on the wrong directory inside it, and the wrapper's --unsearchable is one
+# that acts by taking a mode off.
 sandbox_resolve() {
   local dir=$1 resolved
-  resolved=$(cd "$dir" 2>/dev/null && pwd -P) ||
+  resolved=$(cd -- "$dir" 2>/dev/null && pwd -P) ||
     guard_trip "path does not resolve to a directory: $dir"
   [ -n "$resolved" ] || guard_trip "path does not resolve to a directory: $dir"
   case "$resolved" in
@@ -524,12 +556,50 @@ sandbox_write() {
 # 'bash --' rather than 'bash', because bash reads a leading '-' as its own
 # option: '--script -c' became 'bash -c <the next argument>', which runs an
 # arbitrary command word.  The '--' still leaves ${BASH_SOURCE[0]} bare.
+#
+# '--unsearchable DIR' takes the search bit off DIR for the length of one
+# invocation and puts it back after it, which is the only way a case can run
+# shale under a $HOME that cannot be entered: require_sandbox resolves $HOME and
+# reads the marker file inside it, and both of those need every directory on the
+# way down to it to be searchable.  So the proof is made first, while it still
+# can be, and what changes afterwards is the mode of a directory this has just
+# resolved inside the test root - not the path anything points at, and not for
+# longer than the one run.  DIR must not hold the capture files run_shale
+# writes, so it is $HOME or a directory on the way down to it, and never
+# $CASE_DIR itself - a case wanting an unsearchable ancestor of $HOME puts the
+# home one level deeper and locks the level above it.
+#
+# The owner's execute bit alone, taken off and put back symbolically.  That is
+# the bit every one of these tests is about - a process searches a directory
+# through the class its uid falls in, so the owner is refused whatever the group
+# and world bits say - and a symbolic pair is exactly reversible without the
+# mode having to be read back first, which nothing portable here can do.  A
+# numeric restore would write 0755 over the 0700 a developer running under
+# 'umask 077' started with.
 shale() {
-  local script
+  local script locked status
   require_sandbox
+  locked=
+  if [ "${1-}" = --unsearchable ]; then
+    [ -n "${2-}" ] || guard_trip '--unsearchable was given an empty path'
+    # Every refusal below has to come before the bit comes off: guard_trip exits
+    # the case where it stands, no restore runs, and the sandbox is left holding
+    # a directory the runner's own rm -rf cannot remove.
+    [ "${3-}" != --script ] ||
+      guard_trip '--unsearchable cannot be combined with --script'
+    sandbox_resolve "$2"
+    locked=$sandbox_dir
+    shift 2
+    chmod u-x "$locked" || fail "could not remove the search bit from $locked"
+  fi
   if [ "${1-}" != --script ]; then
     "$SHALE" ${1+"$@"}
-    return $?
+    status=$?
+    # Before the caller sees the status, so a case cannot assert on a run whose
+    # mode it forgot to restore and leave the sandbox undeletable.
+    [ -z "$locked" ] ||
+      chmod u+x "$locked" || fail "could not restore the mode on $locked"
+    return "$status"
   fi
   script=${2-}
   [ -n "$script" ] || guard_trip '--script was given an empty path'
@@ -550,10 +620,10 @@ shale() {
 
 # Runs shale and captures its status, stdout and stderr into shale_status,
 # shale_out and shale_err.  Every invocation is also appended to the case's
-# transcript, which the failure report prints.  A leading '--script PATH' is
-# passed through to the wrapper, which is where the containment proof for it
-# lives; the transcript records it like any other argument, so what ran is what
-# the report shows.
+# transcript, which the failure report prints.  A leading '--script PATH' or
+# '--unsearchable DIR' is passed through to the wrapper, which is where the
+# containment proof for either lives; the transcript records them like any other
+# argument, so what ran is what the report shows.
 run_shale() {
   local n out err transcript
   SHALE_RUNS=$((SHALE_RUNS + 1))
@@ -1171,6 +1241,65 @@ test_config_an_unsearchable_dotfiles_directory_is_not_a_missing_config() {
     assert_contains "$shale_err" \
       "shale:   shale cannot tell whether there is a config file at $HOME/.dotfiles/shale.conf" "$mode stderr"
     assert_not_contains "$shale_err" 'no config file at' "$mode stderr"
+  done
+}
+
+# $HOME need not be absolute, and a walk that begins at the root cannot begin
+# from a path that is not one.  Refusing a relative path outright put the
+# missing-config message back for exactly the state the case above removes it
+# from - the same directory, the same mode, spelt relatively - so the walk joins
+# the working directory on the front instead.
+#
+# The report then carries two spellings, and both are deliberate: what shale was
+# given is what it repeats back, and the directory it names is one the reader
+# can act on from anywhere.
+test_config_an_unsearchable_dotfiles_directory_is_found_under_a_relative_home() {
+  local abs home_rel
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  abs=$HOME
+  # A case body runs with its working directory at $CASE_DIR and the sandbox
+  # home is a leaf of it, so the leaf name is the relative spelling of $HOME.
+  home_rel=${abs##*/}
+  HOME=$home_rel
+  chmod u-x "$abs/.dotfiles" || fail 'could not remove the search bit'
+  run_shale build
+  chmod u+x "$abs/.dotfiles" || fail 'could not restore the mode'
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: cannot search $abs/.dotfiles: permission denied" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   shale cannot tell whether there is a config file at $home_rel/.dotfiles/shale.conf" \
+    'stderr'
+  assert_not_contains "$shale_err" 'no config file at' 'stderr'
+}
+
+# The arm that says this lives in the config parser, so it is not doctor's
+# alone: build, apply and which all read the config before they do anything, and
+# all three told the reader to write a config over the one already there.  Taking
+# the parser's arm out again leaves every doctor case green, which is what this
+# case is here to stop.
+test_config_an_unsearchable_home_is_not_a_missing_config_for_any_command() {
+  local command
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  for command in build apply which; do
+    case "$command" in
+      # which takes an argument, and rejects a bad one only after the config is
+      # read, so the path it is given here does not matter to what is asserted.
+      which) run_shale --unsearchable "$HOME" which .zshrc ;;
+      *) run_shale --unsearchable "$HOME" "$command" ;;
+    esac
+    assert_status 1 "$shale_status" "$command exit status"
+    assert_contains "$shale_err" \
+      "shale: cannot search $HOME: permission denied" "$command stderr"
+    assert_contains "$shale_err" \
+      "shale:   shale cannot tell whether there is a config file at $HOME/.dotfiles/shale.conf" \
+      "$command stderr"
+    assert_not_contains "$shale_err" 'no config file at' "$command stderr"
+    assert_empty "$shale_out" "$command stdout"
   done
 }
 
@@ -4060,6 +4189,77 @@ test_doctor_a_missing_dotfiles_directory_is_a_finding() {
   assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
   # Both counted problems are in the report, not one of them in the terminal.
   assert_empty "$shale_err" 'stderr'
+  # The permissions arm below must not fire where a directory is genuinely
+  # absent: it would replace the one remedy this report can offer with a
+  # complaint about a mode nothing is wrong with.
+  assert_not_contains "$shale_out" 'cannot search' 'stdout'
+}
+
+# With $HOME unsearchable every test of every path inside it answers no, so
+# doctor reported the dotfiles directory and the config as missing - both of
+# them there - and told the reader to mkdir a directory that already exists,
+# which fails for the same reason the tests did.  doctor is the command run when
+# nothing works, so a report that names the symptom and hides the cause is worth
+# less than no report at all.
+#
+# The mode comes off inside the wrapper and goes back before this sees a status,
+# so a failing run still leaves a sandbox the runner can delete.
+test_doctor_an_unsearchable_home_names_the_directory_it_cannot_search() {
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale --unsearchable "$HOME" doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" "shale: cannot search $HOME: permission denied" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   shale cannot tell whether there is a dotfiles directory at $HOME/.dotfiles" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   shale cannot tell whether there is a config file at $HOME/.dotfiles/shale.conf" \
+    'stdout'
+  # The two statements that were false, and the remedy that could not have been
+  # carried out.
+  assert_not_contains "$shale_out" 'no dotfiles directory' 'stdout'
+  assert_not_contains "$shale_out" 'no config file at' 'stdout'
+  assert_not_contains "$shale_out" 'mkdir -p' 'stdout'
+  assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
+  assert_empty "$shale_err" 'stderr'
+  # Nothing was harmed by the mode: the wrapper put it back, and both fixtures
+  # are still where this case wrote them.
+  assert_exists "$HOME/.dotfiles/shale.conf" 'the config'
+  assert_exists "$HOME/.dotfiles/personal/base/.zshrc" 'the layer file'
+}
+
+# The same cause one level up, answered by the same walk rather than by a case
+# of its own: the culprit is the first directory on the way down that cannot be
+# searched, so an unsearchable directory above $HOME is named instead of $HOME,
+# which is only a victim of it.  A home nested one deeper than the runner's own
+# is what leaves a directory above it that can be locked without taking the
+# capture files run_shale writes with it.
+test_doctor_an_unsearchable_ancestor_of_home_is_named_instead_of_home() {
+  local home_ok locked
+  skip_if_root
+  sandbox_mkdir "$CASE_DIR/outer/home"
+  home_ok=$sandbox_dir
+  sandbox_leaf "$home_ok" .shale-test-sandbox new
+  : >"$sandbox_path" || fail 'could not mark the sandbox home'
+  HOME=$home_ok
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_resolve "$CASE_DIR/outer"
+  locked=$sandbox_dir
+  run_shale --unsearchable "$locked" doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" "shale: cannot search $locked: permission denied" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   shale cannot tell whether there is a dotfiles directory at $HOME/.dotfiles" \
+    'stdout'
+  assert_not_contains "$shale_out" "cannot search $HOME:" 'stdout'
+  assert_not_contains "$shale_out" 'no dotfiles directory' 'stdout'
+  assert_not_contains "$shale_out" 'no config file at' 'stdout'
+  assert_not_contains "$shale_out" 'mkdir -p' 'stdout'
+  assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
+  assert_empty "$shale_err" 'stderr'
 }
 
 # One check for three hazards: a leftover pre-shale stow package, a stray clone,
@@ -5007,6 +5207,38 @@ test_meta_the_script_option_runs_a_leaf_that_looks_like_an_option() {
   assert_not_contains "$shale_err" 'command not found' 'stderr'
 }
 
+# The same shape one option along, and the one where being wrong costs more than
+# a mis-run: cd reads a leading '-' as its own option too, so sandbox_resolve
+# given a bare '-L' resolved $HOME - it is cd's flag with no operand after it -
+# and --unsearchable then took the mode off the home instead of the directory it
+# was handed.  The proof of containment still held, about the wrong directory.
+#
+# The home sits inside the option-shaped directory so that doctor's report is
+# the witness for all three halves of this: the bit came off, it came off the
+# directory named on the command line rather than the one 'cd -L' resolves - the
+# two are different strings, and the mis-parse would name the home - and the
+# mode is back afterwards, or the fixtures below could not be read.
+test_meta_the_unsearchable_option_locks_a_leaf_that_looks_like_an_option() {
+  local home_ok locked
+  skip_if_root
+  sandbox_mkdir "$CASE_DIR/-L/home"
+  home_ok=$sandbox_dir
+  sandbox_leaf "$home_ok" .shale-test-sandbox new
+  : >"$sandbox_path" || fail 'could not mark the sandbox home'
+  HOME=$home_ok
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_resolve "$CASE_DIR/-L"
+  locked=$sandbox_dir
+  run_shale --unsearchable -L doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" "shale: cannot search $locked: permission denied" 'stdout'
+  assert_not_contains "$shale_out" "cannot search $HOME:" 'stdout'
+  [ -x "$locked" ] || fail "the mode did not go back on $locked: $(ls -ld "$locked")"
+  assert_real_dir "$locked" 'the directory it was given'
+  assert_exists "$HOME/.dotfiles/shale.conf" 'the config below it'
+}
+
 # The other half of that check: it is skipped when the running script is not
 # under $HOME, which is what a shale installed on PATH looks like.  The layer
 # ships both shapes the derived path could take - the bare leaf and the full
@@ -5942,6 +6174,7 @@ ${h}=\$trip/root/link${nl}\
 ${h}=\$trip/root/sub/../../outside${nl}\
 ${h}=\$home_link${nl}\
 ${h}=\$home_ok${nl}\
+${h}=\$home_rel${nl}\
 ${h}=\$CASE_DIR/unmarked${nl}"
   offenders=
   hits=$(grep -nE "(^|[^A-Za-z0-9_])${h}=" "$SELF")
@@ -6461,6 +6694,28 @@ test_meta_guard_rejects_a_script_that_is_not_a_regular_file() {
     assert_status 99 "$status" "$spelling guard"
     assert_exists "$trip/guard-tripped" "$spelling guard sentinel"
   done
+}
+
+# Every refusal in the wrapper has to be made before the search bit comes off,
+# and this is the one that was not: a guard trip exits the case where it stands,
+# so the restore after the invocation never ran and the sandbox was left holding
+# a directory that the runner's own 'rm -rf' could not remove - reproduced, with
+# 'Permission denied' out of cleanup and the tree still on disk.  The refusal is
+# the lesser half of what this asserts; the mode afterwards is the half that
+# fails if the check moves back down.
+test_meta_guard_rejects_unsearchable_combined_with_script() {
+  local trip status
+  skip_if_root
+  trip=$CASE_DIR/trip
+  status=0
+  mkdir -p "$trip" || fail "could not create $trip"
+  (
+    CASE_DIR=$trip
+    shale --unsearchable "$HOME" --script no-such-script doctor
+  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  assert_status 99 "$status" 'the guard'
+  assert_exists "$trip/guard-tripped" 'the guard sentinel'
+  [ -x "$HOME" ] || fail "the refusal left $HOME unsearchable: $(ls -ld "$HOME")"
 }
 
 # A mode this does not know is a typo in the harness, and falling through to the
