@@ -13,10 +13,12 @@ is the machine's business, not the repos'.
 
 ## Requirements
 
-`bash`, `git` and GNU `stow`, installed with your system package manager. Shale installs nothing,
+`bash`, `git` and GNU `stow`, installed with your system package manager, and the coreutils any
+system already has — `cp`, `mv`, `rm`, `mkdir`, `rmdir` and `readlink`. Shale installs nothing,
 including itself. `git` is used only to clone a layer repository the machine does not have yet.
 `chkstow` ships with GNU stow and is what `doctor` audits `$HOME` with; without it `doctor` says so
-and skips that one check.
+and skips that one check. `shale doctor` names every one of these it cannot find, so it is the
+fastest answer to a machine where something will not run.
 
 Shale is written to a floor of bash 3.2 and POSIX utility flags, which is what macOS ships. The test
 suite runs in CI on Linux and on macOS, the macOS job under `/bin/bash` so that the floor is
@@ -132,7 +134,7 @@ nothing:
 ```
 shale: another shale has the lock at /home/you/.dotfiles/.lock
 shale:   build and apply take it so that two of them cannot rebuild /home/you/.dotfiles/current at once
-shale:   if no other shale is running, this lock is stale: remove it with: rmdir /home/you/.dotfiles/.lock
+shale:   if no other shale is running, this lock is stale: remove it with: rmdir '/home/you/.dotfiles/.lock'
 ```
 
 `~/.dotfiles/current` is generated output. It is disposable — a bad build is fixed by fixing a layer
@@ -204,10 +206,12 @@ build.
 
 ## Checking the setup
 
-`shale doctor` checks that git and stow are installed, that the config parses, that every configured
-layer directory is there, that nothing in `~/.dotfiles` is a stray, that no layer ships shale
-itself, that no `.stowrc` is in a position to drop files from an apply, and that no link in `$HOME`
-points into the built tree at a path it no longer provides. It changes nothing.
+`shale doctor` checks that every tool shale runs is installed, that the config parses, that every
+configured layer directory is there, that the build lock is neither held nor uncreatable, that
+nothing in `~/.dotfiles` is a stray, that no layer ships shale itself, and that no link in `$HOME`
+points into the built tree at a path it no longer provides. Where a `.stowrc` exists it names the
+stow options that file sets, because several of them change an apply and three of them make it do
+nothing at all. It changes nothing itself.
 
 ```
 $ shale doctor
@@ -259,8 +263,10 @@ your layers, your config and the built tree alone; `shale apply` puts them back.
   dangling by an apply that still exits 0. `shale doctor` finds them and prints what to do about
   them; [docs/migrating.md](docs/migrating.md) covers the case in full.
 - A shale that is killed outright — `kill -9`, or the machine losing power — leaves its lock
-  directory behind, and a `~/.dotfiles/current.new` as well if it died mid-build. `doctor` reports
-  neither. Shale never reclaims a lock; the refusal above names the command that clears it.
+  directory behind, and a `~/.dotfiles/current.new` as well if it died mid-build. Shale never
+  reclaims a lock, because nothing it can read tells a live holder from a dead one. `doctor` reports
+  the lock and names the command that clears it; it says nothing about `current.new`, which the next
+  build removes once the lock is gone.
 - Git cannot store an empty directory, so a layer that needs one ships a `.gitkeep`, which will
   appear in `$HOME`.
 
