@@ -215,6 +215,10 @@ CASE_DIR=$TEST_ROOT
 # has pointed CASE_DIR at a rig of its own.
 CHANNEL_DIR=
 SHALE_RUNS=0
+# One directory per stub_path_without call, so a case may build several: the
+# names it creates are 'new' leaves, and a second call into one directory would
+# be refused rather than reused.
+STUB_PATHS=0
 # Set to 1 in the copy run_inner_suite builds, by a line appended after this
 # one.  A plain assignment, not ${INNER_SUITE-}: innerness is a property of the
 # harness file, and anything inherited from the environment would make a
@@ -862,6 +866,47 @@ mklayer() {
   sandbox_write "${target%/*}" "${target##*/}" "$content"
 }
 
+# stub_path_without TOOL... - a directory holding a link to every tool shale and
+# this harness run except the ones named, in stub_path.  The caller assigns it to
+# PATH whole rather than as a prefix: a prefix leaves the real tool findable
+# behind the gap, and the case then proves nothing.
+#
+# The list is every tool shale execs, established by tracing its exec calls
+# rather than by reading it, plus env, bash, cat and sed, which are the harness's
+# own.  A tool shale starts running joins it here, once.
+#
+# cat and sed are reached from inside run_shale, under whatever PATH the case has
+# set, so a case that omits either cannot use run_shale: it runs shale itself,
+# redirects to a file, and reads that file with PATH restored.
+stub_path_without() {
+  local all omit tool found
+  all=' env bash cat sed chkstow cp git mkdir mv readlink rm rmdir stow '
+  omit=" ${*-} "
+  # First, and fatal: a name that is in no list matches nothing, leaves a
+  # complete PATH, and passes the case having removed nothing at all - the one
+  # failure a helper whose whole job is removing a tool must not have.
+  for tool in ${1+"$@"}; do
+    case "$all" in
+      *" $tool "*) ;;
+      *) fail "stub_path_without: '$tool' is not one of the tools it links:$all" ;;
+    esac
+  done
+  STUB_PATHS=$((STUB_PATHS + 1))
+  sandbox_mkdir "$CASE_DIR/stub-bin.$STUB_PATHS"
+  stub_path=$sandbox_dir
+  # Unquoted on purpose: the list is this function's own literal, and the split
+  # into words is what is wanted.
+  # shellcheck disable=SC2086
+  for tool in $all; do
+    case "$omit" in
+      *" $tool "*) continue ;;
+    esac
+    found=$(command -v "$tool") || fail "$tool is not on PATH"
+    sandbox_leaf "$stub_path" "$tool" new
+    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
+  done
+}
+
 # ------------------------------------------------------------------ assertions
 #
 # Assertions print and exit themselves rather than relying on set -e, so a case
@@ -1001,8 +1046,8 @@ test_usage_help_forms_match_bare() {
   done
 }
 
-# README.md quotes the usage text verbatim, and the copy and the heredoc it came
-# from can drift apart without anything failing: the reader is the only thing
+# README.md quotes the usage text verbatim, and the copy and the lines shale
+# prints can drift apart without anything failing: the reader is the only thing
 # that reads both.  This is that thing.
 #
 # The fence is extracted from the file rather than restated here, because a copy
@@ -1057,6 +1102,51 @@ test_usage_readme_quotes_the_usage_text_verbatim() {
   run_shale
   assert_status 0 "$shale_status"
   assert_eq "$fence" "$shale_out" "usage text quoted in $readme"
+}
+
+# The usage text went through cat, so on a machine without one the first command
+# anyone runs printed nothing and exited 0 - the silent success shape, on the one
+# output that is meant to explain the tool.  Nothing in usage runs a tool now,
+# and both paths to it are here: the bare invocation, and the usage a wrong one
+# prints on stderr.
+#
+# run_shale reads shale's output back with cat, under the case's PATH, so this
+# case runs shale itself and reads the captures with PATH restored.
+# shellcheck disable=SC2123
+test_usage_prints_without_cat() {
+  local saved out err bad_out bad_err status
+  run_shale
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale - layered dotfiles builder' 'stdout'
+  stub_path_without cat
+  # All four captures proven before either run, in the way run_shale proves its
+  # own: a case that planted something at any of them must stop rather than have
+  # the earlier writes land.
+  sandbox_leaf "$CASE_DIR" nocat.out new
+  out=$sandbox_path
+  sandbox_leaf "$CASE_DIR" nocat.err new
+  err=$sandbox_path
+  sandbox_leaf "$CASE_DIR" nocat.bad.out new
+  bad_out=$sandbox_path
+  sandbox_leaf "$CASE_DIR" nocat.bad.err new
+  bad_err=$sandbox_path
+  saved=$PATH
+  PATH=$stub_path
+  status=0
+  shale >"$out" 2>"$err" || status=$?
+  PATH=$saved
+  assert_status 0 "$status" 'the run without cat'
+  # Byte for byte the text cat printed, which is also the text README.md quotes.
+  assert_eq "$shale_out" "$(cat "$out")" 'the usage text without cat'
+  assert_empty "$(cat "$err")" 'stderr'
+  PATH=$stub_path
+  status=0
+  shale buld >"$bad_out" 2>"$bad_err" || status=$?
+  PATH=$saved
+  assert_status 2 "$status" 'the wrong invocation without cat'
+  assert_empty "$(cat "$bad_out")" 'the wrong invocation stdout'
+  assert_contains "$(cat "$bad_err")" "shale: unknown command 'buld'" 'stderr'
+  assert_contains "$(cat "$bad_err")" 'usage:' 'stderr'
 }
 
 test_usage_unknown_command_exits_2() {
@@ -2876,19 +2966,12 @@ test_lock_a_holder_that_releases_between_the_mkdir_and_the_check_is_a_race_won()
 # the lock is taken, in the way git is checked before a clone.
 # shellcheck disable=SC2123
 test_lock_a_missing_rmdir_stops_the_build_before_it_takes_the_lock() {
-  local tool found stub saved
+  local saved
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  sandbox_mkdir "$CASE_DIR/stub-bin"
-  stub=$sandbox_dir
-  # Everything shale and the harness run except rmdir, which is the point.
-  for tool in env bash cat sed rm mkdir cp mv; do
-    found=$(command -v "$tool") || fail "$tool is not on PATH"
-    sandbox_leaf "$stub" "$tool" new
-    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
-  done
+  stub_path_without rmdir
   saved=$PATH
-  PATH=$stub
+  PATH=$stub_path
   run_shale build
   PATH=$saved
   assert_status 1 "$shale_status"
@@ -2898,6 +2981,34 @@ test_lock_a_missing_rmdir_stops_the_build_before_it_takes_the_lock() {
     "shale:   shale would take the lock at $HOME/.dotfiles/.lock and never be able to give it back" \
     'stderr'
   # Nothing taken and nothing built: the refusal is the whole of it.
+  assert_missing "$HOME/.dotfiles/.lock"
+  assert_missing "$HOME/.dotfiles/current"
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+# The mkdir that takes the lock has its diagnostic suppressed, so without this
+# check bash's 'command not found' goes nowhere and the build ends by blaming the
+# permissions on $HOME/.dotfiles, which is writable.  A message about the wrong
+# thing is worse than a loud one about the right thing, which is why this tool is
+# checked and cp, mv and rm are not.
+# shellcheck disable=SC2123
+test_lock_a_missing_mkdir_stops_the_build_before_it_takes_the_lock() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  stub_path_without mkdir
+  saved=$PATH
+  PATH=$stub_path
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    'shale: mkdir is not installed, and shale takes its lock by creating a directory' 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   shale would say only that it could not create the lock at $HOME/.dotfiles/.lock" \
+    'stderr'
+  # The message it replaces, which named a directory that is writable.
+  assert_not_contains "$shale_err" "check that $HOME/.dotfiles is writable" 'stderr'
   assert_missing "$HOME/.dotfiles/.lock"
   assert_missing "$HOME/.dotfiles/current"
   assert_missing "$HOME/.dotfiles/current.new"
@@ -3354,18 +3465,12 @@ test_clone_a_dangling_symlink_at_a_root_is_not_cloned_over() {
 # this case rather than passing it slowly.
 # shellcheck disable=SC2123
 test_clone_git_is_needed_only_when_a_clone_is() {
-  local tool found stub saved
+  local saved
   conf "base personal $CASE_DIR/repos/absent"
   mklayer personal .zshrc
-  sandbox_mkdir "$CASE_DIR/stub-bin"
-  stub=$sandbox_dir
-  for tool in env bash cat sed rm rmdir mkdir cp mv; do
-    found=$(command -v "$tool") || fail "$tool is not on PATH"
-    sandbox_leaf "$stub" "$tool" new
-    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
-  done
+  stub_path_without git
   saved=$PATH
-  PATH=$stub
+  PATH=$stub_path
   run_shale build
   PATH=$saved
   assert_status 0 "$shale_status"
@@ -3375,18 +3480,12 @@ test_clone_git_is_needed_only_when_a_clone_is() {
 
 # shellcheck disable=SC2123
 test_clone_a_missing_git_stops_a_build_that_must_clone() {
-  local tool found stub saved
+  local saved
   mkrepo personal .zshrc
   conf "base personal $repo_url"
-  sandbox_mkdir "$CASE_DIR/stub-bin"
-  stub=$sandbox_dir
-  for tool in env bash cat sed rm rmdir mkdir cp mv; do
-    found=$(command -v "$tool") || fail "$tool is not on PATH"
-    sandbox_leaf "$stub" "$tool" new
-    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
-  done
+  stub_path_without git
   saved=$PATH
-  PATH=$stub
+  PATH=$stub_path
   run_shale build
   PATH=$saved
   assert_status 1 "$shale_status"
@@ -4123,19 +4222,12 @@ test_apply_refuses_when_the_lock_it_holds_is_removed_before_the_stow() {
 # apply.
 # shellcheck disable=SC2123  # PATH is replaced on purpose and restored below
 test_apply_refuses_when_stow_is_not_installed() {
-  local tool found stub saved
+  local saved
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  sandbox_mkdir "$CASE_DIR/stub-bin"
-  stub=$sandbox_dir
-  # Everything shale and the harness run except stow, which is the point.
-  for tool in env bash cat sed rm rmdir mkdir cp mv; do
-    found=$(command -v "$tool") || fail "$tool is not on PATH"
-    sandbox_leaf "$stub" "$tool" new
-    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
-  done
+  stub_path_without stow
   saved=$PATH
-  PATH=$stub
+  PATH=$stub_path
   run_shale apply
   PATH=$saved
   assert_status 1 "$shale_status"
@@ -4633,20 +4725,14 @@ test_doctor_reports_every_finding_in_one_run() {
 # is silent whenever the tools are all present.
 # shellcheck disable=SC2123
 test_doctor_reports_its_checks_in_order() {
-  local tool found stub saved line seen
+  local saved line seen
   conf 'base personal/base' 'work work' 'lonely'
   mklayer personal/base .zshrc
   sandbox_mkdir "$HOME/.dotfiles/common"
   sandbox_write "$HOME" .stowrc '--ignore=secret'
-  sandbox_mkdir "$CASE_DIR/stub-bin"
-  stub=$sandbox_dir
-  for tool in env bash cat sed git chkstow; do
-    found=$(command -v "$tool") || fail "$tool is not on PATH"
-    sandbox_leaf "$stub" "$tool" new
-    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
-  done
+  stub_path_without stow
   saved=$PATH
-  PATH=$stub
+  PATH=$stub_path
   run_shale doctor
   PATH=$saved
   assert_status 1 "$shale_status"
@@ -4672,18 +4758,12 @@ EOF
 # and it is restored before anything else in the case runs.
 # shellcheck disable=SC2123
 test_doctor_a_missing_prerequisite_is_named_and_nothing_is_installed() {
-  local tool found stub saved
+  local saved
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  sandbox_mkdir "$CASE_DIR/stub-bin"
-  stub=$sandbox_dir
-  for tool in env bash cat sed git chkstow; do
-    found=$(command -v "$tool") || fail "$tool is not on PATH"
-    sandbox_leaf "$stub" "$tool" new
-    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
-  done
+  stub_path_without stow
   saved=$PATH
-  PATH=$stub
+  PATH=$stub_path
   run_shale doctor
   PATH=$saved
   assert_status 1 "$shale_status"
@@ -4694,22 +4774,62 @@ test_doctor_a_missing_prerequisite_is_named_and_nothing_is_installed() {
   assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
 }
 
+# doctor's point of use is checking, so it answers for every tool shale runs and
+# not only the ones this command runs itself: without cp, mv, rm or mkdir it used
+# to report 'no problems found', exit 0, and send the reader to a build that then
+# failed.  One tool removed per run, so each is named on its own rather than one
+# of them carrying the assertion for all.
+# shellcheck disable=SC2123
+test_doctor_names_every_tool_shale_runs() {
+  local tool saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  for tool in cp git mkdir mv rm rmdir stow; do
+    stub_path_without "$tool"
+    saved=$PATH
+    PATH=$stub_path
+    run_shale doctor
+    PATH=$saved
+    assert_status 1 "$shale_status" "$tool exit status"
+    assert_contains "$shale_out" "shale: $tool is not installed" 'stdout'
+    assert_contains "$shale_out" \
+      'shale:   install it with your system package manager: shale installs nothing' 'stdout'
+    # The one finding is the missing tool, so a report that grew a second one
+    # cannot be read as this check passing.
+    assert_contains "$shale_out" 'shale: 1 problem found' "$tool summary"
+    assert_empty "$shale_err" "$tool stderr"
+  done
+}
+
+# The whole list at once, which is the state the issue this came from described:
+# a machine with a shell and nothing else.
+# shellcheck disable=SC2123
+test_doctor_names_all_the_missing_tools_in_one_run() {
+  local tool saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  stub_path_without cp git mkdir mv rm rmdir stow
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  for tool in cp git mkdir mv rm rmdir stow; do
+    assert_contains "$shale_out" "shale: $tool is not installed" "$tool"
+  done
+  assert_contains "$shale_out" 'shale: 7 problems found' 'stdout'
+}
+
 # chkstow degrades the report rather than being a defect in the setup, so it
 # warns and the run still exits 0.
 # shellcheck disable=SC2123
 test_doctor_a_missing_chkstow_warns_without_failing() {
-  local tool found stub saved
+  local saved
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  sandbox_mkdir "$CASE_DIR/stub-bin"
-  stub=$sandbox_dir
-  for tool in env bash cat sed git stow; do
-    found=$(command -v "$tool") || fail "$tool is not on PATH"
-    sandbox_leaf "$stub" "$tool" new
-    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
-  done
+  stub_path_without chkstow
   saved=$PATH
-  PATH=$stub
+  PATH=$stub_path
   run_shale doctor
   PATH=$saved
   assert_status 0 "$shale_status"
@@ -4915,9 +5035,12 @@ test_doctor_a_broken_link_that_misses_the_built_tree_is_not_a_finding() {
 # swallows the failure of a missing command: without this check every link
 # arrives with an empty target, misses the built tree, and the audit reports
 # clean on a home full of orphans.  Degraded, so it warns and does not count.
+#
+# The audit runs here, and the note comes from the prerequisite block, so this is
+# also where the two could both speak.  Counted, not just found: one telling.
 # shellcheck disable=SC2123
 test_doctor_a_missing_readlink_warns_without_failing() {
-  local tool found stub saved
+  local saved line notes
   conf 'base personal/base'
   mklayer personal/base .zshrc
   run_shale apply
@@ -4925,18 +5048,69 @@ test_doctor_a_missing_readlink_warns_without_failing() {
   sandbox_mkdir "$HOME"
   sandbox_leaf "$sandbox_dir" .gone new
   ln -s "$HOME/.dotfiles/current/.gone" "$sandbox_path" || fail 'could not plant the link'
-  sandbox_mkdir "$CASE_DIR/stub-bin"
-  stub=$sandbox_dir
-  for tool in env bash cat sed git stow chkstow; do
-    found=$(command -v "$tool") || fail "$tool is not on PATH"
-    sandbox_leaf "$stub" "$tool" new
-    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
-  done
+  stub_path_without readlink
   saved=$PATH
-  PATH=$stub
+  PATH=$stub_path
   run_shale doctor
   PATH=$saved
   assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    'shale: readlink is not installed, and shale reads what a link points at with it' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  notes=0
+  while IFS= read -r line; do
+    case "$line" in
+      'shale: readlink is not installed'*) notes=$((notes + 1)) ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq 1 "$notes" 'the number of readlink notes'
+}
+
+# The shape the audit's own check could never report: no build has run, so the
+# audit returns before it, and a doctor that said nothing here would exit 0 on a
+# machine where 'shale which' dies at the first symlink a layer provides.  Which
+# is the failure this whole change is about, in the command that exists to catch
+# it.
+# shellcheck disable=SC2123
+test_doctor_a_missing_readlink_is_reported_before_the_first_build() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  stub_path_without readlink
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  # Nothing built, and the audit therefore never reached.
+  assert_missing "$HOME/.dotfiles/current"
+  assert_contains "$shale_out" \
+    'shale: readlink is not installed, and shale reads what a link points at with it' 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   and 'shale which' refuses a path that a layer provides as a symlink" 'stdout'
+  # A note, so the machine is reported as sound: severity is what keeps this
+  # uncounted, and being reported at all is what the case is for.
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The other early return, and the same claim: with no chkstow there is no audit
+# at all, and both notes still have to reach the reader.
+# shellcheck disable=SC2123
+test_doctor_reports_readlink_with_no_chkstow_to_audit_with() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  stub_path_without chkstow readlink
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale: chkstow is not installed' 'stdout'
   assert_contains "$shale_out" \
     'shale: readlink is not installed, and shale reads what a link points at with it' 'stdout'
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
@@ -5804,23 +5978,16 @@ shadowed  base   $HOME/.dotfiles/personal/base/.zshrc" "$shale_out" 'stdout'
 # readlink at all, which the second run here is.
 # shellcheck disable=SC2123
 test_which_a_missing_readlink_stops_it() {
-  local tool found stub saved
+  local saved
   conf 'base personal/base' 'local local'
   mklayer personal/base .netrc
   mklayer personal/base .zshrc
   sandbox_mkdir "$HOME/.dotfiles/local"
   sandbox_leaf "$sandbox_dir" .netrc new
   ln -s ../secrets/netrc "$sandbox_path" || fail 'could not create the symlink'
-  sandbox_mkdir "$CASE_DIR/stub-bin"
-  stub=$sandbox_dir
-  # Everything shale and the harness run except readlink, which is the point.
-  for tool in env bash cat sed rm mkdir rmdir cp mv; do
-    found=$(command -v "$tool") || fail "$tool is not on PATH"
-    sandbox_leaf "$stub" "$tool" new
-    ln -s "$found" "$sandbox_path" || fail "could not link $tool"
-  done
+  stub_path_without readlink
   saved=$PATH
-  PATH=$stub
+  PATH=$stub_path
   run_shale which .netrc
   assert_status 1 "$shale_status"
   # The refusal replaces the answer rather than standing beside a partial one.
@@ -5835,6 +6002,27 @@ test_which_a_missing_readlink_stops_it() {
   assert_eq "winner    base   $HOME/.dotfiles/personal/base/.zshrc" \
     "$shale_out" 'the path with no symlink'
   assert_empty "$shale_err" 'the path with no symlink stderr'
+}
+
+# doctor counts a missing stow as a problem for every command, which is a report
+# and not a gate: which links nothing, so it answers on a machine that has no
+# stow at all.  A prerequisite check moved anywhere near the dispatch breaks this
+# and nothing else.
+# shellcheck disable=SC2123
+test_which_answers_without_stow() {
+  local saved
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  stub_path_without stow
+  saved=$PATH
+  PATH=$stub_path
+  run_shale which .zshrc
+  PATH=$saved
+  assert_status 0 "$shale_status"
+  assert_eq "winner    local  $HOME/.dotfiles/local/.zshrc
+shadowed  base   $HOME/.dotfiles/personal/base/.zshrc" "$shale_out" 'stdout'
+  assert_empty "$shale_err" 'stderr'
 }
 
 # which composes nothing, so it takes no lock and no lock may keep it from
@@ -7489,6 +7677,27 @@ test_meta_a_clean_run_removes_its_sandbox() {
 # Without this an inner probe that starts its own suite recurses until the path
 # is too long for the filesystem, and the outer case then reports a pass having
 # asserted nothing.
+# stub_path_without exists to take one tool off PATH, so a name it does not know
+# has to stop the case: ignored, it builds a complete PATH and every assertion
+# after it passes against a shale that was missing nothing.  Nine cases reach it,
+# and one typo would make any of them vacuous in silence.
+test_meta_stub_path_without_refuses_an_unknown_tool() {
+  local trip status
+  trip=$CASE_DIR/trip
+  status=0
+  mkdir -p "$trip" || fail "could not create $trip"
+  (
+    CASE_DIR=$trip
+    stub_path_without stwo
+  ) >/dev/null 2>&1 || status=$?
+  assert_status 1 "$status" 'the refusal'
+  assert_contains "$(cat "$trip/failure" 2>/dev/null)" \
+    "stub_path_without: 'stwo' is not one of the tools it links" 'failure message'
+  # Refused before anything was built, so there is no half-made PATH to be used
+  # by a case that carried on regardless.
+  assert_missing "$trip/stub-bin.1"
+}
+
 test_meta_inner_suite_refuses_to_nest() {
   local nest status
   nest=$CASE_DIR/nest
@@ -7671,6 +7880,7 @@ run_case() {
   (
     CASE_DIR=$case_dir
     SHALE_RUNS=0
+    STUB_PATHS=0
     HOME=$case_home
     export HOME
     # Every message this suite asserts on comes from git or stow, and both
