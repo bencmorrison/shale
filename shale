@@ -93,23 +93,27 @@ denied_verb() {
   fi
 }
 
+# One printf rather than a heredoc through cat: the first thing anyone runs must
+# not depend on a tool being installed, and a heredoc here is only printable by
+# running one.  Every byte of this text is quoted in README.md, and a case
+# compares the two.
 usage() {
-  cat <<'EOF'
-shale - layered dotfiles builder
-
-usage:
-  shale build          compose the configured layers into ~/.dotfiles/current
-  shale apply          build, then stow current into your home directory
-  shale doctor         check prerequisites, config, and broken links
-  shale which PATH     show which layer provides PATH, and what it shadows
-
-~/.dotfiles/shale.conf lists one layer per line, lowest precedence first:
-
-  NAME  PATH  [URL]
-
-PATH is relative to ~/.dotfiles.  URL says how to clone PATH's top-level
-directory; give it once per directory and leave it off the other lines.
-EOF
+  # shellcheck disable=SC2088  # a tilde to print, not one to expand
+  printf '%s\n' \
+    'shale - layered dotfiles builder' \
+    '' \
+    'usage:' \
+    '  shale build          compose the configured layers into ~/.dotfiles/current' \
+    '  shale apply          build, then stow current into your home directory' \
+    '  shale doctor         check prerequisites, config, and broken links' \
+    '  shale which PATH     show which layer provides PATH, and what it shadows' \
+    '' \
+    '~/.dotfiles/shale.conf lists one layer per line, lowest precedence first:' \
+    '' \
+    '  NAME  PATH  [URL]' \
+    '' \
+    "PATH is relative to ~/.dotfiles.  URL says how to clone PATH's top-level" \
+    'directory; give it once per directory and leave it off the other lines.'
 }
 
 usage_error() {
@@ -588,6 +592,14 @@ acquire_lock() {
     die 'rmdir is not installed, and shale releases its lock by removing a directory' \
       "shale would take the lock at $LOCK and never be able to give it back" \
       'install it with your system package manager: shale installs nothing'
+  # The suppression below is what makes this check necessary: the 2>/dev/null
+  # swallows bash's 'command not found' with 'File exists', so nothing names
+  # mkdir and the last arm blames the permissions on a directory that is
+  # writable.
+  command -v mkdir >/dev/null 2>&1 ||
+    die 'mkdir is not installed, and shale takes its lock by creating a directory' \
+      "shale would say only that it could not create the lock at $LOCK" \
+      'install it with your system package manager: shale installs nothing'
   # mkdir's own diagnostic is suppressed because each arm below says more about
   # this particular directory, and its remedy, than 'File exists' does.
   if mkdir "$LOCK" 2>/dev/null; then
@@ -1003,11 +1015,11 @@ audit_broken_links() {
   # Checked rather than assumed, because the substitution below swallows the
   # failure of a missing command: every link would arrive with an empty target,
   # be judged to point outside the built tree, and the audit would report clean.
-  if ! command -v readlink >/dev/null 2>&1; then
-    note 'readlink is not installed, and shale reads what a link points at with it' \
-      "without it shale cannot audit $HOME for broken links"
-    return 0
-  fi
+  #
+  # Silently: doctor is the only caller and its prerequisite block has already
+  # said this one is missing, whichever way the returns above went.  A note here
+  # would be the second telling on the one path that reaches it.
+  command -v readlink >/dev/null 2>&1 || return 0
 
   normalise_path "$CUR"
   cur=$NORMALISED
@@ -1746,7 +1758,15 @@ cmd_doctor() {
 
   FINDINGS=0
 
-  for tool in git stow; do
+  # Every tool shale runs, whatever this command needs to run itself, and the
+  # list a new one joins.  Elsewhere the rule is narrower - check a tool at its
+  # point of use when its absence would be silent, or would produce a diagnostic
+  # about something other than the missing tool, and leave the rest to bash,
+  # which names a missing cp on stderr as accurately as any check here could.
+  # Doctor is where that rule stops applying, because checking is its point of
+  # use: it promises prerequisites, and the failure it exists to prevent is
+  # 'no problems found' followed by a build that cannot run.
+  for tool in cp git mkdir mv rm rmdir stow; do
     command -v "$tool" >/dev/null 2>&1 ||
       finding "$tool is not installed" \
         "install it with your system package manager: shale installs nothing"
@@ -1754,6 +1774,16 @@ cmd_doctor() {
   command -v chkstow >/dev/null 2>&1 ||
     note "chkstow is not installed" \
       "it comes with GNU stow, and without it shale cannot audit ${HOME-} for broken links"
+  # Here rather than at the audit that uses it, which returns early on a machine
+  # with no chkstow and on one with no built tree: from behind either of those
+  # this note is never printed at all, and doctor exits 0 having said nothing
+  # about a tool which dies without.  A note and not a finding, because what a
+  # missing readlink costs is the link audit and one answer of which, not a
+  # build.
+  command -v readlink >/dev/null 2>&1 ||
+    note 'readlink is not installed, and shale reads what a link points at with it' \
+      "without it shale cannot audit ${HOME-} for broken links" \
+      "and 'shale which' refuses a path that a layer provides as a symlink"
 
   if [ ! -d "$DOTFILES" ]; then
     if [ -e "$DOTFILES" ] || [ -L "$DOTFILES" ]; then
