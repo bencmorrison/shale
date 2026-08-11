@@ -990,6 +990,162 @@ shell_quote() {
   QUOTED="'${s//$q/$r}'"
 }
 
+# The options the stow resource file $1 sets that bear on an apply, in
+# STOWRC_OPTIONS as one 'line N: --opt' per occurrence in the order the file
+# holds them.  Non-zero when it names none, which is also the answer for a file
+# that is not a regular file and for one that cannot be read: stow reads a
+# resource file under '-r' and shale runs as the same user, so a file shale
+# cannot open is one stow does not read either.  STOWRC_PATHS is 1 when one of
+# them is --dir or --target, which is the one group apply's own command line
+# overrides and therefore the one the note has something more to say about.
+#
+# The set is stow's own option list minus what cannot reach an apply at all:
+# --no-folding, which apply's command line already carries, and -D, -S, -R and
+# package names, which stow documents as ignored in a resource file.  Everything
+# else is in.  --version, --help and --simulate stop the apply linking anything;
+# --ignore, --defer and --override drop or replace individual links; --dotfiles
+# renames them.  --compat makes the unstow phase sweep the whole target tree
+# instead of the directories the package holds, which takes back links a plain
+# apply leaves behind - and on 2.3.1 fails the apply outright at the first file
+# in the target that is neither a link nor a directory, which a ~/.stowrc is, so
+# there it refuses on the strength of its own existence.  --adopt is documented
+# to move a file in the way
+# from the target into the package, and on 2.3.1 it never gets to: the unstow
+# phase of apply's -R refuses that file as a conflict first, leaving the tree
+# byte for byte as it would be with no resource file at all.  It is named for
+# the option it is, since nothing here should turn on one version's ordering.
+# --verbose changes no link at all and is still here: apply reports a
+# stow that wrote to either stream, so a --verbose in one of these files puts a
+# warning and a wall of LINK: lines on every apply for ever, and this note is
+# the only thing that would lead its reader to the cause.  --dir and --target
+# are overridden by apply's own -d and -t, and are named because the user who
+# wrote one meant it, and it is live in every other stow they run.
+#
+# The parsing is stow's, checked against 2.3.1 and 2.4.1.  A line is split on
+# whitespace, and there is no comment syntax at all: a '#' is a token like any
+# other and the options after one on the same line take effect, so no line may
+# be skipped for looking like a comment.  The whole file is parsed as a single
+# argument list, so an option and its value may be separate tokens and may even
+# fall on different lines, which is what the skip below is for, and a '--' ends
+# the options for the whole of the rest of the file.  Options are Getopt::Long's,
+# so an unambiguous abbreviation - '--ign' for --ignore - is accepted, hence the
+# prefix match; the token is reported as the file spells it rather than resolved,
+# because an ambiguous prefix has no one answer and shale's job here is to point
+# at the line.
+#
+# The versions differ in one thing, and it decides how a quoted token is read:
+# 2.4.1 splits with shellwords and 2.3.1 with perl's split " ".  So a line of
+# '"--ignore=x"' is a live --ignore on 2.4.1 - the macOS floor - and on 2.3.1 is
+# a token that begins with a quote rather than a dash, which Getopt::Long hands
+# on as a package name and the resource-file parse discards.  The quotes are
+# stripped before the token is classified, which names it under the version
+# where it silently takes effect and over-names under the one where it does
+# nothing.  That is the direction to be wrong in: the other way round is silence
+# on the version that bites.
+stowrc_options() {
+  local file=${1-} line lineno tok word rest ch eq skip matched name toks
+  STOWRC_OPTIONS=()
+  STOWRC_PATHS=0
+  { [ -f "$file" ] && [ -r "$file" ]; } || return 1
+  lineno=0
+  skip=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    # A carriage return is whitespace to both versions' splitters, so it
+    # separates tokens here too rather than being glued to the one before it.
+    line=${line//$CR/ }
+    # read -a rather than an unquoted expansion: this splits on IFS without the
+    # pathname expansion that would turn a '*' in an ignore pattern into the
+    # names of the files in whatever directory doctor was run from.
+    toks=()
+    read -r -a toks <<EOF
+$line
+EOF
+    for tok in ${toks[@]+"${toks[@]}"}; do
+      if [ "$skip" -eq 1 ]; then
+        skip=0
+        continue
+      fi
+      eq=0
+      # One quote off each end, which is what shellwords takes off a token that
+      # is quoted whole.  An option quoted in halves - '--ignore="a b"' - is two
+      # tokens here whichever version reads it, and the first of them classifies
+      # on its '=' with the quote left inside the value.
+      case "$tok" in
+        \"* | \'*) tok=${tok#?} ;;
+      esac
+      case "$tok" in
+        *\" | *\') tok=${tok%?} ;;
+      esac
+      case "$tok" in
+        # Getopt::Long stops here, and stow reads everything after it as a
+        # package name - which a resource file has none of that it may use.
+        --) break 2 ;;
+        --*=*)
+          word=${tok%%=*}
+          word=${word#--}
+          eq=1
+          ;;
+        --*) word=${tok#--} ;;
+        -?*)
+          # A single dash is a bundle of one-letter options, and the two that
+          # take a value take the rest of the bundle as it.
+          rest=${tok#-}
+          while [ -n "$rest" ]; do
+            ch=${rest:0:1}
+            rest=${rest:1}
+            case "$ch" in
+              d | t)
+                STOWRC_OPTIONS[${#STOWRC_OPTIONS[@]}]="line $lineno: -$ch"
+                STOWRC_PATHS=1
+                [ -n "$rest" ] || skip=1
+                rest=
+                ;;
+              h | n | p | v | V)
+                STOWRC_OPTIONS[${#STOWRC_OPTIONS[@]}]="line $lineno: -$ch"
+                ;;
+            esac
+          done
+          continue
+          ;;
+        # A package name, or the value of an option written '--opt value' whose
+        # own token has already set skip.
+        *) continue ;;
+      esac
+      [ -n "$word" ] || continue
+      matched=0
+      # The five that take a value first, because the token after one of those
+      # is that value rather than an option.  The rest are flags, 'no' among
+      # them as the long alias of --simulate.
+      for name in dir target ignore override defer; do
+        case "$name" in
+          "$word"*)
+            matched=1
+            [ "$eq" -eq 1 ] || skip=1
+            case "$name" in
+              dir | target) STOWRC_PATHS=1 ;;
+            esac
+            break
+            ;;
+        esac
+      done
+      if [ "$matched" -eq 0 ]; then
+        for name in adopt compat dotfiles help no simulate verbose version; do
+          case "$name" in
+            "$word"*)
+              matched=1
+              break
+              ;;
+          esac
+        done
+      fi
+      [ "$matched" -eq 1 ] || continue
+      STOWRC_OPTIONS[${#STOWRC_OPTIONS[@]}]="line $lineno: --$word"
+    done
+  done <"$file"
+  [ "${#STOWRC_OPTIONS[@]}" -gt 0 ]
+}
+
 # Every link under $HOME that points into the built tree at a path the built tree
 # no longer holds: one finding each, and the remedy once under them.  This is the
 # only report of the design's known edge case - stow's unstow phase sweeps the
@@ -1792,7 +1948,7 @@ cmd_apply() {
 # short-circuits: every check runs whatever the ones before it found, and only
 # the finding count decides the exit status.
 cmd_doctor() {
-  local tool i name path root dir entry leaf known remedy qlock
+  local tool i name path root dir entry leaf known remedy qlock lines
 
   FINDINGS=0
 
@@ -2027,11 +2183,30 @@ cmd_doctor() {
   # runs stow inside 'cd "$DOTFILES"' - which is what makes the second file a
   # known one rather than whichever directory the user happened to be in.  Move
   # that cd and this check silently stops covering the file that takes effect.
+  #
+  # The options in it are named and nothing more: which of them took effect, and
+  # on which files, is stow's to say and shale would be guessing.  That is also
+  # why the line above them says only that the file sets them - a claim that they
+  # all change an apply is false of --dir and --target, which apply's own -d and
+  # -t override, and the test that asserts the override would contradict the note
+  # shale printed.  Uncounted like every other note, because a resource file is
+  # the user's own and holding one is not a defect.
   for entry in "${HOME-}/.stowrc" "$DOTFILES/.stowrc"; do
     if [ -e "$entry" ] || [ -L "$entry" ]; then
-      note "a stow resource file exists at $entry" \
-        "stow adds its --ignore patterns to the ones shale passes rather than replacing them" \
-        "so it can silently drop files from an apply"
+      lines=("a stow resource file exists at $entry"
+        "stow adds its --ignore patterns to the ones shale passes rather than replacing them"
+        "so it can silently drop files from an apply")
+      if stowrc_options "$entry"; then
+        lines[${#lines[@]}]='it sets these stow options, which shale names and does not act on:'
+        i=0
+        while [ "$i" -lt "${#STOWRC_OPTIONS[@]}" ]; do
+          lines[${#lines[@]}]=${STOWRC_OPTIONS[$i]}
+          i=$((i + 1))
+        done
+        [ "$STOWRC_PATHS" -eq 0 ] ||
+          lines[${#lines[@]}]='apply passes its own -d and -t, so a --dir or a --target set here does not redirect it'
+      fi
+      note ${lines[@]+"${lines[@]}"}
     fi
   done
 

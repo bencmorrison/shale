@@ -5026,6 +5026,232 @@ test_doctor_a_dangling_stow_resource_file_is_still_noted() {
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
 }
 
+# What is in the file, on the line it is on.  An --ignore drops a file from the
+# apply with exit 0 and both of stow's streams empty, so there is nothing for
+# apply to report the presence of and this note is the only place it can be
+# said.  --version and -n are the same defect at full size: a resource file
+# carrying either makes stow print and link nothing at all, still exit 0.  A
+# --verbose changes no link and is still named, because apply reports a stow
+# that wrote anything, so this file is what a warning on every apply for ever
+# leads back to.
+#
+# The line above the list says the file sets them and stops there.  --target is
+# in the same list and does not redirect this apply - the case above asserts it
+# does not - so a list introduced as options that change an apply would have
+# doctor contradicting the suite.
+#
+# The exit status is asserted because the whole of it stays a note: naming an
+# option counts nothing, and a doctor that started exiting 1 on a file the user
+# put there deliberately would be unusable.
+test_doctor_a_stow_resource_file_has_its_options_named() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME" .stowrc \
+    '--ignore=secret' '' '--target=/tmp' '--dotfiles' '-n' '--version' '--verbose'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" "shale: a stow resource file exists at $HOME/.stowrc" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   it sets these stow options, which shale names and does not act on:' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 1: --ignore' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 3: --target' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 4: --dotfiles' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 5: -n' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 6: --version' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 7: --verbose' 'stdout'
+  # Said once, about the two options it is true of, rather than folded into a
+  # claim about all of them.
+  assert_contains "$shale_out" \
+    'shale:   apply passes its own -d and -t, so a --dir or a --target set here does not redirect it' \
+    'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The other half: an option that cannot reach an apply at all is not named, so
+# the note that names nothing is the note doctor printed before it could name
+# anything.  --no-folding is already on the command line apply builds, and man
+# stow, RESOURCE FILES says -D, -R, -S and package names are ignored in one of
+# these files.  The -d and -t line is absent too, since nothing here sets either.
+test_doctor_a_stow_resource_file_of_harmless_options_names_none() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME" .stowrc '--no-folding' '-R' '-D' '-S' 'somepackage'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" "shale: a stow resource file exists at $HOME/.stowrc" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   so it can silently drop files from an apply' 'stdout'
+  assert_not_contains "$shale_out" 'shale:   line ' 'stdout'
+  assert_not_contains "$shale_out" 'shale:   it sets these stow options' 'stdout'
+  assert_not_contains "$shale_out" "shale:   apply passes its own -d and -t" 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# stow reads a '--' as the end of its options and everything after it as a
+# package name, which a resource file has none of that it may use: an rc file of
+# '-- --ignore=.foo' leaves .foo linked.  Naming an option there would point the
+# reader at a line that does nothing.  The --dotfiles before it is what shows
+# the scan ran at all, and the --adopt on the next line is what shows a '--'
+# ends the options for the rest of the file rather than for its own line.
+test_doctor_a_stow_resource_file_ends_at_a_double_dash() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME" .stowrc '--dotfiles -- --ignore=secret' '--adopt'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale:   line 1: --dotfiles' 'stdout'
+  assert_not_contains "$shale_out" 'shale:   line 1: --ignore' 'stdout'
+  assert_not_contains "$shale_out" 'shale:   line 2: --adopt' 'stdout'
+}
+
+# The one place the two versions of stow disagree about this file, and it is the
+# direction that matters.  2.4.1 splits with shellwords, which strips the quotes
+# and leaves one live option, so a fully quoted line takes effect on the macOS
+# floor; 2.3.1 splits with perl's split " " and the token keeps its quotes, so it
+# begins with a quote rather than a dash and is discarded as a package name -
+# verified against 2.3.1, where '"--ignore=plain"' left plain linked and exited
+# 0.  Naming it is right under the version where it silently bites, and names a
+# line that does nothing under the other.
+test_doctor_a_quoted_stow_resource_option_is_named() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME" .stowrc '"--ignore=secret"' "'--dotfiles'"
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale:   line 1: --ignore' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 2: --dotfiles' 'stdout'
+}
+
+# No resource file, nothing said about one.  Most other cases would fail loudly
+# on a stray line, but none of them would fail on this note appearing for a file
+# that is not there.
+test_doctor_says_nothing_about_a_resource_file_that_is_not_there() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'stow resource file' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The spellings stow's own parser accepts, because a note that misses one is
+# silent exactly where its reader needs it.  Read against both versions of
+# bin/stow.in: the whole file is parsed as one argument list, so a value may be
+# a separate token and may fall on the next line; Getopt::Long resolves an
+# unambiguous abbreviation, so '--dotf' is --dotfiles and '--ign' is --ignore;
+# and a single dash is a bundle of one-letter options.  The token is reported as
+# the file spells it, since an ambiguous prefix has no one answer.
+#
+# Both abbreviations are here because the two are resolved by separate loops -
+# one for the options that take a value and one for the flags - and a case
+# carrying only a flag leaves the other loop free to match exactly and still
+# pass.  Line 3 is --defer's value and must not be a line of its own, though
+# that alone would not notice a scan that ignored values: a token with no
+# leading dash is passed over either way.  The case below is what pins that.
+test_doctor_a_stow_resource_file_is_read_the_way_stow_reads_it() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME" .stowrc \
+    '--ign secret' '--defer' 'bin' '--dotf' '-nV' '--tar=/tmp'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale:   line 1: --ign' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 2: --defer' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 4: --dotf' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 5: -n' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 5: -V' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 6: --tar' 'stdout'
+  assert_not_contains "$shale_out" 'shale:   line 3:' 'stdout'
+}
+
+# An option's value is not an option, even when it looks exactly like one and
+# even across a line ending: stow parses the whole file as one argument list, so
+# the '--dotfiles' below is what --target and -t were given and nothing is
+# renamed by either.  Naming it would send the reader to edit a line that does
+# nothing, which is the same user-visible error as missing a live option and
+# reached from the opposite side.
+#
+# Both spellings, because the two are held by separate code: a long option's
+# value is claimed where the option is matched, and a bare '-t' claims the next
+# token only because the bundle it sits in ended.
+test_doctor_a_stow_resource_option_value_is_not_read_as_an_option() {
+  local spelling
+  for spelling in --target -t; do
+    conf 'base personal/base'
+    mklayer personal/base .zshrc
+    sandbox_write "$HOME" .stowrc "$spelling" '--dotfiles'
+    run_shale doctor
+    assert_status 0 "$shale_status" "$spelling exit status"
+    assert_contains "$shale_out" "shale:   line 1: $spelling" "$spelling stdout"
+    assert_not_contains "$shale_out" 'shale:   line 2:' "$spelling stdout"
+  done
+}
+
+# A carriage return is whitespace to both versions' splitters, so a CRLF file
+# applies every option in it and the note has to name every option in it.
+# Without the substitution that turns one into a separator, a '--dotfiles\r'
+# matches no option name and the note goes silent on a file stow acts on in
+# full - and the reader cannot see the character that caused it.  Written
+# directly rather than through sandbox_write, which writes '\n' endings.
+test_doctor_a_crlf_stow_resource_file_has_every_option_named() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_target "$HOME" .stowrc
+  printf -- '--dotfiles\r\n--ignore=secret\r\n' >"$sandbox_path" ||
+    fail "could not write $sandbox_path"
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale:   line 1: --dotfiles' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 2: --ignore' 'stdout'
+}
+
+# Both versions read a last line with no newline after it, so the note must too.
+# read reports that line as a failure having already assigned it, and a loop
+# that believed the status would drop the option a user most likely just typed -
+# the last one in the file.
+test_doctor_a_stow_resource_file_with_no_final_newline_is_read_whole() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_target "$HOME" .stowrc
+  printf -- '--dotfiles\n--ignore=secret' >"$sandbox_path" ||
+    fail "could not write $sandbox_path"
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale:   line 1: --dotfiles' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 2: --ignore' 'stdout'
+}
+
+# Neither version of stow has a comment syntax in a resource file: '#' is a
+# token like any other, and both split the line and go on parsing, so the
+# options after one on the same line take effect.  A reader who assumed
+# otherwise would skip the line and leave the note silent about a live option -
+# which is the failure this whole note exists to prevent.
+test_doctor_a_stow_resource_file_has_no_comment_syntax() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME" .stowrc '# --ignore=secret'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale:   line 1: --ignore' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# Splitting a line into tokens must not expand them as globs.  run_case leaves
+# the case in $CASE_DIR, so an unquoted expansion would read the names of the
+# files there as options - and a user's own directory is where a file named
+# after one is likeliest to be.  The '*' is a stow package name, which stow
+# ignores in a resource file.
+test_doctor_a_stow_resource_file_is_not_globbed() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$CASE_DIR" --version 'not an option'
+  sandbox_write "$HOME" .stowrc '--dotfiles *'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale:   line 1: --dotfiles' 'stdout'
+  assert_not_contains "$shale_out" 'shale:   line 1: --version' 'stdout'
+}
+
 # The reason doctor calls parse_config bare where every other command exits on
 # it: a broken config is when you most need the rest of the report.
 test_doctor_a_broken_config_does_not_stop_the_later_checks() {
