@@ -14,26 +14,20 @@ set -uo pipefail
 
 PROG=shale
 
-# A trailing slash on HOME is otherwise carried into every path shale prints -
-# '$HOME//.dotfiles/current' - and into the comparisons which makes against it,
-# where "$HOME"/* matches nothing at all under a home that already ends in one,
-# so every absolute path is reported as being outside $HOME.  Stripped once,
-# here, so that nothing below has to spell it twice.
+# Stripped once, here: "$HOME"/* matches nothing under a home that already ends
+# in a slash, so which reports every absolute path as being outside $HOME.
 case "${HOME-}" in
   '' | /) ;;
   */)
-    # The whole trailing run, cut in one go.  A HOME of nothing but slashes
-    # leaves nothing to keep, and that is the root directory rather than an
-    # empty path: an empty HOME would put every path shale prints at /.
+    # A HOME of nothing but slashes leaves nothing to keep, and that is the
+    # root directory: an empty HOME would put every path shale prints at /.
     HOME=${HOME%"${HOME##*[!/]}"}
     [ -n "$HOME" ] || HOME=/
     ;;
 esac
 
-# $HOME as the left-hand side of a join, which is the same string for every home
-# but the root directory: there $HOME is '/' and '$HOME/.dotfiles' is '//.dotfiles'.
-# HOME itself keeps the slash, because it is also printed on its own and an empty
-# path is not a home anyone can be told to look in.
+# $HOME with any trailing slash gone, for use as the left-hand side of a join.
+# HOME itself keeps its slash, because it is also printed on its own.
 HOME_PREFIX=${HOME-}
 HOME_PREFIX=${HOME_PREFIX%/}
 
@@ -42,14 +36,11 @@ CONF=$DOTFILES/shale.conf
 CUR=$DOTFILES/current
 NEW=$DOTFILES/current.new
 OLD=$DOTFILES/current.old
-# The leading dot keeps this out of the layer namespace, the same way the clone
-# in flight is named: a path component in the config must start with a letter,
-# digit or '_', so no configured layer can ever be called this.
+# The leading dot keeps this out of the layer namespace: valid_component makes
+# every configured path component start with a letter, digit or '_'.
 LOCK=$DOTFILES/.lock
 
-# First line prefixed 'shale: ', continuation lines 'shale:   '.  On stdout,
-# which is where a command's own result belongs: doctor's report and which's
-# answer are what those commands are for, and both are routinely redirected.
+# First line prefixed 'shale: ', continuation lines 'shale:   ', on stdout.
 report() {
   local line prefix
   prefix="$PROG: "
@@ -59,8 +50,7 @@ report() {
   done
 }
 
-# The same lines on stderr, for everything that is not a result: diagnostics,
-# usage errors, and the notes a command emits alongside its answer.
+# The same lines on stderr, for everything that is not a command's own result.
 emit() {
   report "$@" >&2
 }
@@ -74,17 +64,9 @@ die() {
   exit 1
 }
 
-# 'cannot search' or 'cannot read' for the directory $1, in DENIED_VERB: the bit
-# that is actually missing, for every message about a directory shale has to
-# walk.  Both callers test '! -r || ! -x', which is the right condition - one
-# bit short either way and the walk fails - but one wording for the two states
-# is a claim the reader disproves with ls: at mode 0444 the directory lists
-# perfectly well and it is the search bit that is gone.
-#
-# The search bit is tested first, so it also answers for mode 0000 where both
-# are missing.  That tie has to fall this way: which reports the same directory
-# and tests search alone, nothing there ever listing one, so 'search' is the one
-# word all three commands can say about a single directory.
+# 'cannot search' or 'cannot read' for the directory $1, in DENIED_VERB.  The
+# search bit is tested first, so mode 0000 - missing both - is reported as
+# 'cannot search', which is the word which uses for the same directory.
 denied_verb() {
   if [ ! -x "$1" ]; then
     DENIED_VERB='cannot search'
@@ -93,10 +75,6 @@ denied_verb() {
   fi
 }
 
-# One printf rather than a heredoc through cat: the first thing anyone runs must
-# not depend on a tool being installed, and a heredoc here is only printable by
-# running one.  Every byte of this text is quoted in README.md, and a case
-# compares the two.
 usage() {
   # shellcheck disable=SC2088  # a tilde to print, not one to expand
   printf '%s\n' \
@@ -124,39 +102,19 @@ usage_error() {
 }
 
 # The first directory on the way down to $1 that is there and cannot be
-# searched, in UNSEARCHABLE.  Non-zero when every directory above $1 can be
-# searched, which is the only case in which a '-e' or a '-d' answer of 'no'
-# about $1 means that nothing is there.
+# searched, in UNSEARCHABLE.  Non-zero when nothing on the way down stopped the
+# walk, which is the only case in which a '-e' or a '-d' answer of 'no' about $1
+# means that nothing is there.  The last component of $1 is not tested at all -
+# it is the path being asked about, and reaching it needs search permission on
+# the directories above it and none of its own.
 #
-# Downwards rather than up, and the first one rather than the nearest: an
-# unsearchable directory makes every test of every path below it false, so the
-# highest one is the cause and each one under it is a symptom of that.  The last
-# component is not tested at all - it is the path being asked about, and
-# reaching it needs search permission on the directories above it and none of
-# its own.
+# A relative path is joined to $PWD, and PWD is what that join is guarded on
+# rather than its result: bash leaves PWD unset where the directory it named
+# has been removed, and an empty one joins to '/relative/path', which is
+# absolute enough to pass any test made afterwards while naming a top-level
+# directory nobody referred to.
 #
-# A relative path is joined to the working directory rather than refused: HOME
-# need not be absolute, and every caller here reaches its path from the same
-# directory this walk would start from.  Refusing one instead sent the callers
-# to their 'nothing is there' arm, which is the whole defect this exists to stop.
-# The joined path is what UNSEARCHABLE is reported as, so the reader is given a
-# path that means the same thing from anywhere.
-#
-# PWD is what that join is tested on, never its result: bash leaves PWD unset
-# where the directory it named has been removed, and an empty one joins to
-# '/relative/path', which is absolute enough to pass any test made afterwards
-# while naming a top-level directory nobody referred to - '/root' for a $HOME of
-# 'root'.  Nothing shale does reaches that state, both of its cd's being inside
-# a subshell, but the walk is not what should be relied on to keep it so.
-#
-# obscured_ancestor is the same test walking a path relative to a directory
-# already known to be searchable.
-#
-# Nothing here reaches for denied_verb, which picks a verb from whichever of
-# '! -r || ! -x' is missing.  There is no choice to make: this tests the search
-# bit and never the read bit, so a directory at mode 0444 stops the walk while
-# listing perfectly well, and 'cannot search' is the only word its callers can
-# say that is true of every directory it names.
+# obscured_ancestor is the same walk from a given directory down a relative path.
 first_unsearchable_ancestor() {
   local path=${1-} here rest component
   UNSEARCHABLE=
@@ -173,8 +131,7 @@ first_unsearchable_ancestor() {
   here=
   rest=${path#/}
   while :; do
-    # The root is spelt '/' and every directory below it is spelt without a
-    # trailing slash, which is what the empty $here stands for on the first pass.
+    # The empty $here on the first pass is the root, which is spelt '/'.
     if [ -d "${here:-/}" ] && [ ! -x "${here:-/}" ]; then
       UNSEARCHABLE=${here:-/}
       return 0
@@ -186,8 +143,7 @@ first_unsearchable_ancestor() {
         ;;
       *) return 1 ;;
     esac
-    # A '//' in the path leaves an empty component, which names the directory
-    # already reached rather than one below it.
+    # A '//' leaves an empty component, naming the directory already reached.
     [ -n "$component" ] || continue
     here=$here/$component
   done
@@ -200,11 +156,8 @@ config_error() {
   emit "$@"
 }
 
-# One literal carriage return, matched as "$CR" by parse_config's CRLF check.
-# Assigned here rather than written into that case pattern, so the pattern is a
-# quoted parameter expansion, which is a literal on every bash there is; $'\r'
-# inside a pattern is a question about the 3.2 floor that nothing here can answer
-# by running it.
+# One literal carriage return, matched as "$CR" by the CRLF check below.  A
+# quoted expansion is a literal in a case pattern on every bash there is.
 CR=$'\r'
 
 # A layer name and every component of a layer path share one grammar.
@@ -234,34 +187,24 @@ valid_path() {
   done
 }
 
-# Fills LAYER_NAMES/LAYER_PATHS/LAYER_LINES in config order - line order is
-# precedence and nothing else determines it - and the clone-root-to-url map in
-# CLONE_ROOTS/CLONE_URLS/CLONE_LINES.  Collects every error into CONFIG_ERRORS
-# and returns non-zero; it must never exit, because doctor calls it bare and
-# goes on to report the rest of its findings.
+# Fills LAYER_NAMES/LAYER_PATHS/LAYER_LINES in config order, and the
+# clone-root-to-url map in CLONE_ROOTS/CLONE_URLS/CLONE_LINES.  Collects every
+# error into CONFIG_ERRORS and returns non-zero; it must never exit, because
+# doctor calls it bare and goes on to report the rest of its findings.
 parse_config() {
   local line lineno name path url extra root ok dup found i cr cr_seen qconf
   LAYER_NAMES=()
   LAYER_PATHS=()
   LAYER_LINES=()
-  # Parallel indexed arrays: bash 3.2 has no associative arrays.
   CLONE_ROOTS=()
   CLONE_URLS=()
   CLONE_LINES=()
   CONFIG_ERRORS=0
 
   if [ ! -e "$CONF" ]; then
-    # -e cannot tell 'nothing is there' from 'nothing can be learnt about it':
-    # a directory on the way down to the config that cannot be searched fails
-    # every test of a path inside it, and reporting that as a missing config
-    # sends the reader to create a file that is already there.  Search
-    # permission on the directories above it is what tells the two apart, and
-    # $DOTFILES is only the last of them: with $HOME or anything above it
-    # unsearchable, every test in this function is false for the same reason.
+    # '-e' answers no to ENOENT and to EACCES alike, and telling the reader to
+    # create a config that is already there is the worse of the two.
     if first_unsearchable_ancestor "$CONF"; then
-      # 'search' rather than 'read': this arm is reached on the search bit
-      # alone, and at mode 0444 the directory is perfectly readable - it is
-      # opening a file inside it that the missing bit refuses.
       config_error "cannot search $UNSEARCHABLE: permission denied" \
         "shale cannot tell whether there is a config file at $CONF" \
         "check the permissions on that directory"
@@ -280,26 +223,15 @@ parse_config() {
     return 1
   fi
 
-  # For the remedy the carriage-return arm prints.  Hoisted out of the loop
-  # because it does not vary, and because a call taking "$CONF" inside a loop
-  # that reads from it is a shellcheck SC2094 - it cannot know the function does
-  # not write the file.
   shell_quote "$CONF"
   qconf=$QUOTED
 
   cr_seen=0
   lineno=0
-  # The '|| [ -n "$line" ]' arm is what parses a last line with no newline
-  # after it, which read reports as a failure having still assigned it.
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
-    # Noted here and reported below, once the fields say whether this line
-    # carries a record: a carriage return is invisible in every message that
-    # could quote it, so a record is otherwise rejected as "invalid layer path
-    # 'personal/base'" about a path that looks exactly right.  Cut from the line
-    # before the fields are read, so that the record the reader sees is the one
-    # shale describes, and so a comment or a blank line carrying one is the
-    # comment or the blank line it looks like.
+    # Cut before the fields are read, so that the record shale describes is the
+    # record the reader sees; whether to report it is decided below.
     cr=0
     case "$line" in
       *"$CR"*)
@@ -311,13 +243,9 @@ parse_config() {
     path=
     url=
     extra=
-    # Default IFS: fields split on runs of spaces and tabs, and a fourth field
-    # onwards lands whole in extra.
     read -r name path url extra <<EOF
 $line
 EOF
-    # '#' opens a comment where it starts a word, so everything from that field
-    # on is comment whatever it holds.
     case "$path" in
       '#'*)
         path=
@@ -338,17 +266,9 @@ EOF
       '' | '#'*) continue ;;
     esac
 
-    # Only now, where the line is known to carry a record: shale reads nothing
-    # from a comment or a blank line, so a carriage return on one changes
-    # nothing about the config and refusing it would fail a build that the same
-    # file with one line ending fixed completes.  Collected like every other
-    # record error rather than abandoning the parse, so the records already read
-    # are still there for doctor to measure the directories in $DOTFILES against.
+    # Only for a record: shale reads nothing from a comment or a blank line, and
+    # the records already read stay for doctor to measure $DOTFILES against.
     if [ "$cr" -eq 1 ]; then
-      # One finding per record, and the explanation with the first of them: a
-      # CRLF file carries the defect on every line, and the reader who has been
-      # told once what a carriage return means and how to strip them learns
-      # nothing from being told it again for each of five layers.
       if [ "$cr_seen" -eq 0 ]; then
         cr_seen=1
         config_error "$CONF:$lineno: this line contains a carriage return" \
@@ -409,8 +329,6 @@ EOF
     done
     [ "$dup" -eq 0 ] || continue
 
-    # A url declares how to obtain the clone root, not the layer: several layers
-    # commonly come from one clone, so it is given once and omitted after.
     if [ -n "$url" ]; then
       found=-1
       i=0
@@ -446,8 +364,7 @@ EOF
 }
 
 # The url configured for clone root $1, in CLONE_URL; non-zero when the config
-# gave none.  A url belongs to a clone root rather than to a layer, so several
-# layers can share one.
+# gave none.
 clone_url() {
   local root=$1 i
   CLONE_URL=
@@ -465,8 +382,7 @@ clone_url() {
 # ----------------------------------------------------------- the scratch trees
 
 # The scratch tree while one exists, and empty otherwise, which is what makes
-# cleanup idempotent.  CLONING is the same for the clone in flight: an
-# interrupted clone must leave nothing behind that a later run could walk.
+# cleanup idempotent.  CLONING is the same for the clone in flight.
 SCRATCH=
 CLONING=
 
@@ -478,30 +394,19 @@ LOCKED=
 # because this is the first of them and repeated at none of them: drop '.' and
 # '..' by name, whatever the pattern and whatever the glob options.  bash 5.2
 # has globskipdots on by default and never returns those two; bash 3.2, the
-# floor, returns both from '.*' and neither from '*'.  The source is identical
-# on the two, so nothing that reads it can tell the meanings apart - a glob whose
-# answer depends on which one ran is simply wrong on one of them, and the whole
-# of the difference is those two names.  Drop them and the question cannot arise.
+# floor, returns both from '.*' and neither from '*'.
 #
 # Non-zero when directory $1 holds an entry of any kind, dotfiles included.
 # Written so that dotglob and nullglob may be set either way round: build sets
-# both partway through, and this runs from a trap at a moment nothing chose.
-# With nullglob off an unmatched pattern arrives as itself, which the -e and -L
-# tests tell from a file genuinely called '*' or '.*'.  Both spellings need that
-# arm: '.*' matches nothing at all on 5.2 in a directory holding no other
-# dotfile, where on 3.2 it always has '.' and '..' to match.
+# both partway through, and this runs from a trap.  With nullglob off an
+# unmatched pattern arrives as itself, which the -e and -L tests tell from a
+# file genuinely called '*' or '.*'.
 dir_is_empty() {
   local dir=$1 entry
-  # Three answers, not two, and this is the third: a directory that cannot be
-  # listed or searched answers every glob below with nothing at all, which is
-  # exactly what an empty one answers.  'Empty' is the one reading it must never
-  # take - every caller turns that into rmdir, and rmdir fails on the contents
-  # it could not see - so not knowing is reported as not empty, which is the
-  # answer all three callers are safe to act on.  The read bit is the one that
-  # decides: at mode 0444 the globs list the directory perfectly well, and it is
-  # 0111 and 0000 that come back empty-looking with a file inside.  Search is
-  # required too, because a directory shale cannot enter is one it could not
-  # confirm the emptiness of either.
+  # A directory that cannot be listed answers every glob with nothing, exactly
+  # as an empty one does, and 'empty' is the answer a caller turns into rmdir.
+  # Not knowing is therefore reported as not empty, which is the answer all
+  # three callers are safe to act on.
   { [ -r "$dir" ] && [ -x "$dir" ]; } || return 1
   for entry in "$dir"/* "$dir"/.*; do
     case "${entry##*/}" in
@@ -533,21 +438,15 @@ cleanup() {
   esac
   # Last, after the scratch tree is gone: a build that took the lock in between
   # would reap a current.new this one was still in the middle of removing.
-  # rmdir rather than rm -rf, because nothing is ever written inside the lock -
-  # there is no pid file to read, deliberately - so a lock that is not empty is
-  # not the one this process created and refusing it is the right answer.
+  # rmdir rather than rm -rf, because nothing is ever written inside the lock:
+  # a lock that is not empty is not the one this process created.
   case "$locked" in
     */.lock)
       if ! rmdir "$locked" 2>/dev/null; then
-        # rmdir is the remedy for the lock shale makes, which is always empty.
-        # Something that wrote inside it makes rmdir fail with 'Directory not
-        # empty', and advising it again would print a command that errors.
-        #
-        # Quoted, like every other command shale prints to be pasted: a home
-        # with a space in it otherwise yields an rm -rf over two paths that are
-        # not the lock.  Clobbering the global QUOTED is safe here and nowhere
-        # else in this function: cleanup runs from a trap, and every path that
-        # reaches it ends the process.
+        # rmdir is the remedy for the lock shale makes, which is always empty;
+        # against one something wrote inside, it is a command that errors.
+        # Clobbering the global QUOTED is safe here and nowhere else in this
+        # function: cleanup runs from a trap and every path reaching it exits.
         shell_quote "$locked"
         qlocked=$QUOTED
         remedy="rmdir $qlocked"
@@ -562,8 +461,7 @@ cleanup() {
 # A bash INT trap that does not itself exit returns control to the line after
 # the interrupted command, so without the kill a Ctrl-C mid-compose would delete
 # the scratch tree and then carry on to mv a path that no longer exists,
-# reporting success.  HUP is here because an ssh drop mid-bootstrap is the
-# realistic case.
+# reporting success.
 arm_traps() {
   trap cleanup EXIT
   trap 'cleanup; trap - INT; kill -INT $$' INT
@@ -574,9 +472,7 @@ arm_traps() {
 # Recorded and re-raised afterwards rather than ignored, so a Ctrl-C is still
 # obeyed and still reports the status it should.  Bash runs a handler at the
 # next command boundary, which for the swap means *after* a rename it did not
-# stop: with the handlers above still armed, a signal arriving during
-# 'mv $CUR $OLD' runs cleanup once current is already at current.old, deleting
-# the composed tree that was about to replace it and leaving no current at all.
+# stop, with the handlers above still armed to delete the composed tree.
 defer_signals() {
   DEFERRED=
   trap 'DEFERRED=INT' INT
@@ -589,15 +485,11 @@ arm_traps
 
 # -------------------------------------------------------------------- the lock
 
-# Composing into current.new and swapping it into place is one operation from
-# outside: a second build reaps this one's scratch tree mid-compose, and the
-# first then installs a partial tree and reports success.  mkdir is the atomic
-# primitive - it fails when the directory exists, on every filesystem and both
-# userlands - where flock is Linux-only and not in the toolset shale keeps to.
-#
-# Held from here to the end of the process rather than released at the end of
-# the command: apply takes it for its build and its stow together, and the
-# release belongs on the paths cleanup already covers.
+# mkdir is the atomic primitive - it fails when the directory exists, on every
+# filesystem and both userlands - where flock is Linux-only and not in the
+# toolset shale keeps to.  Held from here to the end of the process rather than
+# released at the end of the command: apply takes it for its build and its stow
+# together, and the release belongs on the paths cleanup already covers.
 acquire_lock() {
   local remedy qlock
   # Already held by this process, which is how apply's own build reaches this
@@ -606,15 +498,12 @@ acquire_lock() {
   # Before the lock is taken rather than when it is released: without rmdir the
   # release fails at the end of a build that otherwise succeeded, every build
   # after it is refused, and the remedy printed is the command that is missing.
-  # Lazily, in the way git is: a command that takes no lock needs no rmdir.
   command -v rmdir >/dev/null 2>&1 ||
     die 'rmdir is not installed, and shale releases its lock by removing a directory' \
       "shale would take the lock at $LOCK and never be able to give it back" \
       'install it with your system package manager: shale installs nothing'
-  # The suppression below is what makes this check necessary: the 2>/dev/null
-  # swallows bash's 'command not found' with 'File exists', so nothing names
-  # mkdir and the last arm blames the permissions on a directory that is
-  # writable.
+  # Necessary because the 2>/dev/null below swallows bash's 'command not found'
+  # along with 'File exists', leaving no arm that names mkdir.
   command -v mkdir >/dev/null 2>&1 ||
     die 'mkdir is not installed, and shale takes its lock by creating a directory' \
       "shale would say only that it could not create the lock at $LOCK" \
@@ -625,23 +514,20 @@ acquire_lock() {
     LOCKED=$LOCK
     return 0
   fi
-  # Before the -d arm, which a link to a directory answers as readily as a
-  # directory does: shale does not follow one, so calling it a lock some other
-  # shale is holding would be false.
+  # Before the -d arm, which a link to a directory answers as readily: shale
+  # does not follow one, so naming it a lock another shale holds would be false.
   if [ -L "$LOCK" ]; then
     die "$LOCK is a symlink" \
       'shale takes its lock by creating that directory, and will not follow a link to one' \
       'remove it, or move it aside'
   fi
-  # Refused, never reclaimed, and never waited on.  Nothing that could be put
-  # inside this directory would prove its holder is alive - a pid can be reused
-  # between the write and the read - so a run that removed one would be guessing
-  # about the tree another process is composing.  The message carries the
-  # command that clears it by hand, which is the honest remedy.
+  # Refused, never reclaimed, and never waited on: nothing that could be put
+  # inside this directory would prove its holder alive, a pid being reusable
+  # between the write and the read.  The message carries the manual remedy.
   if [ -d "$LOCK" ]; then
-    # Quoted, because this line exists to be pasted: a home with a space in it
-    # otherwise yields an rm -rf over two paths that are not the lock, and one
-    # with a quote in it yields a command the shell will not even parse.
+    # Quoted, like every command shale prints to be pasted: a home with a space
+    # in it otherwise yields an rm -rf over two paths that are not the lock, and
+    # one with a quote in it yields a command the shell will not even parse.
     shell_quote "$LOCK"
     qlock=$QUOTED
     remedy="rmdir $qlock"
@@ -656,9 +542,8 @@ acquire_lock() {
       'remove it, or move it aside'
   fi
   # Nothing is there, so the holder released between the mkdir above and these
-  # tests - the benign race this lock exists to make safe.  One more attempt, so
-  # that only a mkdir that fails against an empty path reaches the message
-  # below, which is about permissions and would be wrong about a race.
+  # tests.  One more attempt, so that only a mkdir that fails against an empty
+  # path reaches the message below, which is about permissions.
   if mkdir "$LOCK" 2>/dev/null; then
     LOCKED=$LOCK
     return 0
@@ -671,9 +556,7 @@ acquire_lock() {
 
 # Clones every configured clone root that has a url and nothing at its path,
 # before anything is composed, so a clone that fails costs nothing composed.
-# One clone per root however many layers derive from it, which is the whole
-# reason a url attaches to the root rather than to the layer.  A checkout that
-# is already there is left exactly as it is: updating one is git's job.
+# One clone per root, however many layers derive from it.
 clone_missing_roots() {
   local i root url dir tmp have_git qtmp qdir
   have_git=0
@@ -683,42 +566,35 @@ clone_missing_roots() {
     url=${CLONE_URLS[$i]}
     dir=$DOTFILES/$root
     i=$((i + 1))
-    # -L as well as -e, because a dangling symlink is something someone else
-    # put there too: the layer check below names it, rather than this cloning
-    # into whatever it points at or renaming over it.
+    # -L as well as -e: a dangling symlink is something someone else put there,
+    # and the layer check below names it rather than this cloning over it.
     { [ ! -e "$dir" ] && [ ! -L "$dir" ]; } || continue
-    # Lazily, and once: a machine where every layer is already present builds
-    # with no git installed at all.
+    # Lazily, and once: a machine holding every layer builds with no git at all.
     if [ "$have_git" -eq 0 ]; then
       command -v git >/dev/null 2>&1 ||
         die "git is not installed, and $dir must be cloned from $url" \
           'install it with your system package manager: shale installs nothing'
       have_git=1
     fi
-    # The leading dot is what keeps this name out of the layer namespace: a
-    # path component in the config must start with a letter, digit or '_', so
-    # no configured layer can ever be called this.
+    # The leading dot keeps this name out of the layer namespace: a configured
+    # path component must start with a letter, digit or '_'.
     tmp=$DOTFILES/.$root.cloning
     # Named before anything touches it, reaping included: a signal delivered
     # partway through the rm would otherwise run cleanup with CLONING still
-    # empty and leave a half-removed tree behind.  Naming a path costs nothing,
-    # which is what makes doing it first free.
+    # empty and leave a half-removed tree behind.
     CLONING=$tmp
     rm -rf "$tmp" || die "could not remove $tmp"
     { [ ! -e "$tmp" ] && [ ! -L "$tmp" ]; } || die "$tmp still exists"
     report "cloning '$root' from $url into $dir"
-    # Into the temporary name and renamed after, so an interrupted or failed
-    # clone cannot leave a half-populated directory that looks like a layer.
-    # git's stderr is neither captured nor reformatted: it is the progress of
-    # the slowest part of a bootstrap, and the diagnosis when one fails.
+    # Into the temporary name and renamed after: an interrupted or failed clone
+    # must not leave a half-populated directory that looks like a layer.
     git clone -- "$url" "$tmp" || die "could not clone $url into $dir"
     # Re-tested here because a clone takes as long as a network does: mv into a
     # directory that exists moves the source *inside* it, which would nest a
     # whole clone one level down and satisfy every test after this one.
     if [ -e "$dir" ] || [ -L "$dir" ]; then
       CLONING=
-      # No build reaps it either: the reap runs only for a root that is about
-      # to be cloned, and this one no longer is.  So the message says so.
+      # No build reaps it: the reap runs only for a root about to be cloned.
       die "$dir appeared while '$root' was being cloned" \
         "the clone is at $tmp" \
         "no build will touch it while $dir exists: use it, or remove it"
@@ -727,13 +603,8 @@ clone_missing_roots() {
     # Judged by the filesystem rather than by mv's status: a rename that
     # completed always leaves the source gone.
     if [ ! -d "$dir" ] || [ -e "$tmp" ] || [ -L "$tmp" ]; then
-      # Kept rather than cleaned up, and the message says what to do with it.
-      # The next build reaps it and fetches again, so keeping it silently would
-      # save nothing: what makes it worth keeping is being told it is there.
+      # Kept rather than reaped, and the message says what to do with it.
       CLONING=
-      # Quoted, like every command shale prints for a reader to run: a home with
-      # a space in it otherwise makes this an mv of four paths, none of them
-      # these two.
       shell_quote "$tmp"
       qtmp=$QUOTED
       shell_quote "$dir"
@@ -748,14 +619,11 @@ clone_missing_roots() {
 
 # ---------------------------------------------------------------- the composer
 
-# The layer compose_dir is walking, for the messages it raises.  Threading four
-# more arguments through a recursion to reach them buys nothing.
+# The layer compose_dir is walking, for the messages it raises.
 SRC_NAME=
 SRC_INDEX=0
 
-# $1 padded on the right to width $2, in PADDED.  A loop rather than a printf
-# field width: this is the one place a format string would have to be built
-# from a variable, and the two provider lines are two lines per conflict.
+# $1 padded on the right to width $2, in PADDED.
 pad_right() {
   PADDED=$1
   while [ "${#PADDED}" -lt "$2" ]; do
@@ -765,8 +633,7 @@ pad_right() {
 
 # Records a collision at $1, where the layer being composed provides a $2
 # ('file' or 'directory') at $3 and the composed tree already holds the other
-# kind.  Recorded rather than printed, because a build that revealed these one
-# at a time would be run five times; the caller prints them all and exits.
+# kind.  Recorded rather than printed: the caller prints them all and exits.
 conflict() {
   local srel=$1 kind=$2 path=$3
   local other_kind other_label other_path label i width
@@ -811,10 +678,9 @@ conflict() {
 
 # Something wrote to the built tree through its $HOME symlink instead of to the
 # layer, which is this design's one silent data-loss path: ~/.zshrc is a link
-# into current/ and an editor writes straight through it.  cp -p leaves a
-# legitimate layer update newer than the built copy, so a pull does not trip
-# this.  Recorded, not printed: the message names current.old, which the swap
-# has not created yet and an aborted build never will.
+# into current/ and an editor writes straight through it.  cp -p is what keeps
+# a legitimate layer update from tripping this.  Recorded, not printed: the
+# message names current.old, which an aborted build never creates.
 diverged() {
   local srel=$1 path=$2 i
   # Silent for every layer but the last one providing this path, so one edited
@@ -832,20 +698,16 @@ diverged() {
 }
 
 # Copies one layer directory over the composed tree, entry by entry, last write
-# winning per path.  No bulk cp: it would name neither layer in a collision,
-# and it cannot promise .git is skipped below the root.
+# winning per path.  No bulk cp: it would name neither layer in a collision.
 compose_dir() {
   local src=$1 dst=$2 rel=$3 e base srel dpath here
   here=$src${rel:+/$rel}
   # nullglob makes a directory that cannot be listed indistinguishable from an
   # empty one, so without this its whole subtree is dropped from the build and
-  # the build exits 0.  -x as well as -r: without it the entries are named but
-  # nothing can be learnt about them, and every test below silently takes its
-  # false branch.
+  # the build exits 0.  Without -x every test below takes its false branch.
   if [ ! -r "$here" ] || [ ! -x "$here" ]; then
-    # The layer name and the verb are doctor's and which's, both of which report
-    # this same directory: nothing local to this function says the three
-    # messages have to match, and a reader comparing two of them is who does.
+    # The layer name and the verb are doctor's too, and a reader comparing the
+    # two reports is who says they have to match.
     denied_verb "$here"
     die "layer '$SRC_NAME': $DENIED_VERB $here: permission denied" \
       'shale composes a layer by walking it' \
@@ -853,7 +715,7 @@ compose_dir() {
   fi
   for e in "$here"/*; do
     base=${e##*/}
-    # The dot-entry rule, stated at dir_is_empty.
+    # Dropped by name at every glob, whatever the options say about them.
     case "$base" in
       . | ..) continue ;;
     esac
@@ -890,11 +752,10 @@ compose_dir() {
   done
 }
 
-# ------------------------------------------------------------------- the doctor
+# ------------------------------------------------------------------ the doctor
 
 # A finding is a defect in the setup, and the count of them is what decides
-# doctor's exit status.  Warnings and notes go through note and never count.
-# Both are the report rather than a diagnostic, so both are on stdout.
+# doctor's exit status.  A note never counts, whatever it says.
 finding() {
   FINDINGS=$((FINDINGS + 1))
   report "$@"
@@ -905,16 +766,12 @@ note() {
 }
 
 # The running script's own path relative to $HOME, in SELF_REL.  Non-zero when
-# the script is not under $HOME, which is the ordinary case for an install on
-# PATH.  shale never learns or hard-codes where it lives: this is derived at
-# runtime from the path it was invoked by.
+# the script is not under $HOME - the ordinary case for an install on PATH.
 #
-# The leaf is left unresolved because a symlink there is still a path a layer
-# can shadow.  The directory part is resolved, and has the opposite exposure:
-# once ~/.local/bin is itself a link into current, pwd -P answers with the path
-# inside current, and the check then reports clean on a setup that does shadow
-# the script.  Resolving neither would fail on any '..' or symlinked parent,
-# which is the commoner case.
+# The leaf stays unresolved because a symlink there is still a path a layer can
+# shadow; the directory part is resolved, because once ~/.local/bin is itself a
+# link into current, an unresolved dir reports clean on a setup that does shadow
+# the script.
 self_relative_path() {
   local src base dir home
   SELF_REL=
@@ -933,12 +790,10 @@ self_relative_path() {
     return 0
   fi
   # pwd -P answers '/' for the root directory and for nothing else, which is the
-  # one home whose joins below would come out doubled.  After the equality test,
-  # which that same home passes for a script sitting directly in it.
+  # one home whose joins below would come out doubled.
   home=${home%/}
-  # The '/' in the pattern is what stops a sibling like "$HOME-elsewhere" from
-  # matching.  The one appended to dir would matter only for dir = home, which
-  # the branch above has already returned from.
+  # The '/' on both sides is what stops a sibling like "$HOME-elsewhere" from
+  # matching; dir = home has already returned above.
   case "$dir/" in
     "$home"/*) SELF_REL=${dir#"$home"/}/$base ;;
     *) return 1 ;;
@@ -948,15 +803,10 @@ self_relative_path() {
 
 # $1 with its '.' and '..' components resolved by text, in NORMALISED.  The
 # argument must be absolute; a relative one comes back with a '/' on the front,
-# which is why every caller below tests for that first.
-#
-# Lexical, and deliberately so: the path a broken link points at need not exist,
-# nothing portable resolves one that does not - readlink -f and realpath are both
-# GNU spellings absent from a BSD userland - and shale normalises paths rather
-# than resolving them everywhere else too.  The one case it gets wrong is a '..'
-# below a symlinked directory, which the kernel would follow elsewhere; the paths
-# given to it here are inside a tree stow built with --no-folding, where every
-# directory above a link is a real one.
+# which is why every caller below tests for that first.  Lexical, because the
+# path a broken link points at need not exist: the one case it gets wrong is a
+# '..' below a symlinked directory, and stow built these paths with
+# --no-folding, so every directory above a link in them is a real one.
 normalise_path() {
   local rest=${1-} component out
   out=
@@ -977,12 +827,10 @@ normalise_path() {
 
 # $1 wrapped so that a shell reading the line shale printed gets the path back
 # exactly, in QUOTED.  Single quotes around the whole of it, with an embedded
-# quote spelled '\'' - the one form that needs no character class and survives a
-# space, a bracket, a dollar and a backslash alike.
-#
-# The replacement is held in a variable rather than written into the expansion:
-# the same escape spelt inline is read differently by bash 3.2 and by bash 5,
-# and only this spelling gives both the same answer.
+# quote spelled '\'' - the one form that survives a space, a bracket, a dollar
+# and a backslash alike.  The replacement is held in a variable rather than
+# written into the expansion: the same escape spelt inline is read differently
+# by bash 3.2 and by bash 5, and only this spelling gives both the same answer.
 shell_quote() {
   local s=${1-} q r
   q=\'
@@ -996,52 +844,24 @@ shell_quote() {
 # that is not a regular file and for one that cannot be read: stow reads a
 # resource file under '-r' and shale runs as the same user, so a file shale
 # cannot open is one stow does not read either.  STOWRC_PATHS is 1 when one of
-# them is --dir or --target, which is the one group apply's own command line
-# overrides and therefore the one the note has something more to say about.
+# them is --dir or --target.
 #
-# The set is stow's own option list minus what cannot reach an apply at all:
-# --no-folding, which apply's command line already carries, and -D, -S, -R and
-# package names, which stow documents as ignored in a resource file.  Everything
-# else is in.  --version, --help and --simulate stop the apply linking anything;
-# --ignore, --defer and --override drop or replace individual links; --dotfiles
-# renames them.  --compat makes the unstow phase sweep the whole target tree
-# instead of the directories the package holds, which takes back links a plain
-# apply leaves behind - and on 2.3.1 fails the apply outright at the first file
-# in the target that is neither a link nor a directory, which a ~/.stowrc is, so
-# there it refuses on the strength of its own existence.  --adopt is documented
-# to move a file in the way
-# from the target into the package, and on 2.3.1 it never gets to: the unstow
-# phase of apply's -R refuses that file as a conflict first, leaving the tree
-# byte for byte as it would be with no resource file at all.  It is named for
-# the option it is, since nothing here should turn on one version's ordering.
-# --verbose changes no link at all and is still here: apply reports a
-# stow that wrote to either stream, so a --verbose in one of these files puts a
-# warning and a wall of LINK: lines on every apply for ever, and this note is
-# the only thing that would lead its reader to the cause.  --dir and --target
-# are overridden by apply's own -d and -t, and are named because the user who
-# wrote one meant it, and it is live in every other stow they run.
+# An option is in the set for what it is, not for what one version or one of
+# shale's own code paths makes of it: --verbose changes no link and is named,
+# --adopt is inert on 2.3.1 and is named.  The membership is pinned by the two
+# test_doctor_a_stow_resource_file cases that name options and name none.
 #
-# The parsing is stow's, checked against 2.3.1 and 2.4.1.  A line is split on
-# whitespace, and there is no comment syntax at all: a '#' is a token like any
-# other and the options after one on the same line take effect, so no line may
-# be skipped for looking like a comment.  The whole file is parsed as a single
-# argument list, so an option and its value may be separate tokens and may even
-# fall on different lines, which is what the skip below is for, and a '--' ends
-# the options for the whole of the rest of the file.  Options are Getopt::Long's,
-# so an unambiguous abbreviation - '--ign' for --ignore - is accepted, hence the
-# prefix match; the token is reported as the file spells it rather than resolved,
-# because an ambiguous prefix has no one answer and shale's job here is to point
-# at the line.
-#
-# The versions differ in one thing, and it decides how a quoted token is read:
-# 2.4.1 splits with shellwords and 2.3.1 with perl's split " ".  So a line of
-# '"--ignore=x"' is a live --ignore on 2.4.1 - the macOS floor - and on 2.3.1 is
-# a token that begins with a quote rather than a dash, which Getopt::Long hands
-# on as a package name and the resource-file parse discards.  The quotes are
-# stripped before the token is classified, which names it under the version
-# where it silently takes effect and over-names under the one where it does
-# nothing.  That is the direction to be wrong in: the other way round is silence
-# on the version that bites.
+# The parsing is stow's, checked against 2.3.1 and 2.4.1, and its traps shape
+# the code below.  There is no comment syntax at all: a '#' is a token like any
+# other and the options after one on the same line take effect.  The whole file
+# is one argument list, so an option's value may be a separate token on a later
+# line, and a '--' ends the options for the rest of the file rather than for its
+# own line.  Options are Getopt::Long's, so an unambiguous abbreviation is
+# accepted - hence the prefix match, and the token reported as the file spells
+# it.  2.4.1 splits a line with shellwords and 2.3.1 with perl's split " ", so a
+# wholly quoted '"--ignore=x"' is live on 2.4.1 - the macOS floor - and a
+# discarded package name on 2.3.1; quotes come off before classification, which
+# over-names where it does nothing rather than going silent where it bites.
 stowrc_options() {
   local file=${1-} line lineno tok word rest ch eq skip matched name toks
   STOWRC_OPTIONS=()
@@ -1051,12 +871,10 @@ stowrc_options() {
   skip=0
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
-    # A carriage return is whitespace to both versions' splitters, so it
-    # separates tokens here too rather than being glued to the one before it.
+    # A carriage return is whitespace to both versions' splitters.
     line=${line//$CR/ }
     # read -a rather than an unquoted expansion: this splits on IFS without the
-    # pathname expansion that would turn a '*' in an ignore pattern into the
-    # names of the files in whatever directory doctor was run from.
+    # pathname expansion that would read a '*' as the names of files on disk.
     toks=()
     read -r -a toks <<EOF
 $line
@@ -1068,9 +886,7 @@ EOF
       fi
       eq=0
       # One quote off each end, which is what shellwords takes off a token that
-      # is quoted whole.  An option quoted in halves - '--ignore="a b"' - is two
-      # tokens here whichever version reads it, and the first of them classifies
-      # on its '=' with the quote left inside the value.
+      # is quoted whole.  An option quoted in halves is two tokens either way.
       case "$tok" in
         \"* | \'*) tok=${tok#?} ;;
       esac
@@ -1078,8 +894,7 @@ EOF
         *\" | *\') tok=${tok%?} ;;
       esac
       case "$tok" in
-        # Getopt::Long stops here, and stow reads everything after it as a
-        # package name - which a resource file has none of that it may use.
+        # break 2 because a '--' ends the options for the rest of the file.
         --) break 2 ;;
         --*=*)
           word=${tok%%=*}
@@ -1115,8 +930,7 @@ EOF
       [ -n "$word" ] || continue
       matched=0
       # The five that take a value first, because the token after one of those
-      # is that value rather than an option.  The rest are flags, 'no' among
-      # them as the long alias of --simulate.
+      # is that value.  The rest are flags, 'no' among them as an alias of -n.
       for name in dir target ignore override defer; do
         case "$name" in
           "$word"*)
@@ -1146,42 +960,24 @@ EOF
   [ "${#STOWRC_OPTIONS[@]}" -gt 0 ]
 }
 
-# Every link under $HOME that points into the built tree at a path the built tree
-# no longer holds: one finding each, and the remedy once under them.  This is the
-# only report of the design's known edge case - stow's unstow phase sweeps the
-# target directories the package still holds, so a directory that has left every
-# layer keeps its links, and the apply that orphaned them exits 0.
+# Every link under $HOME that points into the built tree at a path the built
+# tree no longer holds: one finding each, and the remedy once under them.
 #
-# chkstow's exit status carries no information.  Run against a target it cannot
-# even reach it prints "Can't stat /no/such/dir: No such file or directory" and
-# still exits 0 - verified on 2.3.1 - so the status is not tested at all and the
-# output is what is read.  Its stderr is read as well, and separately: a
-# 'skipping <dir>' there is chkstow's own line, printed where a .stow or a
-# .notstowed marker made it leave a directory unwalked, and a "Can't cd to ..."
-# is File::Find reporting one it could not enter.  Either means the walk covered
-# less than $HOME, so a clean audit says less than it appears to.
+# chkstow's exit status carries no information - run against a target it cannot
+# reach it prints "Can't stat ...: No such file or directory" and still exits 0,
+# verified on 2.3.1 - so only its output is read.  Its stderr is read too, and
+# separately: a 'skipping <dir>' or a "Can't cd to ..." there means the walk
+# covered less than $HOME, so a clean audit says less than it appears to.
 #
-# -t is mandatory, and the argument carries a trailing slash.  chkstow's default
-# target is $STOW_DIR or /usr/local, which is the environment's choice rather
-# than shale's; and File::Find will not descend a top directory that is itself a
-# symlink unless the path ends in '/', so a $HOME reached through one would make
-# the whole audit walk nothing and report clean.
-#
-# What counts is much narrower than what chkstow reports, and the narrowing is
-# the whole check.  'chkstow -b' names every broken symlink anywhere under the
-# target, $DOTFILES included, and nothing under $DOTFILES is ever a link apply
-# made: the layers are the user's, and the built tree's copy of a symlink a layer
-# meant to dangle would otherwise be judged against itself and reported for ever,
-# since no remedy may touch it.  What is a finding is a link elsewhere under
-# $HOME into $CUR at a path $CUR does not hold, which only an apply creates and
-# only a rebuild orphans.
+# -t is mandatory: chkstow's default target is $STOW_DIR or /usr/local, the
+# environment's choice rather than shale's.  What counts is much narrower than
+# what it reports - nothing under $DOTFILES is a link apply made, and a layer's
+# own dangling symlink judged against itself would be reported for ever.
 audit_broken_links() {
   local out err marker line link dest target cur dots home qdots qhome n lines
 
   # Uncounted, and before every other check here, which all need a built tree to
-  # mean anything: nothing else in doctor mentions one, so a home full of links
-  # into a tree that is not there would otherwise be reported without a word
-  # about the cause.
+  # mean anything.
   if [ -d "$DOTFILES" ] && [ ! -d "$CUR" ]; then
     if [ -e "$CUR" ] || [ -L "$CUR" ]; then
       note "$CUR exists but is not a directory, so there is no built tree to check the links in ${HOME-} against" \
@@ -1193,19 +989,12 @@ audit_broken_links() {
   fi
 
   command -v chkstow >/dev/null 2>&1 || return 0
-  # Nothing to be orphaned from, and nothing to measure a link against: with no
-  # built tree, every link an apply ever made points at a path it no longer
-  # holds, and the answer to all of them is one 'shale build'.
   [ -d "$CUR" ] || return 0
   # An empty HOME would make the target '/', and this walk is the whole of it.
   [ -n "${HOME-}" ] || return 0
   # Checked rather than assumed, because the substitution below swallows the
   # failure of a missing command: every link would arrive with an empty target,
   # be judged to point outside the built tree, and the audit would report clean.
-  #
-  # Silently: doctor is the only caller and its prerequisite block has already
-  # said this one is missing, whichever way the returns above went.  A note here
-  # would be the second telling on the one path that reaches it.
   command -v readlink >/dev/null 2>&1 || return 0
 
   normalise_path "$CUR"
@@ -1213,9 +1002,11 @@ audit_broken_links() {
   normalise_path "$DOTFILES"
   dots=$NORMALISED
 
-  # Exactly one trailing slash.  File::Find strips one from the path it was
-  # given and leaves the rest in every path it prints, so a second would put a
-  # '//' in the middle of every link this reports.
+  # Exactly one trailing slash.  File::Find will not descend a top directory
+  # that is itself a symlink unless the path ends in '/', so a $HOME reached
+  # through one would walk nothing and report clean; and it strips one slash and
+  # leaves the rest in every path it prints, so a second would put a '//' in the
+  # middle of every link this reports.
   home=$HOME
   case "$home" in
     */) ;;
@@ -1249,10 +1040,8 @@ EOF
   # and every finding it counted would be lost with it.
   while IFS= read -r line; do
     # Not exhaustive, and chkstow's format cannot be made to be: it prints one
-    # unquoted path per line, so a link whose name holds a newline arrives as two
-    # lines and is dropped here.  Nothing is fabricated by that - the tail of
-    # such a name fails this prefix, and a forged 'Bogus link: ' line fails the
-    # readlink below - but the parser sees fewer links than chkstow found.
+    # unquoted path per line, so a link whose name holds a newline arrives as
+    # two lines and is dropped.  Nothing is fabricated; some links are missed.
     case "$line" in
       'Bogus link: '*) link=${line#'Bogus link: '} ;;
       *) continue ;;
@@ -1281,10 +1070,8 @@ EOF
       "$cur" | "$cur"/*) ;;
       *) continue ;;
     esac
-    # What tells an orphan from a dangling symlink a layer ships deliberately:
-    # the layer's is still provided by the built tree, as a link that points
-    # nowhere, and this one is not provided at all.  -L as well as -e, or every
-    # link a layer meant to dangle is reported as a defect in the setup.
+    # -L as well as -e: a dangling symlink a layer ships deliberately is still
+    # provided by the built tree, and only an unprovided path is an orphan.
     { [ ! -e "$target" ] && [ ! -L "$target" ]; } || continue
     finding "$link points at $target, which the built tree no longer provides"
     n=$((n + 1))
@@ -1294,21 +1081,11 @@ EOF
 
   [ "$n" -gt 0 ] || return 0
   # Uncounted: this is the remedy for the findings above rather than another of
-  # them, and it leads with deleting them because every finding above names the
-  # path of one and a delete works on every version of stow there is.
-  #
-  # The sweep is second because it does not.  -p/--compat is what would make it
-  # work - its unstow phase walks the whole target tree instead of only the
-  # directories the package still holds, so it takes the orphans back, and plain
-  # 'stow -D' leaves every one of them - but on 2.3.1 that same walk calls every
-  # file in the target that is neither a link nor a directory a conflict and
-  # abandons the whole run before removing anything, which one ~/notes.txt is
-  # enough to cause.  Both were run: 2.3.1 refuses that line and 2.4.1 takes the
-  # orphan back with it.  Nothing here probes for the version - the line says
-  # which one it needs, and a version test belongs in the reader's shell if
-  # anywhere.  It also unstows everything else, hence the apply after it, and
-  # info stow warns the walk "can be prohibitive if your target tree is very
-  # large", which $HOME is - so it stays a remedy rather than what apply does.
+  # them, and delete leads because it works on every version of stow.  Both
+  # halves were run: 2.3.1 abandons the -p sweep at the first file in the target
+  # that is neither a link nor a directory - one ~/notes.txt is enough - and
+  # 2.4.1 takes the orphan back with it.  Nothing here probes for the version;
+  # the line says which one it needs.
   shell_quote "$DOTFILES"
   qdots=$QUOTED
   shell_quote "$HOME"
@@ -1320,16 +1097,12 @@ EOF
     'earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory'
 }
 
-# -------------------------------------------------------------------- the query
+# ------------------------------------------------------------------- the query
 
-# The path to look for in each layer, relative to $HOME, in WHICH_REL.  Assigns
-# a global and returns a status rather than printing its answer: a diagnostic
-# raised inside $(...) would exit only the substitution, the caller would carry
-# on with an empty path, and '[ -e "$dir/" ]' is true for every layer.
-#
-# Normalise, never resolve.  Resolving symlinks answers a different question -
-# which file the path ends at, rather than which layer put that path there -
-# and the tools for it are not portable.
+# The path to look for in each layer, relative to $HOME, in WHICH_REL; non-zero
+# when the path is one shale will not answer for, having said why.  Assigns a
+# global rather than printing its answer: a diagnostic raised inside $(...)
+# exits only the substitution, and an empty path is true for every layer.
 which_normalise() {
   local arg=${1-} path rest component prefix longest root i
 
@@ -1342,29 +1115,14 @@ which_normalise() {
   fi
 
   path=$arg
-  # A '~' only reaches shale unexpanded because it was quoted, and it means
-  # exactly what $HOME does.  Rewritten here rather than stripped below, so the
-  # layer prefixes see one spelling: '~/.dotfiles/personal/base/.zshrc' and
-  # "$HOME/.dotfiles/personal/base/.zshrc" must answer alike.  The quotes in the
-  # patterns are what keep the tilde literal - bash expands an unquoted one in a
-  # case pattern, which would make the pattern $HOME twice over.
   # shellcheck disable=SC2088  # a tilde to match, not one to expand
   case "$path" in
     '~') path=$HOME ;;
     '~/'*) path=$HOME_PREFIX/${path#'~/'} ;;
   esac
 
-  # A path inside the built tree or inside a layer, which is what tab completion
-  # produces and the form people actually type.  Before the $HOME strip, not
-  # after it: $DOTFILES is itself under $HOME, so stripping $HOME first leaves
-  # every one of these with a '.dotfiles/...' prefix that matches no layer.
-  # The longest match wins, so a layer nested inside another names the deeper
-  # one - the only reading under which the answer is about the file named.
-  #
-  # The root itself matches too, with or without its trailing '/'.  Both spell
-  # a directory shale composes from rather than a path inside one, and both are
-  # refused below - but only once this has recognised which root was named, or
-  # the message is about $HOME or about a layer that provides nothing.
+  # Before the $HOME strip, not after it: $DOTFILES is itself under $HOME, so
+  # stripping $HOME first leaves a '.dotfiles/...' that matches no layer.
   longest=
   root=
   for prefix in current ${LAYER_PATHS[@]+"${LAYER_PATHS[@]}"}; do
@@ -1379,9 +1137,6 @@ which_normalise() {
   if [ -n "$longest" ]; then
     path=${path#"$DOTFILES/$longest"}
     path=${path#/}
-    # Named by its layer wherever one is configured at it, because that is the
-    # name the rest of shale's output uses; 'current' is the only other thing
-    # this loop can have matched.
     root="the built tree at $DOTFILES/current"
     i=0
     while [ "$i" -lt "${#LAYER_PATHS[@]}" ]; do
@@ -1394,15 +1149,10 @@ which_normalise() {
   fi
 
   case "$path" in
-    # $HOME_PREFIX rather than $HOME, so that a home of '/' compares as '/*'
-    # rather than as '//*', which matches no absolute path at all; the arm below
-    # still spells $HOME, which is the whole of it and not a join.
+    # $HOME_PREFIX rather than $HOME, so a home of '/' compares as '/*' and not
+    # '//*'.  The arm below spells $HOME: it is the whole of it, not a join.
     "$HOME_PREFIX"/*) path=${path#"$HOME_PREFIX"/} ;;
     "$HOME") path= ;;
-    # A well-formed invocation naming a state shale will not act on, so this is
-    # a diagnosis and not a usage error.  It must also never fall through: an
-    # absolute path left in place would be tested as "$dir/$path", which is the
-    # path itself, and every layer would be reported as providing it.
     /*)
       emit "$path is not under $HOME" \
         'shale only composes paths inside your home directory'
@@ -1423,8 +1173,6 @@ which_normalise() {
     esac
   done
 
-  # '.' is here for the same reason the absolute arm above is: '$dir/.' exists
-  # wherever $dir does, so left alone it names every layer.
   case "$path" in
     '' | '.')
       if [ -n "$root" ]; then
@@ -1456,23 +1204,14 @@ which_normalise() {
 
 # The first directory on the way from $1 to the path $2 inside it that exists
 # but cannot be searched, in OBSCURED; non-zero when every directory on that way
-# can be searched.  Shared by build, doctor and which, so that all three say the
-# same thing about the same directory.
+# can be searched.  Shared by build, doctor and which, so all three say the same
+# thing about the same directory.
 #
-# Without this, a path under a directory that cannot be searched answers 'no' to
-# -e, -L and -d exactly as a path that is not there does - the tests fail with
-# EACCES rather than ENOENT - so which names the layer below it the winner, while
-# build and doctor call the layer directory missing and send the reader to a
-# config line that is correct.  Only search permission matters: reading a
-# directory is what listing it needs, and nothing here lists one.
-#
-# The walk starts at $DOTFILES rather than at the layer directory, with the
-# layer's own path as the first components of $2: a layer path has more than one
-# component in every example there is, and an intermediate one that cannot be
-# searched makes the layer directory itself answer 'no' to -d, which would let
-# the loop below decide there was nothing in the way.  The leaf is never tested,
-# only the directories above it, which leaves a layer directory that cannot be
-# read to compose_dir and to doctor's own check of it.
+# $2 carries the layer's own path, because an unsearchable directory above a
+# layer makes the layer directory answer 'no' to -d, -e and -L exactly as its
+# absence does.  Only the directories above the leaf are tested, and only for
+# search permission: listing a directory is what needs the read bit, and nothing
+# here lists one.
 obscured_ancestor() {
   local here=$1 rest=$2 component
   OBSCURED=
@@ -1481,8 +1220,6 @@ obscured_ancestor() {
       OBSCURED=$here
       return 0
     fi
-    # The leaf needs no search permission of its own, only on the directory
-    # holding it, which is the $here this arm leaves the loop from.
     case "$rest" in
       */*)
         component=${rest%%/*}
@@ -1494,21 +1231,15 @@ obscured_ancestor() {
   done
 }
 
-# How $1 is composed, in WHICH_KIND, and how it is shown, in WHICH_SHOW.
-#
-# A symlink is a leaf whatever it points at, which is how the composer treats
-# one: a layer's symlink to a directory replaces a lower layer's directory
-# rather than merging into it, and build calls that a file-versus-directory
-# conflict.  Reporting it as a directory here would promise a merge that build
-# refuses to perform.
+# How $1 is composed, in WHICH_KIND, and how it is shown, in WHICH_SHOW.  A
+# symlink is a leaf whatever it points at, because the composer treats one that
+# way: calling it a directory here promises a merge build refuses to perform.
 which_describe() {
   local path=$1 target
   if [ -L "$path" ]; then
     WHICH_KIND='file'
-    # Lazily, in the way git is: an answer with no symlink in it needs no
-    # readlink.  Checked rather than assumed, because the substitution below
-    # swallows the failure of a missing command - the line would be printed with
-    # an empty target, claiming a link to nothing, and which would exit 0.
+    # Checked here rather than up front: an answer with no symlink in it needs
+    # no readlink, and doctor is what reports the missing tool before a build.
     command -v readlink >/dev/null 2>&1 ||
       die "readlink is not installed, and $path is a symlink" \
         'shale shows what a link in a layer points at, and reads it with readlink' \
@@ -1524,32 +1255,24 @@ which_describe() {
   fi
 }
 
-# ----------------------------------------------------------------- the commands
+# ---------------------------------------------------------------- the commands
 
 cmd_build() {
   local i name path root dir errors n had_current qcur qold
 
   parse_config || exit 1
 
-  # After the parse, which writes nothing a second build could race, and before
-  # everything that does: taking it first would answer a missing config with a
-  # message about a lock.
+  # After the parse and before everything that writes: taking it first would
+  # answer a missing config with a message about a lock.
   acquire_lock
 
   # dotglob because dotfiles are the ordinary case here, nullglob because an
   # empty layer directory - the day-one state of a local layer - must expand to
-  # nothing rather than to a literal '*'.  Never restored: shopt -p returns
-  # non-zero for an unset option, so there is nothing to capture, and build is
-  # the last thing this process does.
+  # nothing rather than to a literal '*'.  Never restored.
   shopt -s dotglob nullglob
 
-  # Before the check below, which is what makes a root with a url that shale
-  # can obtain no longer a missing layer at all.
   clone_missing_roots
 
-  # Every layer is verified before anything is written, so a missing one costs
-  # nothing composed.  The wording branches on the cause because the cause is
-  # what decides the remedy.
   errors=0
   i=0
   while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
@@ -1560,13 +1283,8 @@ cmd_build() {
     if [ -d "$dir" ]; then
       :
     elif obscured_ancestor "$DOTFILES" "$path"; then
-      # Before every arm below, because all of them are reached by the same
-      # 'no': a directory on the way to this layer that cannot be searched makes
-      # -d, -e and -L false for a layer directory that is there and is fine.
-      # Reported as a missing layer, the remedy sends the reader to a config
-      # line that is correct and never mentions the permission that is the
-      # cause.  The line is which's, word for word, so a reader comparing the
-      # two commands about one setup is told one thing.
+      # Before every arm below: a directory on the way to this layer that cannot
+      # be searched makes -d, -e and -L false for a layer that is fine.
       emit "layer '$name': cannot search $OBSCURED: permission denied" \
         "shale cannot tell whether there is a directory at $dir" \
         'check the permissions on that directory'
@@ -1579,11 +1297,8 @@ cmd_build() {
         "check the path on line ${LAYER_LINES[$i]}"
       errors=$((errors + 1))
     elif [ -e "$DOTFILES/$root" ] || [ -L "$DOTFILES/$root" ]; then
-      # Reached only by a layer path deeper than its root - a one-component path
-      # is the arm above - and it is why cloning does not make this state
-      # unreachable: shale removes nothing it did not create, so a root that is
-      # a file or a dangling symlink is never cloned over, whether or not the
-      # config gives a url for it.
+      # Reachable despite the clone above: shale removes nothing it did not
+      # create, so a root that is not a directory is never cloned over.
       emit "layer '$name' has no directory at $dir" \
         "its clone root $DOTFILES/$root exists but is not a directory" \
         'remove it, or move it aside'
@@ -1599,9 +1314,6 @@ cmd_build() {
   done
   [ "$errors" -eq 0 ] || exit 1
 
-  # Two stateless guards, and no sentinel file: a sentinel is persisted state in
-  # a tool whose value is keeping none, and it would invent a first-run refusal
-  # on any machine that ever had a hand-made current.
   if [ -L "$CUR" ]; then
     die "$CUR is a symlink" \
       'shale builds into it, and would write through the link' \
@@ -1616,10 +1328,9 @@ cmd_build() {
   # Reaping whatever a killed run left behind.
   rm -rf "$NEW" || die "could not remove $NEW"
   { [ ! -e "$NEW" ] && [ ! -L "$NEW" ]; } || die "$NEW still exists"
-  # Before the mkdir, not after it: a signal delivered between the two would
-  # otherwise run cleanup with SCRATCH still empty and leave the scratch tree
-  # behind.  Naming a path that does not exist yet costs nothing - cleanup's
-  # rm -rf is a no-op on it - which is what makes this ordering free.
+  # Before the mkdir, not after it: a signal in between would run cleanup with
+  # SCRATCH still empty and orphan the scratch tree.  Naming a path that does
+  # not exist yet costs nothing - cleanup's rm -rf is a no-op on it.
   SCRATCH=$NEW
   mkdir "$NEW" || die "could not create $NEW"
 
@@ -1669,11 +1380,9 @@ cmd_build() {
     die "$CUR not rebuilt"
   fi
 
-  # stow reads one ignore list per package and a package-local one replaces its
-  # built-in list wholesale, so these three root-anchored patterns are all of
-  # it.  The built-in list matches \.git, \.gitignore, \.gitmodules and .+~
-  # against the basename at any depth, which would otherwise keep a layer's
-  # global .gitignore out of $HOME while every command reported success.
+  # A package-local ignore list replaces stow's built-in one wholesale, so these
+  # three root-anchored patterns are all of it - and the built-in list is what
+  # would otherwise keep a layer's .gitignore out of $HOME with apply exiting 0.
   printf '%s\n' '^/README.*' '^/LICENSE.*' '^/COPYING' \
     >"$NEW/.stow-local-ignore" ||
     die "could not write $NEW/.stow-local-ignore"
@@ -1689,21 +1398,15 @@ cmd_build() {
   # recoverable.  Nothing may run a handler inside that interval.
   defer_signals
   # Both renames are judged by the filesystem rather than by mv's exit status,
-  # and each is retried once.  Deferring signals stops a handler running inside
-  # the swap but not the signal itself, which goes to the whole process group -
-  # that is what Ctrl-C does - and so kills mv as well: either before the rename,
-  # which the retry covers, or in the instant between the rename taking effect
-  # and mv returning, where the status reports a failure about a move that
-  # happened and the state test is the only thing that can tell.  A durable
-  # failure - a full disk, a wrong mode - fails the retry exactly as it failed
-  # the first attempt.
+  # and each is retried once: deferring signals stops a handler running inside
+  # the swap but not the signal itself, which goes to the process group and can
+  # kill mv between the rename taking effect and mv returning.
   had_current=0
   if [ -e "$CUR" ]; then
     had_current=1
     mv "$CUR" "$OLD"
     # Retried only onto a destination that is still clear: a first attempt that
-    # left anything at $OLD would take the second one *into* it, nesting the
-    # previous tree a level down and passing the test below.
+    # left anything at $OLD would take the second one *into* it.
     if [ -e "$CUR" ] && [ ! -e "$OLD" ] && [ ! -L "$OLD" ]; then
       mv "$CUR" "$OLD"
     fi
@@ -1734,9 +1437,6 @@ cmd_build() {
       die "could not move $NEW into place" \
         "$CUR is the previous tree again, and $NEW is the one that was not installed"
     fi
-    # Quoted, and this is the printed command it matters most for: it is an
-    # rm -rf, it is pasted by someone whose home is half-swapped, and unquoted
-    # under a home with a space in it the rm takes a path that is not $CUR.
     shell_quote "$CUR"
     qcur=$QUOTED
     shell_quote "$OLD"
@@ -1748,14 +1448,11 @@ cmd_build() {
   SCRATCH=
   arm_traps
 
-  # Edits made to the built tree are the only copy of themselves, so a build
-  # that found any keeps the tree it displaced.  Reported here rather than
-  # during the walk: until the swap has happened there is no current.old for
-  # the message to point at, and a build that aborts never makes one.  Before
-  # the re-raise below, because a signal that ends the run here must not take
-  # the only notice that current.old holds an edit with it - the next build
-  # reaps current.old and cannot re-detect the divergence, cp -p having left
-  # the rebuilt copy no newer than its layer.
+  # Reported here rather than during the walk: until the swap has happened there
+  # is no current.old for the message to point at.  Before the re-raise below,
+  # because a signal ending the run here must not take the only notice that
+  # current.old holds an edit with it - the next build reaps current.old and
+  # cannot re-detect the divergence, cp -p having left the copy no newer.
   n=${#DIVERGED_PATHS[@]}
   if [ "$n" -eq 0 ]; then
     rm -rf "$OLD" || warn "could not remove $OLD"
@@ -1781,37 +1478,18 @@ cmd_apply() {
 
   parse_config || exit 1
 
-  # Before the lock and before anything is composed, in the way rmdir and git
-  # are: a machine with no stow must not rebuild the tree and only then find out
-  # that nothing can be done with it.
   command -v stow >/dev/null 2>&1 ||
     die 'stow is not installed, and apply links the built tree with it' \
       'install it with your system package manager: shale installs nothing'
 
-  # Taken here, once, and covering the build and the stow together: a second
-  # shale that rebuilt $CUR between them would leave this stow linking $HOME at
-  # files that had already been replaced.  cmd_build's own acquire_lock finds it
-  # held by this process and returns.  Nothing releases it here - cleanup does,
-  # on every path out.
   acquire_lock
 
-  # Only if the build succeeded, so a failed build never relinks anything.  Its
-  # own failures exit; this covers a non-zero return.
   cmd_build || exit 1
 
-  # Re-checked here rather than taken on trust from the acquire above: a whole
-  # build sits in that window, and the message a refused shale prints tells its
-  # reader how to remove a stale lock by hand.  A lock removed there means
-  # another shale may be rebuilding $CUR at this moment, and linking $HOME at a
-  # tree being rewritten is the failure the lock exists to prevent.  LOCKED is
-  # blanked first because this process is no longer holding anything: cleanup
-  # would otherwise fail to remove a directory that is already gone and advise
-  # removing it again.
-  #
-  # The -x is what tells a lock that was removed from a $DOTFILES that can no
-  # longer be looked into: without search permission on it every test of a path
-  # inside is false, and that is the cd's failure to report a few lines below,
-  # not a missing lock.
+  # Re-taken rather than trusted: a whole build sits between the acquire and the
+  # stow.  The -x is what keeps a $DOTFILES that has lost its search bit - where
+  # every test of a path inside it is false - out of this arm and in the cd's,
+  # and LOCKED is blanked because this process no longer holds anything.
   if [ ! -d "$LOCKED" ] && [ -x "$DOTFILES" ]; then
     LOCKED=
     die "the lock at $LOCK is gone, and this apply was holding it" \
@@ -1820,62 +1498,23 @@ cmd_apply() {
   fi
 
   # -t "$HOME" is mandatory even though stow's default target - the parent of
-  # the stow directory - is that same path.  man stow, RESOURCE FILES: stow reads
-  # ./.stowrc and ~/.stowrc, and for a single-valued option such as --target the
-  # command line is what overrides them, so without this a stray resource file
-  # silently redirects the whole apply and exits 0.  The cd makes ./.stowrc a
-  # known file rather than whichever directory the user happened to run shale
-  # from; nothing can stop --ignore in one of them from being appended to, which
-  # is what doctor's note about them is for.
+  # the stow directory - is that same path.  man stow, RESOURCE FILES: stow
+  # reads ./.stowrc and ~/.stowrc, and for a single-valued option such as
+  # --target the command line is what overrides them, so without this a stray
+  # resource file silently redirects the whole apply and exits 0.  The cd makes
+  # ./.stowrc a known file rather than whichever directory shale was run from.
   #
-  # -R is what prunes links to files that have disappeared from the layers: its
-  # unstow phase sweeps each target directory it visits and removes the links
-  # into this package it finds there, and the stow phase puts back only what the
-  # tree still holds.
+  # --no-folding is documented in man stow and absent from stow --help, so it
+  # reads like a mistake to anyone checking it against the help text.  It is not.
   #
-  # --no-folding is documented in man stow and does not appear in stow --help,
-  # so it reads like a mistake to anyone checking the flag against the help
-  # text.  It is real.  Without it stow links a directory that does not yet
-  # exist in $HOME as one symlink back into the package, and an application that
-  # writes a runtime file into that directory then writes it into the built
-  # tree, which the next build discards.
+  # 125 tells a cd that failed from a stow that ran: stow exits 0, or 1 when it
+  # refuses, and every other failure of it is a perl die carrying the errno of
+  # the symlink, unlink or mkdir that failed, none of which is 125.
   #
-  # --compat is deliberately not passed.  Its unstow phase walks the whole
-  # target tree, which would find the links left inside a directory that
-  # vanished from every layer, but info stow warns that it "can be prohibitive
-  # if your target tree is very large" and $HOME is exactly that.  Finding those
-  # links is doctor's job rather than apply's.
-  #
-  # 125 is what tells a cd that failed from a stow that ran.  stow exits 0, or 1
-  # when it refuses - a conflict, or an invocation it would not accept - and
-  # every other failure of it is a perl die carrying the errno of the call that
-  # failed, none of which is 125 for the symlink, unlink and mkdir stow makes.
-  # The cd's own diagnostic is dropped so that the message below is the only
-  # voice on the subject.
-  #
-  # stow's output is held rather than let flow, because the status alone cannot
-  # tell an apply that linked everything from one that linked most of it: stow
-  # says which of the two it did only in what it writes, and exits 0 either way.
-  #
-  # Both streams into the one capture, which is what keeps this to a single
-  # substitution.  Separating them means duplicating fd 1 so stow's stdout can go
-  # past the capture, and that dup fails outright on a shale whose own stdout is
-  # closed - 'shale apply >&-' then runs no stow at all and links nothing.  A
-  # file instead of a substitution has nowhere to live: the only directory shale
-  # writes to is $DOTFILES, and this is the one point in apply where $DOTFILES
-  # may already be unenterable, which is the arm 125 below reports.
-  #
-  # Merging costs nothing that can be measured.  stow writes its diagnostics with
-  # perl's warn and its --verbose lines through Stow::Util::debug, which is warn
-  # too, so stdout carries nothing from any run that actually applies - with
-  # these flags or with a resource file added to them.
-  #
-  # The exceptions are the two resource-file options that apply nothing at all:
-  # a ~/.stowrc of '--version' or '--help' prints to stdout, exits 0 and links
-  # not one file, because those options are prepended to the command line like
-  # any other.  Merging is what makes shale report that empty apply rather than
-  # swallow it, and it is on stderr because it is a remark about the apply and
-  # not the result of a shale command, which is shale's own rule for the two.
+  # stow's output is held rather than let flow: the status alone cannot tell an
+  # apply that linked everything from one that linked most of it.  Both streams
+  # go into the one capture, because letting stdout past means duplicating fd 1,
+  # and that dup fails outright on a 'shale apply >&-' - no stow, nothing linked.
   status=0
   err=$(
     (
@@ -1884,11 +1523,8 @@ cmd_apply() {
     ) 2>&1
   ) || status=$?
   # Before every message below, all of which point at what stow reported
-  # 'above': holding the stream is what would otherwise put shale's diagnostic
-  # first.  Nothing was written under 125 - stow never ran, and the cd's own
-  # diagnostic went to /dev/null - so that arm is covered by being empty.  The
-  # substitution strips the trailing newlines and printf puts one back, which is
-  # the whole of what 'unchanged' does not cover here.
+  # 'above'.  Nothing was written under 125 - stow never ran - so that arm is
+  # covered by this being empty.
   if [ "$status" -ne 0 ] && [ -n "$err" ]; then
     printf '%s\n' "$err" >&2
   fi
@@ -1896,15 +1532,6 @@ cmd_apply() {
     die "could not enter $DOTFILES to run stow" \
       "$CUR is built; nothing in $HOME was relinked"
   fi
-  # stow's own diagnostic is left exactly as it wrote it: it names the paths it
-  # could not handle, and shale knows nothing about them that stow does not say
-  # better.  What shale adds is the state $HOME is now in, and only the refusal
-  # is all-or-nothing: the conflicts are found while both phases are planned, and
-  # planning changes nothing.  Any other status is a call that failed while that
-  # plan was being carried out, one task at a time, with nothing to undo the
-  # tasks that already ran.  The remedy cannot assume the fix is in $HOME either:
-  # a layer that ships an absolute symlink is refused every time, and there is
-  # nothing in $HOME to clear.
   if [ "$status" -eq 1 ]; then
     die "stow failed; nothing in $HOME was relinked" \
       'stow plans the whole operation and abandons all of it rather than half-applying one' \
@@ -1915,51 +1542,29 @@ cmd_apply() {
       'stow changes nothing until the whole operation is planned, but nothing undoes the part it had carried out' \
       "$CUR is built and correct: fix what stow reported above, in $HOME or in a layer, then apply again"
 
-  # Exit 0 with something written is the third outcome, and it is reported
-  # without a word of it being read.  A layer shipping a '.dotfiles/...' path is
-  # the case that matters: stow will not link over its own stow directory, so it
-  # says so here, links the rest and exits 0, and reading the status alone made
-  # that a silent partial apply.
-  #
-  # What stow puts in this stream is worded differently between versions, and it
-  # is not all warnings about paths either - a $DOTFILES that is a symlink to a
-  # store on another volume makes 2.3.1 print a 'BUG in find_stowed_path?' line
-  # and then link the whole tree correctly, which is a layout people really use.
-  # So these lines claim only what is true of both: that stow wrote something,
-  # and what it would mean *if* what follows names a path stow skipped.  Making
-  # the claim unconditional would be shale interpreting the output after all,
-  # and wrong on every apply of that layout.  The status stays 0, because the
-  # apply the user asked for did happen.
-  #
-  # It is a floor and not a fence: stow drops a file matched by an --ignore in a
-  # resource file without a word on either stream, so nothing here sees that.
+  # Exit 0 with something written is the third outcome: stow linked most of the
+  # tree and said so.  These lines claim only that stow wrote and what it would
+  # mean *if* what follows names a path stow skipped - not everything on that
+  # stream is about a path, and reading it would be shale interpreting output.
   [ -n "$err" ] || return 0
   warn "stow exited 0 and wrote output" \
     'shale does not read what stow writes; its output follows unchanged' \
     "if it names a path stow skipped, that path is not linked from $CUR into $HOME"
   printf '%s\n' "$err" >&2
-  # Explicit, because the printf above is the last command in the function and
-  # apply's status would otherwise be its: on a 'shale apply 2>&-' that write
-  # fails, and a warned apply exited 1 having done everything correctly.
   return 0
 }
 
-# Ordered cheapest and most fundamental first.  Nothing here exits early or
-# short-circuits: every check runs whatever the ones before it found, and only
-# the finding count decides the exit status.
+# Nothing here exits early or short-circuits: every check runs whatever the ones
+# before it found, and only the finding count decides the exit status.
 cmd_doctor() {
   local tool i name path root dir entry leaf known remedy qlock lines
 
   FINDINGS=0
 
-  # Every tool shale runs, whatever this command needs to run itself, and the
-  # list a new one joins.  Elsewhere the rule is narrower - check a tool at its
-  # point of use when its absence would be silent, or would produce a diagnostic
-  # about something other than the missing tool, and leave the rest to bash,
-  # which names a missing cp on stderr as accurately as any check here could.
-  # Doctor is where that rule stops applying, because checking is its point of
-  # use: it promises prerequisites, and the failure it exists to prevent is
-  # 'no problems found' followed by a build that cannot run.
+  # Every tool shale runs, and the list a new one joins.  Elsewhere a tool is
+  # checked at its point of use only where its absence would be silent or would
+  # name something other than the missing tool; doctor is where that stops,
+  # because checking is its point of use and it promises prerequisites.
   for tool in cp git mkdir mv rm rmdir stow; do
     command -v "$tool" >/dev/null 2>&1 ||
       finding "$tool is not installed" \
@@ -1968,12 +1573,6 @@ cmd_doctor() {
   command -v chkstow >/dev/null 2>&1 ||
     note "chkstow is not installed" \
       "it comes with GNU stow, and without it shale cannot audit ${HOME-} for broken links"
-  # Here rather than at the audit that uses it, which returns early on a machine
-  # with no chkstow and on one with no built tree: from behind either of those
-  # this note is never printed at all, and doctor exits 0 having said nothing
-  # about a tool which dies without.  A note and not a finding, because what a
-  # missing readlink costs is the link audit and one answer of which, not a
-  # build.
   command -v readlink >/dev/null 2>&1 ||
     note 'readlink is not installed, and shale reads what a link points at with it' \
       "without it shale cannot audit ${HOME-} for broken links" \
@@ -1982,30 +1581,16 @@ cmd_doctor() {
   if [ ! -d "$DOTFILES" ]; then
     if [ -e "$DOTFILES" ] || [ -L "$DOTFILES" ]; then
       # One input reaches this arm and is told something false: a symlink whose
-      # target sits under a directory that cannot be searched, where -e answers
-      # no about a directory that may be perfectly good.  Naming that cause
-      # needs the link's target, which needs readlink - an optional dependency
-      # shale checks for lazily, so a check here would either drag that check
-      # forward for every run or say a third thing where it is missing.  The
-      # line prescribes nothing, which is what keeps the cost of being wrong
-      # here to the diagnosis rather than to what the reader then does.
+      # target sits under a directory that cannot be searched.  Naming that needs
+      # readlink, checked for lazily, so the line prescribes nothing.
       finding "$DOTFILES exists but is not a directory" \
         "shale keeps your layers, your config and its build output there"
     elif first_unsearchable_ancestor "$DOTFILES"; then
-      # Every test of every path under an unsearchable directory answers no, so
-      # without this doctor states that there is no dotfiles directory - which
-      # may well be there - and prints a mkdir that fails for the same reason
-      # the test did.  doctor is the command run when nothing works, so naming
-      # the cause is the whole of its job here.
-      #
       # No remedy line: parse_config's arm names this same directory and this
       # same cause a moment later, and one is enough for both.
       finding "cannot search $UNSEARCHABLE: permission denied" \
         "shale cannot tell whether there is a dotfiles directory at $DOTFILES"
     else
-      # Quoted, as every printed command is.  A misread mkdir -p is the harmless
-      # one, and it is quoted anyway: one convention is what lets a reader take
-      # any of these lines as a command rather than guessing which are safe.
       shell_quote "$DOTFILES"
       finding "no dotfiles directory at $DOTFILES" \
         "create it with: mkdir -p $QUOTED"
@@ -2013,31 +1598,15 @@ cmd_doctor() {
   fi
 
   # The lock build and apply take, in acquire_lock's order and with its
-  # remedies: a reader who ran doctor because a build was refused meets one
-  # account of the lock rather than two.  doctor takes no lock of its own -
-  # nothing in it composes or relinks - so anything found here was already
-  # there.
-  #
-  # Every state acquire_lock refuses is an arm here, the last of them being the
-  # one with nothing at the lock path at all.  The exception is the missing
-  # rmdir it refuses on before any of this, which is a tool that is not
-  # installed rather than a fact about these two paths.
-  #
-  # Counted, because while it is there shale will not work at all, which is the
-  # state doctor exists to name.  What it cannot do is say whose lock it is: the
-  # liveness test that would tell a running holder from a killed one is the
-  # guess acquire_lock refuses to make, so the finding states both readings and
-  # leaves the reader, who knows whether they are running a build, to choose.
+  # remedies; doctor takes no lock of its own.  Every state acquire_lock refuses
+  # is an arm here.  Counted, because while it is there shale will not work at
+  # all - but the finding states both readings rather than calling it stale:
+  # nothing shale can read tells a live holder from a killed one.
   if [ -L "$LOCK" ]; then
-    # Before the -d arm, which a link to a directory answers as readily as a
-    # directory does.
     finding "$LOCK is a symlink" \
       'build and apply take their lock by creating that directory, and will not follow a link to one' \
       'remove it, or move it aside, or neither will run'
   elif [ -d "$LOCK" ]; then
-    # Quoted, as acquire_lock's copy of this is and for the same reason: it is
-    # a line printed to be pasted, and an rm -rf over an unquoted home with a
-    # space in it names two paths that are not the lock.
     shell_quote "$LOCK"
     qlock=$QUOTED
     remedy="rmdir $qlock"
@@ -2052,20 +1621,15 @@ cmd_doctor() {
       'remove it, or move it aside, or neither will run'
   elif [ -d "$DOTFILES" ] && [ -x "$DOTFILES" ] && [ ! -w "$DOTFILES" ]; then
     # acquire_lock's last refusal, and the only one with nothing at the lock
-    # path to look at: mkdir fails on the directory holding it.  Reached where
-    # build reaches it and no further - a $DOTFILES that cannot be searched
-    # stops build in the parser, above the lock, and the config finding is what
-    # says so there.  The last line is build's own remedy, word for word.
+    # path to look at.  The last line is build's own remedy, word for word.
     finding "no build or apply can create the lock at $LOCK" \
       'they take their lock by creating that directory, and stop where they cannot' \
       "check that $DOTFILES is writable"
   fi
 
-  # Bare, where every other command calls it as 'parse_config || exit 1': doctor
-  # must still report everything below when the config is broken or missing.
-  # The '2>&1' is on the call rather than in parse_config, which keeps writing to
-  # stderr for build, apply and which: here each of its errors is counted as a
-  # finding, so each has to appear in the report the count describes.
+  # Bare, where every other command calls it as 'parse_config || exit 1', and
+  # with the redirection on the call rather than inside it: doctor counts each of
+  # its errors as a finding, so each must land in the report the count describes.
   parse_config 2>&1
   FINDINGS=$((FINDINGS + CONFIG_ERRORS))
 
@@ -2076,10 +1640,6 @@ cmd_doctor() {
     root=${path%%/*}
     dir=$DOTFILES/$path
     if [ -d "$dir" ] && { [ ! -r "$dir" ] || [ ! -x "$dir" ]; }; then
-      # '-d' alone is true for a directory nothing can be got out of, so without
-      # this a layer at mode 0000 passes doctor while build stops dead at it.
-      # The condition, the verb and the first line are compose_dir's, so the two
-      # commands say the same thing about the same directory.
       denied_verb "$dir"
       finding "layer '$name': $DENIED_VERB $dir: permission denied" \
         'shale composes a layer by walking it, and build stops there' \
@@ -2087,9 +1647,6 @@ cmd_doctor() {
     elif [ -d "$dir" ]; then
       :
     elif obscured_ancestor "$DOTFILES" "$path"; then
-      # cmd_build's arm and cmd_build's wording, in the same position among the
-      # arms below it, which is the whole of what doctor is for: the reader who
-      # runs doctor about a build that stopped must be told what stopped it.
       finding "layer '$name': cannot search $OBSCURED: permission denied" \
         "shale cannot tell whether there is a directory at $dir" \
         'check the permissions on that directory'
@@ -2099,14 +1656,10 @@ cmd_doctor() {
       finding "layer '$name' has no directory at $dir, but its clone at $DOTFILES/$root exists" \
         "check the path on line ${LAYER_LINES[$i]}"
     elif [ -e "$DOTFILES/$root" ] || [ -L "$DOTFILES/$root" ]; then
-      # Before the url arm, and counted: a url does not mean shale can obtain
-      # this root, because shale clones only where nothing is.
       finding "layer '$name' has no directory at $dir" \
         "its clone root $DOTFILES/$root exists but is not a directory" \
         'remove it, or move it aside'
     elif clone_url "$root"; then
-      # A url and nothing in the way means shale can obtain this one, so it is
-      # reported without counting: a state shale fixes, not a defect.
       note "layer '$name' has no directory at $dir yet" \
         "its clone root '$root' has a url: $CLONE_URL"
     else
@@ -2118,16 +1671,7 @@ cmd_doctor() {
 
   # Directories only, and nothing whose name begins with '.': a '.git' or a
   # '.stowrc' beside the config is not a stray layer.
-  #
-  # Both permission bits are tested first, and neither is enough on its own:
-  # without -r the glob cannot list the directory and expands to itself, and
-  # without -x every -d test inside is false whatever the glob found.  Either way
-  # the scan finds nothing and says nothing, which is a clean bill of health for
-  # a directory it never read.
   if [ -d "$DOTFILES" ] && { [ ! -r "$DOTFILES" ] || [ ! -x "$DOTFILES" ]; }; then
-    # The bit that is missing, not one word for the two states: at mode 0666 the
-    # glob lists this directory perfectly well and what fails is the -d on each
-    # entry, so 'cannot list' about it was a claim the reader disproves with ls.
     denied_verb "$DOTFILES"
     finding "$DENIED_VERB $DOTFILES: permission denied" \
       'shale cannot tell which of the directories in it are layers and which are strays' \
@@ -2137,7 +1681,7 @@ cmd_doctor() {
       # Also the arm the unmatched glob lands in.
       [ -d "$entry" ] || continue
       leaf=${entry##*/}
-      # The dot-entry rule, stated at dir_is_empty.
+      # Dropped by name at every glob, whatever the options say about them.
       case "$leaf" in
         . | ..) continue ;;
       esac
@@ -2174,23 +1718,11 @@ cmd_doctor() {
     done
   fi
 
-  # man stow, RESOURCE FILES: an option that may be given more than once -
-  # --ignore is the one that matters - is appended to the command line rather
-  # than overridden by it, so nothing shale passes can defend against this.
-  #
-  # The two locations are the two stow reads: '~/.stowrc', and './.stowrc' from
-  # the directory it is run in.  $DOTFILES is that directory because cmd_apply
-  # runs stow inside 'cd "$DOTFILES"' - which is what makes the second file a
-  # known one rather than whichever directory the user happened to be in.  Move
+  # The two files stow reads: '~/.stowrc', and './.stowrc' from the directory it
+  # is run in - $DOTFILES, because cmd_apply runs stow inside a cd there.  Move
   # that cd and this check silently stops covering the file that takes effect.
-  #
-  # The options in it are named and nothing more: which of them took effect, and
-  # on which files, is stow's to say and shale would be guessing.  That is also
-  # why the line above them says only that the file sets them - a claim that they
-  # all change an apply is false of --dir and --target, which apply's own -d and
-  # -t override, and the test that asserts the override would contradict the note
-  # shale printed.  Uncounted like every other note, because a resource file is
-  # the user's own and holding one is not a defect.
+  # The options are named and nothing more: which of them took effect, and on
+  # which files, is stow's to say and shale would be guessing.
   for entry in "${HOME-}/.stowrc" "$DOTFILES/.stowrc"; do
     if [ -e "$entry" ] || [ -L "$entry" ]; then
       lines=("a stow resource file exists at $entry"
@@ -2235,8 +1767,8 @@ cmd_which() {
   which_normalise "$arg" || exit 1
   rel=$WHICH_REL
 
-  # Highest precedence first, which is the order the answer is printed in and
-  # the reverse of the order the config lists.
+  # Highest precedence first, which is the order the answer prints in and the
+  # reverse of the config's.
   WHICH_NAMES=()
   WHICH_KINDS=()
   WHICH_SHOWS=()
@@ -2245,8 +1777,6 @@ cmd_which() {
   while [ "$i" -gt 0 ]; do
     i=$((i - 1))
     path=$DOTFILES/${LAYER_PATHS[$i]}/$rel
-    # -L as well as -e: a layer may legitimately ship a symlink whose target is
-    # not inside the tree, and -e alone reports that layer as not providing it.
     if [ -e "$path" ] || [ -L "$path" ]; then
       which_describe "$path"
       WHICH_NAMES+=("${LAYER_NAMES[$i]}")
@@ -2254,13 +1784,9 @@ cmd_which() {
       WHICH_SHOWS+=("$WHICH_SHOW")
       continue
     fi
-    # Only where the tests above said no, which is the only case their answer
-    # can be a permissions failure rather than a fact: a path that was found was
-    # found through directories that could all be searched.
+    # Only where the tests above said no, which is the only case in which their
+    # answer can be a permissions failure rather than a fact.
     if obscured_ancestor "$DOTFILES" "${LAYER_PATHS[$i]}/$rel"; then
-      # 'search', as the parser says of $DOTFILES and for the same reason:
-      # obscured_ancestor tests the search bit alone, and a directory at mode
-      # 0444 is one this reads nothing from and lists perfectly well.
       emit "layer '${LAYER_NAMES[$i]}': cannot search $OBSCURED: permission denied" \
         "shale cannot tell whether that layer provides '$rel'" \
         'check the permissions on that directory'
@@ -2268,9 +1794,8 @@ cmd_which() {
     fi
   done
 
-  # No partial answer, and no answer at all: the layer that could not be read
-  # may be the one that wins, and a report naming any other layer the winner
-  # would be wrong in the one way this command must never be wrong.
+  # No partial answer, and no answer at all: the layer that could not be read may
+  # be the one that wins, and naming any other layer the winner would be wrong.
   [ "$obscured" -eq 0 ] ||
     die "cannot say which layer provides '$rel'"
 
@@ -2284,11 +1809,8 @@ cmd_which() {
   fi
 
   # The two adjacent providers, lowest pair first, whose kinds differ.  That is
-  # the pair build names and no other: build composes in config order and
-  # collides when a layer's kind differs from what the composed tree already
-  # holds, which is what the *nearest* provider below it put there.  Naming the
-  # lowest provider instead would send someone to remove a layer build never
-  # mentions, leaving the build failing exactly as it did.
+  # the pair build names: it collides against the *nearest* provider below, so
+  # naming the lowest instead sends someone to a layer build never mentions.
   lower=-1
   upper=-1
   i=$((n - 1))
@@ -2301,21 +1823,15 @@ cmd_which() {
     i=$((i - 1))
   done
 
-  # No differing pair at all means every provider is of one kind, so all of them
-  # being directories means they merge rather than shadow and no line may claim
-  # to have won: printing 'winner' there states the exact opposite of what build
-  # does with them.
+  # No differing pair means every provider is of one kind, and all-directories
+  # merge rather than shadow: 'winner' there says the opposite of what build does.
   keyword=
   if [ "$upper" -lt 0 ] && [ "${WHICH_KINDS[0]}" = directory ]; then
     keyword=merged
   fi
 
   # Both columns are fixed for a given config, so two answers read one after the
-  # other line up: the keyword column is the width of the longest keyword there
-  # is, and the name column the width of the longest configured layer name -
-  # measuring only the providers moves the paths from one answer to the next.
-  # Two spaces between columns, and the keyword first because it is the answer
-  # and this output is read by grep and by eye alike.
+  # other line up - measuring only the providers moves the paths between answers.
   width=0
   i=0
   while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
@@ -2342,8 +1858,6 @@ cmd_which() {
   fi
 }
 
-# A bare invocation is a question; an explicitly empty command word is not, and
-# falls through to the unknown-command arm below.
 if [ $# -eq 0 ]; then
   usage
   exit 0
@@ -2358,8 +1872,6 @@ case "$cmd" in
 esac
 shift
 
-# No '-*' rejection past this point, so 'shale which -odd-name' works without
-# a '--' separator.
 case "$cmd" in
   build)
     [ $# -eq 0 ] || usage_error "build takes no arguments"
