@@ -1499,7 +1499,7 @@ cmd_build() {
 }
 
 cmd_apply() {
-  local status
+  local status err
 
   parse_config || exit 1
 
@@ -1574,11 +1574,46 @@ cmd_apply() {
   # failed, none of which is 125 for the symlink, unlink and mkdir stow makes.
   # The cd's own diagnostic is dropped so that the message below is the only
   # voice on the subject.
+  #
+  # stow's output is held rather than let flow, because the status alone cannot
+  # tell an apply that linked everything from one that linked most of it: stow
+  # says which of the two it did only in what it writes, and exits 0 either way.
+  #
+  # Both streams into the one capture, which is what keeps this to a single
+  # substitution.  Separating them means duplicating fd 1 so stow's stdout can go
+  # past the capture, and that dup fails outright on a shale whose own stdout is
+  # closed - 'shale apply >&-' then runs no stow at all and links nothing.  A
+  # file instead of a substitution has nowhere to live: the only directory shale
+  # writes to is $DOTFILES, and this is the one point in apply where $DOTFILES
+  # may already be unenterable, which is the arm 125 below reports.
+  #
+  # Merging costs nothing that can be measured.  stow writes its diagnostics with
+  # perl's warn and its --verbose lines through Stow::Util::debug, which is warn
+  # too, so stdout carries nothing from any run that actually applies - with
+  # these flags or with a resource file added to them.
+  #
+  # The exceptions are the two resource-file options that apply nothing at all:
+  # a ~/.stowrc of '--version' or '--help' prints to stdout, exits 0 and links
+  # not one file, because those options are prepended to the command line like
+  # any other.  Merging is what makes shale report that empty apply rather than
+  # swallow it, and it is on stderr because it is a remark about the apply and
+  # not the result of a shale command, which is shale's own rule for the two.
   status=0
-  (
-    cd "$DOTFILES" 2>/dev/null || exit 125
-    stow -d "$DOTFILES" -t "$HOME" -R --no-folding current
+  err=$(
+    (
+      cd "$DOTFILES" 2>/dev/null || exit 125
+      stow -d "$DOTFILES" -t "$HOME" -R --no-folding current
+    ) 2>&1
   ) || status=$?
+  # Before every message below, all of which point at what stow reported
+  # 'above': holding the stream is what would otherwise put shale's diagnostic
+  # first.  Nothing was written under 125 - stow never ran, and the cd's own
+  # diagnostic went to /dev/null - so that arm is covered by being empty.  The
+  # substitution strips the trailing newlines and printf puts one back, which is
+  # the whole of what 'unchanged' does not cover here.
+  if [ "$status" -ne 0 ] && [ -n "$err" ]; then
+    printf '%s\n' "$err" >&2
+  fi
   if [ "$status" -eq 125 ]; then
     die "could not enter $DOTFILES to run stow" \
       "$CUR is built; nothing in $HOME was relinked"
@@ -1601,6 +1636,34 @@ cmd_apply() {
     die "stow failed part-way: $HOME may be partly relinked" \
       'stow changes nothing until the whole operation is planned, but nothing undoes the part it had carried out' \
       "$CUR is built and correct: fix what stow reported above, in $HOME or in a layer, then apply again"
+
+  # Exit 0 with something written is the third outcome, and it is reported
+  # without a word of it being read.  A layer shipping a '.dotfiles/...' path is
+  # the case that matters: stow will not link over its own stow directory, so it
+  # says so here, links the rest and exits 0, and reading the status alone made
+  # that a silent partial apply.
+  #
+  # What stow puts in this stream is worded differently between versions, and it
+  # is not all warnings about paths either - a $DOTFILES that is a symlink to a
+  # store on another volume makes 2.3.1 print a 'BUG in find_stowed_path?' line
+  # and then link the whole tree correctly, which is a layout people really use.
+  # So these lines claim only what is true of both: that stow wrote something,
+  # and what it would mean *if* what follows names a path stow skipped.  Making
+  # the claim unconditional would be shale interpreting the output after all,
+  # and wrong on every apply of that layout.  The status stays 0, because the
+  # apply the user asked for did happen.
+  #
+  # It is a floor and not a fence: stow drops a file matched by an --ignore in a
+  # resource file without a word on either stream, so nothing here sees that.
+  [ -n "$err" ] || return 0
+  warn "stow exited 0 and wrote output" \
+    'shale does not read what stow writes; its output follows unchanged' \
+    "if it names a path stow skipped, that path is not linked from $CUR into $HOME"
+  printf '%s\n' "$err" >&2
+  # Explicit, because the printf above is the last command in the function and
+  # apply's status would otherwise be its: on a 'shale apply 2>&-' that write
+  # fails, and a warned apply exited 1 having done everything correctly.
+  return 0
 }
 
 # Ordered cheapest and most fundamental first.  Nothing here exits early or
