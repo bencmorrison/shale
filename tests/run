@@ -1013,6 +1013,62 @@ assert_dangling_symlink() {
   return 0
 }
 
+# assert_command_reads_as TEXT MARKER WORD... - the command TEXT printed after
+# MARKER, read back the way a shell reads it, and required to come out as exactly
+# WORD... .
+#
+# Every command shale prints is printed to be pasted, and the whole of what makes
+# one pasteable is that its paths are quoted: unquoted, a home with a space in it
+# turns one path into two words and a quote in the name leaves a shell reading
+# for a string that never ends.  Nothing but a shell parse can see either, which
+# is why this exists rather than a comparison against the expected text - the
+# text assertions elsewhere pin the wording, and this pins that a shell agrees.
+#
+# The last line matching MARKER wins, and everything after MARKER on it is the
+# command.  'set --' is what the parse runs, never the command itself: running an
+# rm -rf a shell had misread is the failure this exists to prevent rather than a
+# way to detect it.  A '&&' is split on first, because the two sides are two
+# commands and one 'set --' of both would run the second.
+assert_command_reads_as() {
+  local text=$1 marker=$2 line cmd part word read_words expected_words
+  shift 2
+  # Built before the parse below, which takes the positional parameters over.
+  # Bracketed so that a word with a space in it is one word here too, which is
+  # the whole thing being measured.
+  expected_words=
+  for word in ${1+"$@"}; do
+    expected_words="${expected_words}[$word]"
+  done
+  cmd=
+  while IFS= read -r line; do
+    case "$line" in
+      *"$marker"*) cmd=${line##*"$marker"} ;;
+    esac
+  done <<EOF
+$text
+EOF
+  [ -n "$cmd" ] || fail "no command printed after '$marker'" "$text"
+  read_words=
+  part=$cmd
+  while :; do
+    eval "set -- ${part%% && *}" ||
+      fail "a shell could not read the printed command: $cmd"
+    for word in ${1+"$@"}; do
+      read_words="${read_words}[$word]"
+    done
+    case "$part" in
+      *' && '*) part=${part#* && } ;;
+      *) break ;;
+    esac
+  done
+  if [ "$read_words" != "$expected_words" ]; then
+    fail "a shell reads the printed command as different words: $cmd" \
+      "read:     $read_words" \
+      "expected: $expected_words"
+  fi
+  return 0
+}
+
 # ----------------------------------------------------------------- usage cases
 
 test_usage_bare_prints_usage_on_stdout() {
@@ -2383,10 +2439,61 @@ test_build_a_failed_install_that_cannot_be_undone_says_where_both_trees_are() {
     "shale:   the previous tree is at $HOME/.dotfiles/current.old, and $HOME/.dotfiles/current is missing or incomplete" \
     'stderr'
   assert_contains "$shale_err" \
-    "shale:   put it back with: rm -rf $HOME/.dotfiles/current && mv $HOME/.dotfiles/current.old $HOME/.dotfiles/current" \
+    "shale:   put it back with: rm -rf '$HOME/.dotfiles/current' && mv '$HOME/.dotfiles/current.old' '$HOME/.dotfiles/current'" \
     'stderr'
   assert_exists "$HOME/.dotfiles/current.old/.zshrc" 'the previous tree'
   assert_exists "$HOME/.dotfiles/current.new/.zshrc" 'the composed tree'
+}
+
+# The three commands shale prints that the lock cases do not cover, in one home
+# that breaks all three if any path in them is unquoted.  The restore is the one
+# that matters most: it is an rm -rf, and it is pasted by someone whose home is
+# half-swapped, so a path that word-splits deletes something that is not the
+# built tree.
+#
+# The restore is two commands joined by '&&' and comes back as one list of words,
+# which is what the expected arguments below are: rm's three, then mv's three.
+# shellcheck disable=SC2123
+test_build_the_commands_it_prints_survive_a_space_and_a_quote_in_the_home_path() {
+  local home_ok saved dots
+  # A space, a quote and a bracket: the three that a bare path loses to word
+  # splitting, to quote removal and to a glob respectively.
+  sandbox_mkdir "$CASE_DIR/my 'odd' [home] dir"
+  home_ok=$sandbox_dir
+  sandbox_leaf "$home_ok" .shale-test-sandbox new
+  : >"$sandbox_path" || fail 'could not mark the sandbox home'
+  HOME=$home_ok
+  dots=$HOME/.dotfiles
+  # Before anything creates it, which is the state doctor's mkdir answers.
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_command_reads_as "$shale_out" 'create it with: ' mkdir -p "$dots"
+  # A clone fetched and then not renamed, which is kept and named.
+  mkrepo personal .zshrc
+  conf "base personal $repo_url"
+  stub_mv '*/.personal.cloning' 1
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the build whose clone could not be moved'
+  # This is the one printed command that does not end its line, so the prose
+  # after it is cut before the parse rather than read as more arguments.
+  assert_command_reads_as "${shale_err%%, or the next build fetches it again*}" \
+    'move it into place with: ' mv "$dots/.personal.cloning" "$dots/personal"
+  # And the restore after a swap that could not be undone.  The build before it
+  # is what makes there be a previous tree to put back.
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the first build'
+  stub_mv '*/current' 2
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the build that could not swap'
+  assert_command_reads_as "$shale_err" 'put it back with: ' \
+    rm -rf "$dots/current" mv "$dots/current.old" "$dots/current"
 }
 
 # Each rename is retried once, and each retry must refuse a destination that is
@@ -2786,7 +2893,7 @@ test_lock_left_behind_is_refused_with_a_remedy() {
     "shale:   build and apply take it so that two of them cannot rebuild $HOME/.dotfiles/current at once" \
     'stderr'
   assert_contains "$shale_err" \
-    "shale:   if no other shale is running, this lock is stale: remove it with: rmdir $HOME/.dotfiles/.lock" \
+    "shale:   if no other shale is running, this lock is stale: remove it with: rmdir '$HOME/.dotfiles/.lock'" \
     'stderr'
   assert_empty "$shale_out" 'stdout'
   # Refused, not reclaimed, and nothing composed on the way past it.
@@ -2870,9 +2977,9 @@ test_lock_a_non_empty_stale_lock_names_a_remedy_that_works() {
   assert_contains "$shale_err" \
     "shale: another shale has the lock at $HOME/.dotfiles/.lock" 'stderr'
   assert_contains "$shale_err" \
-    "shale:   if no other shale is running, this lock is stale: remove it with: rm -rf $HOME/.dotfiles/.lock" \
+    "shale:   if no other shale is running, this lock is stale: remove it with: rm -rf '$HOME/.dotfiles/.lock'" \
     'stderr'
-  assert_not_contains "$shale_err" "rmdir $HOME/.dotfiles/.lock" 'stderr'
+  assert_not_contains "$shale_err" "rmdir '$HOME/.dotfiles/.lock'" 'stderr'
   assert_missing "$HOME/.dotfiles/current"
   # Asserted by running it, which is the only claim the message makes.
   sandbox_leaf "$HOME/.dotfiles" .lock
@@ -2895,15 +3002,15 @@ test_lock_a_stale_lock_holding_only_a_dotfile_names_rm_rf() {
   run_shale build
   assert_status 1 "$shale_status"
   assert_contains "$shale_err" \
-    "shale:   if no other shale is running, this lock is stale: remove it with: rmdir $HOME/.dotfiles/.lock" \
+    "shale:   if no other shale is running, this lock is stale: remove it with: rmdir '$HOME/.dotfiles/.lock'" \
     'the empty lock'
   sandbox_write "$HOME/.dotfiles/.lock" .hidden 'a dotfile, and nothing else'
   run_shale build
   assert_status 1 "$shale_status"
   assert_contains "$shale_err" \
-    "shale:   if no other shale is running, this lock is stale: remove it with: rm -rf $HOME/.dotfiles/.lock" \
+    "shale:   if no other shale is running, this lock is stale: remove it with: rm -rf '$HOME/.dotfiles/.lock'" \
     'the dotfile lock'
-  assert_not_contains "$shale_err" "rmdir $HOME/.dotfiles/.lock" 'the dotfile lock'
+  assert_not_contains "$shale_err" "rmdir '$HOME/.dotfiles/.lock'" 'the dotfile lock'
   # Asserted by running it, which is the only claim the message makes.
   sandbox_leaf "$HOME/.dotfiles" .lock
   rm -rf "$sandbox_path" || fail 'could not clear the lock by hand'
@@ -3046,7 +3153,7 @@ test_lock_that_cannot_be_released_names_a_remedy_that_works() {
   assert_contains "$(cat "$first_err")" \
     "shale: could not remove the lock at $HOME/.dotfiles/.lock" 'the build stderr'
   assert_contains "$(cat "$first_err")" \
-    "shale:   remove it with: rm -rf $HOME/.dotfiles/.lock, or no later build will run" \
+    "shale:   remove it with: rm -rf '$HOME/.dotfiles/.lock', or no later build will run" \
     'the build stderr'
   # The build itself did everything it was asked to, and says so.
   assert_status 0 "$first_status" 'the build'
@@ -3155,6 +3262,258 @@ test_lock_a_lock_removed_under_its_holder_is_noticed_only_before_the_stow() {
     "shale: the lock at $HOME/.dotfiles/.lock is gone, and this apply was holding it" 'stderr'
   assert_missing "$HOME/.zshrc"
   assert_missing "$HOME/.dotfiles/.lock"
+}
+
+# doctor's view of the lock, here rather than among the doctor cases because
+# what these assert is that the two commands say one thing about one state: the
+# remedy is compared against the one build prints in the same case.
+
+# A lock nothing is holding refuses every build there will ever be, and a doctor
+# that reported no problems about it sent the reader looking somewhere else.
+# Both remedies, because the finding chooses between them exactly as the refusal
+# does and a doctor that always said rmdir would print a command that errors.
+test_doctor_a_lock_left_behind_is_a_finding_naming_builds_remedy() {
+  local shape remedy
+  for shape in empty occupied; do
+    conf 'base personal/base'
+    mklayer personal/base .zshrc
+    case "$shape" in
+      empty)
+        sandbox_mkdir "$HOME/.dotfiles/.lock"
+        remedy="rmdir '$HOME/.dotfiles/.lock'"
+        ;;
+      # Second, so it is the directory the first pass created that is written
+      # into rather than one this case had to make twice.
+      occupied)
+        sandbox_write "$HOME/.dotfiles/.lock" intruder 'something else'
+        remedy="rm -rf '$HOME/.dotfiles/.lock'"
+        ;;
+    esac
+    run_shale doctor
+    assert_status 1 "$shale_status" "$shape exit status"
+    assert_contains "$shale_out" \
+      "shale: a shale has the lock at $HOME/.dotfiles/.lock, or a killed one left it behind" \
+      "$shape stdout"
+    assert_contains "$shale_out" "shale:   remove it with: $remedy" "$shape stdout"
+    # Neither reading asserted as fact: a build running right now is not a
+    # defect in the setup, and doctor cannot tell that build from a dead one.
+    assert_contains "$shale_out" \
+      'shale:   nothing shale can read tells a live holder from a dead one' "$shape stdout"
+    assert_contains "$shale_out" 'shale: 1 problem found' "$shape stdout"
+    assert_empty "$shale_err" "$shape stderr"
+    # The same command, from the refusal that is the reason anyone ran doctor.
+    run_shale build
+    assert_status 1 "$shale_status" "$shape build exit status"
+    assert_contains "$shale_err" "remove it with: $remedy" "$shape build stderr"
+    # Reported, never repaired: doctor removes nothing.
+    assert_exists "$HOME/.dotfiles/.lock" "$shape lock"
+    # And the printed command run against the state it was printed for, which is
+    # the only claim either message makes.  The path is proven first and the
+    # command is the one both of them named.
+    sandbox_leaf "$HOME/.dotfiles" .lock
+    case "$shape" in
+      empty) rmdir "$sandbox_path" || fail 'the remedy did not clear the lock' ;;
+      occupied) rm -rf "$sandbox_path" || fail 'the remedy did not clear the lock' ;;
+    esac
+    assert_missing "$HOME/.dotfiles/.lock" "$shape after the remedy"
+    run_shale build
+    assert_status 0 "$shale_status" "$shape build after the remedy"
+    assert_empty "$shale_err" "$shape build stderr after the remedy"
+  done
+}
+
+# A file at that name and a symlink to a directory are the two shapes that are
+# not a lock at all, and calling either a stale lock sends the reader to an
+# rmdir that cannot work.
+#
+# The line naming the shape and the line saying what to do about it are build's,
+# word for word, and asserted against build in the same case: only the middle
+# line differs, because doctor names the two commands that take the lock where
+# build, being one of them, says 'shale'.  Without the cross-check nothing here
+# notices acquire_lock and this block drifting apart, since the remedy that the
+# case above compares is the -d one and these two shapes never reach it.
+test_doctor_a_lock_that_is_not_a_directory_is_reported_as_such() {
+  local kind expected
+  for kind in file symlink; do
+    conf 'base personal/base'
+    mklayer personal/base .zshrc
+    sandbox_mkdir "$HOME/.dotfiles"
+    # The symlink pass removes the regular file the first wrote: sandbox_leaf
+    # refuses a symlink at this name, which is the proof that nothing else is
+    # being deleted.
+    sandbox_leaf "$sandbox_dir" .lock
+    rm -f "$sandbox_path" || fail 'could not clear the lock path'
+    case "$kind" in
+      file)
+        sandbox_write "$HOME/.dotfiles" .lock 'not a directory'
+        expected="shale: $HOME/.dotfiles/.lock exists but is not a directory"
+        ;;
+      symlink)
+        sandbox_mkdir "$CASE_DIR/elsewhere"
+        sandbox_target "$HOME/.dotfiles" .lock
+        ln -s "$CASE_DIR/elsewhere" "$sandbox_path" || fail 'could not link the lock'
+        expected="shale: $HOME/.dotfiles/.lock is a symlink"
+        ;;
+    esac
+    run_shale doctor
+    assert_status 1 "$shale_status" "$kind exit status"
+    assert_contains "$shale_out" "$expected" "$kind stdout"
+    assert_contains "$shale_out" 'shale:   remove it, or move it aside' "$kind stdout"
+    # Nothing is holding it, so nothing offers to clear a lock.
+    assert_not_contains "$shale_out" 'rmdir' "$kind stdout"
+    assert_not_contains "$shale_out" 'rm -rf' "$kind stdout"
+    assert_contains "$shale_out" 'shale: 1 problem found' "$kind stdout"
+    assert_empty "$shale_err" "$kind stderr"
+    # build names the same shape in the same words and asks for the same thing.
+    run_shale build
+    assert_status 1 "$shale_status" "$kind build exit status"
+    assert_contains "$shale_err" "$expected" "$kind build stderr"
+    assert_contains "$shale_err" 'shale:   remove it, or move it aside' "$kind build stderr"
+    assert_not_contains "$shale_err" 'rmdir' "$kind build stderr"
+  done
+}
+
+# Nothing at that path is the ordinary case, and it must be silent.  The lock is
+# asserted missing after each run as well: doctor takes none of its own, and one
+# it took and reported would be a defect it invented, which the word count in
+# the report would not show.
+test_doctor_says_nothing_about_a_lock_that_is_not_there() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  # The path rather than the word: every finding about the lock names it, and
+  # the word is in the name of this case and so in the sandbox path shale prints.
+  assert_not_contains "$shale_out" "$HOME/.dotfiles/.lock" 'stdout'
+  assert_empty "$shale_err" 'stderr'
+  assert_missing "$HOME/.dotfiles/.lock" 'after doctor'
+  # And after a build, which does take one: a lock that was released is not a
+  # lock, and the doctor that follows every build must not say it is.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the second doctor'
+  assert_contains "$shale_out" 'shale: no problems found' 'the second doctor stdout'
+  assert_not_contains "$shale_out" "$HOME/.dotfiles/.lock" 'the second doctor stdout'
+  assert_missing "$HOME/.dotfiles/.lock" 'after the second doctor'
+}
+
+# The fourth way acquire_lock refuses, and the only one with nothing at the lock
+# path to look at: the mkdir fails on the directory that would hold it.  That is
+# this issue's own symptom with another cause - every build stops, and the report
+# used to say no problems found - so doctor answers it in build's own words.
+test_doctor_a_dotfiles_it_cannot_take_a_lock_in_is_a_finding() {
+  local dir
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles"
+  dir=$sandbox_dir
+  chmod 0555 "$dir" || fail 'could not remove the write bit'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: no build or apply can create the lock at $HOME/.dotfiles/.lock" 'the doctor stdout'
+  # build's remedy line, word for word, which is the whole point of the arm.
+  assert_contains "$shale_out" \
+    "shale:   check that $HOME/.dotfiles is writable" 'the doctor stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'the doctor stdout'
+  # Nothing was created to find it, which is what makes this arm safe to run in
+  # a directory doctor must not write to.
+  assert_missing "$HOME/.dotfiles/.lock" 'after doctor'
+  run_shale build
+  chmod 0755 "$dir" || fail 'could not restore the mode'
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" \
+    "shale: could not create the lock at $HOME/.dotfiles/.lock" 'the build stderr'
+  assert_contains "$shale_err" \
+    "shale:   check that $HOME/.dotfiles is writable" 'the build stderr'
+  # The mode restored, the build runs: the finding was about the permission and
+  # nothing else.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build after the mode was restored'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the mode was restored'
+}
+
+# A lock nothing can see inside is the one shape whose contents cannot be
+# counted: at mode 0000 every glob comes back unmatched, which is exactly what an
+# empty directory looks like, and rmdir is then printed for a directory with a
+# file in it.  Measured here rather than argued: the case runs the rmdir shale
+# did not print and requires it to fail.
+#
+# rm -rf is what is printed instead, because it is the answer to both readings.
+# It is not asserted to clear this particular lock and does not: a directory this
+# user cannot enter is one rm cannot empty either, so the state needs its mode
+# fixed whatever shale says.  What the arm is for is that shale never claims an
+# emptiness it could not look at.
+test_lock_a_lock_it_cannot_see_inside_is_never_called_empty() {
+  local dir
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME/.dotfiles/.lock" intruder 'something else'
+  sandbox_leaf "$HOME/.dotfiles" .lock
+  dir=$sandbox_path
+  chmod 0000 "$dir" || fail 'could not remove the mode bits'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" \
+    "remove it with: rm -rf '$HOME/.dotfiles/.lock'" 'the build stderr'
+  assert_not_contains "$shale_err" "rmdir '$HOME/.dotfiles/.lock'" 'the build stderr'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "remove it with: rm -rf '$HOME/.dotfiles/.lock'" 'the doctor stdout'
+  assert_not_contains "$shale_out" "rmdir '$HOME/.dotfiles/.lock'" 'the doctor stdout'
+  # The command neither of them printed, run against the state it was not
+  # printed for.
+  rmdir "$dir" 2>/dev/null &&
+    fail 'rmdir cleared a lock with a file in it, so there was nothing to get wrong'
+  chmod 0755 "$dir" || fail 'could not restore the mode'
+  # And with the mode back, the same lock is counted and cleared by the command
+  # that is then correct for it.
+  run_shale build
+  assert_status 1 "$shale_status" 'the build with the mode restored'
+  assert_contains "$shale_err" \
+    "remove it with: rm -rf '$HOME/.dotfiles/.lock'" 'the build stderr with the mode restored'
+}
+
+# Every command shale prints is printed to be pasted, and an unquoted path stops
+# being one command the moment a home has a space in it: 'rm -rf /home/my dir/
+# .dotfiles/.lock' names two paths, neither of them the lock, and a quote in the
+# name leaves a shell reading the line for a string that never ends.  Both
+# printers are read back through a shell here, which is the only assertion that
+# catches either.
+test_lock_the_remedy_survives_a_space_and_a_quote_in_the_home_path() {
+  local home_ok lock
+  # A space, a quote and a bracket: the three that a bare path loses to word
+  # splitting, to quote removal and to a glob respectively.
+  sandbox_mkdir "$CASE_DIR/my 'odd' [home] dir"
+  home_ok=$sandbox_dir
+  sandbox_leaf "$home_ok" .shale-test-sandbox new
+  : >"$sandbox_path" || fail 'could not mark the sandbox home'
+  HOME=$home_ok
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  lock=$HOME/.dotfiles/.lock
+  sandbox_mkdir "$lock"
+  run_shale build
+  assert_status 1 "$shale_status" 'the refused build'
+  assert_command_reads_as "$shale_err" 'remove it with: ' rmdir "$lock"
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_command_reads_as "$shale_out" 'remove it with: ' rmdir "$lock"
+  # The other remedy is the destructive one, and so the one a misread line does
+  # real damage with.
+  sandbox_write "$lock" intruder 'something else'
+  run_shale build
+  assert_status 1 "$shale_status" 'the refused build with a lock that is not empty'
+  assert_command_reads_as "$shale_err" 'remove it with: ' rm -rf "$lock"
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor with a lock that is not empty'
+  assert_command_reads_as "$shale_out" 'remove it with: ' rm -rf "$lock"
 }
 
 # ---------------------------------------------------------------- clone cases
@@ -3519,7 +3878,7 @@ test_clone_a_clone_that_cannot_be_moved_into_place_is_kept() {
   # Keeping it is only worth anything if the message says how to use it: the
   # next build reaps this name and fetches the whole thing again.
   assert_contains "$shale_err" \
-    "shale:   move it into place with: mv $HOME/.dotfiles/.personal.cloning $HOME/.dotfiles/personal, or the next build fetches it again" \
+    "shale:   move it into place with: mv '$HOME/.dotfiles/.personal.cloning' '$HOME/.dotfiles/personal', or the next build fetches it again" \
     'stderr'
   assert_eq 'personal/.zshrc' \
     "$(cat "$HOME/.dotfiles/.personal.cloning/.zshrc")" 'the kept clone'
@@ -4380,7 +4739,7 @@ test_doctor_a_missing_dotfiles_directory_is_a_finding() {
   run_shale doctor
   assert_status 1 "$shale_status"
   assert_contains "$shale_out" "shale: no dotfiles directory at $HOME/.dotfiles" 'stdout'
-  assert_contains "$shale_out" "shale:   create it with: mkdir -p $HOME/.dotfiles" 'stdout'
+  assert_contains "$shale_out" "shale:   create it with: mkdir -p '$HOME/.dotfiles'" 'stdout'
   # The config check runs anyway rather than being skipped as pointless.
   assert_contains "$shale_out" "shale: no config file at $HOME/.dotfiles/shale.conf" 'stdout'
   assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
@@ -4729,6 +5088,10 @@ test_doctor_reports_its_checks_in_order() {
   conf 'base personal/base' 'work work' 'lonely'
   mklayer personal/base .zshrc
   sandbox_mkdir "$HOME/.dotfiles/common"
+  # The lock is above the config in the report and has to stay there: it is the
+  # one finding that says why a build refused, and every arm this loop does not
+  # recognise is ignored, so nothing else here would notice it moving.
+  sandbox_mkdir "$HOME/.dotfiles/.lock"
   sandbox_write "$HOME" .stowrc '--ignore=secret'
   stub_path_without stow
   saved=$PATH
@@ -4740,16 +5103,17 @@ test_doctor_reports_its_checks_in_order() {
   while IFS= read -r line; do
     case "$line" in
       'shale: stow is not installed') seen="$seen prerequisite" ;;
+      'shale: a shale has the lock at '*) seen="$seen lock" ;;
       "shale: $HOME/.dotfiles/shale.conf:3:"*) seen="$seen config" ;;
       "shale: layer 'work'"*) seen="$seen layer" ;;
       *' is not a configured layer') seen="$seen stray" ;;
       'shale: a stow resource file'*) seen="$seen stowrc" ;;
-      'shale: 3 problems found') seen="$seen summary" ;;
+      'shale: 4 problems found') seen="$seen summary" ;;
     esac
   done <<EOF
 $shale_out
 EOF
-  assert_eq ' prerequisite config layer stray stowrc summary' "$seen" 'the order of the report'
+  assert_eq ' prerequisite lock config layer stray stowrc summary' "$seen" 'the order of the report'
 }
 
 # The stub PATH holds every other binary doctor and the harness need, so this
@@ -6290,11 +6654,11 @@ test_meta_dot_globs_answer_the_same_under_both_glob_meanings() {
   sandbox_mkdir "$HOME/.dotfiles/.lock"
   run_shale --script "$shim" build
   assert_status 1 "$shale_status" 'the empty lock'
-  assert_contains "$shale_err" "remove it with: rmdir $HOME/.dotfiles/.lock" 'the empty lock'
+  assert_contains "$shale_err" "remove it with: rmdir '$HOME/.dotfiles/.lock'" 'the empty lock'
   sandbox_write "$HOME/.dotfiles/.lock" .hidden 'a dotfile, and nothing else'
   run_shale --script "$shim" build
   assert_status 1 "$shale_status" 'the dotfile lock'
-  assert_contains "$shale_err" "remove it with: rm -rf $HOME/.dotfiles/.lock" 'the dotfile lock'
+  assert_contains "$shale_err" "remove it with: rm -rf '$HOME/.dotfiles/.lock'" 'the dotfile lock'
   sandbox_leaf "$HOME/.dotfiles" .lock
   rm -rf "$sandbox_path" || fail 'could not clear the lock by hand'
 
