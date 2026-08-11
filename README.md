@@ -140,9 +140,11 @@ shale:   if no other shale is running, this lock is stale: remove it with: rmdir
 
 `~/.dotfiles/current` is generated output. It is disposable — a bad build is fixed by fixing a layer
 and building again — and it should never be edited or versioned. Edit the layer, not the result. A
-build that finds a file in `current` newer than the layer's copy says so and keeps the tree it
-replaced at `~/.dotfiles/current.old`, so the edit is recoverable until the next build, which
-removes it. A build composes into `~/.dotfiles/current.new` and renames that into place, so a
+build that finds a file in `current` differing in age from the layer's copy says so and keeps the
+tree it replaced at `~/.dotfiles/current.old`, so what was there is recoverable until the next build,
+which removes it. Newer means something edited the built tree; older means either that something
+moved a file into it, which is what `stow --adopt` does, or that a layer has moved on and this is the
+first build since. A build composes into `~/.dotfiles/current.new` and renames that into place, so a
 `current.new` left lying about is a run that died mid-build and is safe to delete.
 
 One file in there is shale's own rather than a copy: `current/.stow-local-ignore`, which keeps a

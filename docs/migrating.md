@@ -9,6 +9,13 @@ else the package owns, and every shell opened between then and the apply falls b
 defaults. Keep a second session already running, and do this over a connection you are not relying
 on the dotfiles to make.
 
+One thing to know before you start, rather than after: do not use `stow --adopt`. Your first apply
+will refuse a pile of conflicts, `--adopt` is what a search turns up for clearing them, and here it
+moves your file out of `$HOME` and into `~/.dotfiles/current`, which is generated output that the
+next `shale build` overwrites. That build says so and keeps the whole previous tree at `current.old`,
+so an adopted file survives one build and no more — the build after it reaps `current.old`. Copy the
+file into a layer instead. The refusals themselves are covered below, each with what to do about it.
+
 ## Unstow first
 
 ```sh
@@ -136,12 +143,21 @@ All operations aborted.
 That file is not in any layer and shale will not overwrite it. Move it aside, or copy its contents
 into the layer that should own it and then delete it.
 
-Do not reach for `stow --adopt` to clear any of these. It moves the file from `$HOME` into the
-package — which here means into `~/.dotfiles/current`, generated output — and the next `shale build`
-composes over it. Whether you get the content back depends on a timestamp: if the adopted file was
-newer than the layer's copy the build warns and keeps it in `current.old`, and the build after that
-reaps it; if it was older the build says nothing and there is nothing left to recover. Copy the file
-into a layer instead.
+Do not reach for `stow --adopt` to clear any of these, for the reason given at the top. It moves the
+file from `$HOME` into the package — which here means into `~/.dotfiles/current`, generated output —
+and the next `shale build` composes over it. That build reports it:
+
+```
+shale: 1 file in /home/you/.dotfiles/current was older than the layer copy that replaced it
+shale:   either something moved it into the built tree, which is what stow --adopt does, or a layer changed and this is the first build since
+shale:   what was in /home/you/.dotfiles/current before this build is kept at /home/you/.dotfiles/current.old
+```
+
+Both readings, because shale cannot tell them apart: an adopted file keeps its own timestamp, and so
+does a `current` the layers have moved past since it was built. You will see the same message the
+first time you build after pulling a layer, and it is nothing to act on there. Either way the
+previous tree is at `current.old` and your file is in it, until the next clean build reaps it. Copy
+the file into a layer instead and there is nothing to recover.
 
 ## Links left behind after layers change
 

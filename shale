@@ -691,25 +691,46 @@ conflict() {
   CONFLICT_OTHER+=("$other_label provides a $other_kind   $other_path")
 }
 
+# Non-zero when a layer after this one also provides $1, so one changed file is
+# one record.
+wins_this_path() {
+  local srel=$1 i
+  i=$((SRC_INDEX + 1))
+  while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
+    if [ -e "$DOTFILES/${LAYER_PATHS[$i]}/$srel" ] ||
+      [ -L "$DOTFILES/${LAYER_PATHS[$i]}/$srel" ]; then
+      return 1
+    fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
 # Something wrote to the built tree through its $HOME symlink instead of to the
 # layer, which is this design's one silent data-loss path: ~/.zshrc is a link
 # into current/ and an editor writes straight through it.  cp -p is what keeps
 # a legitimate layer update from tripping this.  Recorded, not printed: the
 # message names current.old, which an aborted build never creates.
+#
+# Recorded only for the layer that wins the path, which is what makes the layer
+# named in the message the one whose copy actually lands.
 diverged() {
-  local srel=$1 path=$2 i
-  # Silent for every layer but the last one providing this path, so one edited
-  # file is one record and it names the layer whose copy actually lands.
-  i=$((SRC_INDEX + 1))
-  while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
-    if [ -e "$DOTFILES/${LAYER_PATHS[$i]}/$srel" ] ||
-      [ -L "$DOTFILES/${LAYER_PATHS[$i]}/$srel" ]; then
-      return 0
-    fi
-    i=$((i + 1))
-  done
+  local srel=$1 path=$2
+  wins_this_path "$srel" || return 0
   DIVERGED_PATHS+=("$srel")
   DIVERGED_LAYERS+=("$path")
+}
+
+# The other half of that data-loss path, and the half no timestamp can name: a
+# file moved into the built tree keeps its own mtime, so one older than the layer
+# copy about to overwrite it is either an adopted file or a copy the layers have
+# moved past.  Counted rather than listed, because a pull that changed fifty
+# files must not print a hundred and fifty lines about it, and counted only for
+# the layer that wins the path, so the count is a count of files.
+older_than_layer() {
+  local srel=$1
+  wins_this_path "$srel" || return 0
+  OLDER_COUNT=$((OLDER_COUNT + 1))
 }
 
 # Copies one layer directory over the composed tree, entry by entry, last write
@@ -755,8 +776,12 @@ compose_dir() {
         conflict "$srel" file "$e"
         continue
       fi
-      if [ -f "$CUR/$srel" ] && [ "$CUR/$srel" -nt "$e" ]; then
-        diverged "$srel" "$e"
+      if [ -f "$CUR/$srel" ]; then
+        if [ "$CUR/$srel" -nt "$e" ]; then
+          diverged "$srel" "$e"
+        elif [ "$e" -nt "$CUR/$srel" ]; then
+          older_than_layer "$srel"
+        fi
       fi
       # cp writes *through* a destination symlink that points at an existing
       # file, rewriting a lower layer's link target; GNU's
@@ -1327,7 +1352,7 @@ check_layers() {
 }
 
 cmd_build() {
-  local i dir n had_current qcur qold
+  local i dir n had_current qcur qold files was them copies
 
   parse_config || exit 1
 
@@ -1370,6 +1395,7 @@ cmd_build() {
 
   DIVERGED_PATHS=()
   DIVERGED_LAYERS=()
+  OLDER_COUNT=0
   CONFLICT_PATHS=()
   CONFLICT_MINE=()
   CONFLICT_OTHER=()
@@ -1485,10 +1511,11 @@ cmd_build() {
   # Reported here rather than during the walk: until the swap has happened there
   # is no current.old for the message to point at.  Before the re-raise below,
   # because a signal ending the run here must not take the only notice that
-  # current.old holds an edit with it - the next build reaps current.old and
-  # cannot re-detect the divergence, cp -p having left the copy no newer.
+  # current.old holds a replaced file with it - the next build reaps current.old
+  # and cannot re-detect either divergence, this build having left every copy in
+  # $CUR the same age as the layer file it came from.
   n=${#DIVERGED_PATHS[@]}
-  if [ "$n" -eq 0 ]; then
+  if [ "$n" -eq 0 ] && [ "$OLDER_COUNT" -eq 0 ]; then
     rm -rf "$OLD" || warn "could not remove $OLD"
   else
     i=0
@@ -1498,6 +1525,24 @@ cmd_build() {
         "your version is kept at $OLD/${DIVERGED_PATHS[$i]}"
       i=$((i + 1))
     done
+    if [ "$OLDER_COUNT" -gt 0 ]; then
+      files='files'
+      was='were'
+      them='them'
+      copies='the layer copies that replaced them'
+      if [ "$OLDER_COUNT" -eq 1 ]; then
+        files='file'
+        was='was'
+        them='it'
+        copies='the layer copy that replaced it'
+      fi
+      # One group however many files, and it states both readings rather than
+      # naming one: nothing shale can read tells a file moved into the built
+      # tree from a built tree the layers have moved past.
+      warn "$OLDER_COUNT $files in $CUR $was older than $copies" \
+        "either something moved $them into the built tree, which is what stow --adopt does, or a layer changed and this is the first build since" \
+        "what was in $CUR before this build is kept at $OLD"
+    fi
   fi
 
   if [ -n "$DEFERRED" ]; then
