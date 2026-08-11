@@ -67,11 +67,12 @@ root and leave it off the other lines that share it. Blank lines and `#` comment
 ```
 base    personal/base     git@github.com:you/dotfiles.git
 wsl     personal/wsl
-work    work              git@github-work:employer/dotfiles.git
+work    work/base         git@github-work:employer/dotfiles.git
 local   local
 ```
 
-Here `personal/base` and `personal/wsl` are two layers from one clone at `~/.dotfiles/personal`, and
+Here `personal/base` and `personal/wsl` are two layers from one clone at `~/.dotfiles/personal`,
+`work/base` is a layer from a second clone at `~/.dotfiles/work` on a second GitHub account, and
 `local` is this machine's own unversioned directory. Reordering the lines changes precedence;
 nothing else does.
 
@@ -160,7 +161,7 @@ shale apply
 
 ```
 $ shale which .zshrc
-winner    work   /home/you/.dotfiles/work/.zshrc
+winner    work   /home/you/.dotfiles/work/base/.zshrc
 shadowed  base   /home/you/.dotfiles/personal/base/.zshrc
 ```
 
@@ -168,7 +169,7 @@ Directories merge rather than shadow, and the report says so instead of naming a
 
 ```
 $ shale which .config/profile.d
-merged    work   /home/you/.dotfiles/work/.config/profile.d/
+merged    work   /home/you/.dotfiles/work/base/.config/profile.d/
 merged    wsl    /home/you/.dotfiles/personal/wsl/.config/profile.d/
 merged    base   /home/you/.dotfiles/personal/base/.config/profile.d/
 ```
@@ -191,11 +192,11 @@ directory; `build` names both layers and rebuilds nothing:
 $ shale build
 shale: composed layer 'base' from /home/you/.dotfiles/personal/base
 shale: composed layer 'wsl' from /home/you/.dotfiles/personal/wsl
-shale: composed layer 'work' from /home/you/.dotfiles/work
+shale: composed layer 'work' from /home/you/.dotfiles/work/base
 shale: composed layer 'local' from /home/you/.dotfiles/local
 shale: conflict at .config/profile.d
 shale:   layer 'local' provides a file        /home/you/.dotfiles/local/.config/profile.d
-shale:   layer 'work'  provides a directory   /home/you/.dotfiles/work/.config/profile.d
+shale:   layer 'work'  provides a directory   /home/you/.dotfiles/work/base/.config/profile.d
 shale:   a layer cannot replace a directory with a file, or a file with a directory
 shale:   remove or rename one of them
 shale: 1 conflict; /home/you/.dotfiles/current not rebuilt

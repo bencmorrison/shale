@@ -6240,6 +6240,96 @@ test_examples_every_shipped_config_parses() {
   [ "$found" -gt 0 ] || fail "no examples found at $REPO_ROOT/examples/*.conf"
 }
 
+# docs/layers.md warns that naming a repository root as a layer links the
+# repository's own furniture - .gitignore, .github, Makefile - into $HOME, and
+# examples/minimal.conf spells the warning out.  This is the regression case:
+# every layer whose root a line in the same file gives a url for must have a
+# subdirectory below that root.  A root nobody gives a url for is a
+# machine-local directory instead - 'local local' in both shipped examples -
+# and one component there is correct, so the rule below only ever looks at
+# roots this same file clones.
+#
+# Two passes over each file rather than one, because the url for a root can
+# appear on any line that shares it, not only the first: the second pass has
+# to know every cloned root before it can judge the first layer path.
+#
+# 'records' answers the same vacuous-pass hazard test_examples_every_shipped_config_parses
+# guards against with doctor's own "layer '" check, without coupling this case
+# to shale's parser: a line whose fields are not separated the way 'read'
+# expects - commas in place of the spaces the format requires, say - leaves
+# $p empty, so nothing is ever added to 'roots' and the loop below has nothing
+# to compare against.  Without this check that file reports 'ok' having
+# examined zero layer paths.  A shipped example with no layer records at all is
+# exactly that failure, whether every line is a comment or every line is
+# unparsable, so nothing here exempts either cause.
+test_examples_no_layer_path_names_a_cloned_root_directly() {
+  local example name line found bad report
+  local n p u root roots r _ records
+  found=0
+  bad=0
+  report=()
+  for example in "$REPO_ROOT"/examples/*.conf; do
+    [ -f "$example" ] || continue
+    name=${example##*/}
+    found=$((found + 1))
+    roots=()
+    records=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        '' | '#'*) continue ;;
+      esac
+      n=
+      p=
+      u=
+      _=
+      read -r n p u _ <<EOF
+$line
+EOF
+      case "$p" in '#'*) p= ;; esac
+      case "$u" in '#'*) u= ;; esac
+      [ -n "$p" ] || continue
+      records=$((records + 1))
+      [ -n "$u" ] || continue
+      roots[${#roots[@]}]=${p%%/*}
+    done <"$example"
+    if [ "$records" -eq 0 ]; then
+      report[${#report[@]}]="$name: no layer records were extracted from this file"
+      bad=$((bad + 1))
+      continue
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        '' | '#'*) continue ;;
+      esac
+      n=
+      p=
+      u=
+      _=
+      read -r n p u _ <<EOF
+$line
+EOF
+      case "$p" in '#'*) p= ;; esac
+      [ -n "$p" ] || continue
+      case "$p" in
+        */*) continue ;;
+      esac
+      root=$p
+      for r in ${roots[@]+"${roots[@]}"}; do
+        if [ "$r" = "$root" ]; then
+          report[${#report[@]}]="$name: layer $n names the cloned root $root directly: $p"
+          bad=$((bad + 1))
+          break
+        fi
+      done
+    done <"$example"
+  done
+  if [ "$bad" -gt 0 ]; then
+    fail "$bad layer(s) in $REPO_ROOT/examples name a cloned repository root as their own path" \
+      ${report[@]+"${report[@]}"}
+  fi
+  [ "$found" -gt 0 ] || fail "no examples found at $REPO_ROOT/examples/*.conf"
+}
+
 # ---------------------------------------------------------------- which cases
 #
 # The answer is on stdout with no 'shale: ' prefix - it is the command's result,
