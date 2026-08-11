@@ -1625,9 +1625,11 @@ test_build_an_unreadable_layer_file_stops_the_build() {
 # cannot be read: nullglob cannot tell it from an empty one, so its whole
 # subtree leaves the build with exit 0 and no message, and the reaped
 # current.old takes the last copy of it with it.  Both spellings, because -r
-# and -x fail in different places and only -r's is silent.
+# and -x fail in different places and only -r's is silent - and they are two
+# spellings in the message too, 0666 being a directory the reader can list with
+# ls, so 'cannot read' about it is a claim they can disprove in one command.
 test_build_an_unreadable_layer_directory_stops_the_build() {
-  local mode dir
+  local mode dir verb
   skip_if_root
   for mode in 0333 0666; do
     conf 'base personal/base'
@@ -1635,13 +1637,19 @@ test_build_an_unreadable_layer_directory_stops_the_build() {
     mklayer personal/base .config/nvim/init.lua
     sandbox_mkdir "$HOME/.dotfiles/personal/base/.config/nvim"
     dir=$sandbox_dir
+    case "$mode" in
+      0333) verb='cannot read' ;;
+      *) verb='cannot search' ;;
+    esac
     chmod "$mode" "$dir" || fail "could not set mode $mode"
     run_shale build
     chmod 0755 "$dir" || fail 'could not restore the mode'
     assert_status 1 "$shale_status" "mode $mode exit status"
     assert_contains "$shale_err" \
-      "shale: cannot read $HOME/.dotfiles/personal/base/.config/nvim: permission denied" \
+      "shale: layer 'base': $verb $HOME/.dotfiles/personal/base/.config/nvim: permission denied" \
       "mode $mode stderr"
+    assert_contains "$shale_err" \
+      'shale:   check the permissions on that directory' "mode $mode stderr"
     assert_missing "$HOME/.dotfiles/current" "mode $mode"
     assert_missing "$HOME/.dotfiles/current.new" "mode $mode"
   done
@@ -1653,7 +1661,8 @@ test_build_an_unreadable_layer_directory_stops_the_build() {
   chmod 0755 "$dir" || fail 'could not restore the mode'
   assert_status 1 "$shale_status" 'layer root exit status'
   assert_contains "$shale_err" \
-    "shale: cannot read $HOME/.dotfiles/personal/base: permission denied" 'layer root stderr'
+    "shale: layer 'base': cannot read $HOME/.dotfiles/personal/base: permission denied" \
+    'layer root stderr'
   assert_missing "$HOME/.dotfiles/current" 'layer root'
 }
 
@@ -2185,6 +2194,88 @@ test_build_a_missing_layer_directory_stops_the_build() {
   assert_empty "$shale_out" 'stdout'
   assert_missing "$HOME/.dotfiles/current"
   assert_missing "$HOME/.dotfiles/current.new"
+}
+
+# The third cause, and the one that looks exactly like the second: with
+# ~/.dotfiles/personal at mode 0000 the layer directory below it is there and is
+# perfectly good, and -d, -e and -L are all false because nothing can stat
+# through the parent.  Reported as a missing layer, the remedy sends the reader
+# to inspect a config line that is right and never mentions the permission that
+# is the cause.
+#
+# Both directions in one case: the message that must not appear here is the one
+# that must still appear with the search bit back on, so a check that reported
+# the permission for every missing layer would fail the second half.
+test_build_an_unsearchable_layer_parent_is_not_reported_as_missing() {
+  local dir
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal"
+  dir=$sandbox_dir
+  chmod 0000 "$dir" || fail 'could not remove the search bit'
+  run_shale build
+  chmod 0755 "$dir" || fail 'could not restore the mode'
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: layer 'base': cannot search $dir: permission denied" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   shale cannot tell whether there is a directory at $dir/base" 'stderr'
+  assert_contains "$shale_err" 'shale:   check the permissions on that directory' 'stderr'
+  # The two halves of the misreport: a layer directory that is there called
+  # missing, and a remedy pointing at a config line that is correct.
+  assert_not_contains "$shale_err" 'has no directory' 'stderr'
+  assert_not_contains "$shale_err" 'check the path on line' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+  assert_missing "$HOME/.dotfiles/current"
+  assert_missing "$HOME/.dotfiles/current.new"
+  # The genuine article, same config, same clone root, search bit on.
+  rm -rf "$dir/base" || fail 'could not remove the layer directory'
+  run_shale build
+  assert_status 1 "$shale_status" 'the second build'
+  assert_contains "$shale_err" \
+    "shale: layer 'base' has no directory at $dir/base, but its clone at $dir exists" \
+    'the second build stderr'
+  assert_contains "$shale_err" 'shale:   check the path on line 1' 'the second build stderr'
+  assert_not_contains "$shale_err" 'cannot search' 'the second build stderr'
+}
+
+# One setup, three commands, and the line built once here: a reader comparing
+# two of them is exactly who hits this, and which has refused this setup by name
+# since the walk was added to it.  The second layer is what gives which an answer
+# to get wrong - without it there is no winner to name around the layer it cannot
+# see into.
+test_build_an_unsearchable_layer_parent_reads_alike_from_doctor_and_which() {
+  local dir msg build_err build_status doctor_out doctor_status
+  skip_if_root
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal"
+  dir=$sandbox_dir
+  msg="shale: layer 'base': cannot search $dir: permission denied"
+  chmod 0000 "$dir" || fail 'could not remove the search bit'
+  run_shale build
+  build_status=$shale_status
+  build_err=$shale_err
+  run_shale doctor
+  doctor_status=$shale_status
+  doctor_out=$shale_out
+  run_shale which .zshrc
+  chmod 0755 "$dir" || fail 'could not restore the mode'
+  assert_status 1 "$build_status" 'build exit status'
+  assert_status 1 "$doctor_status" 'doctor exit status'
+  assert_status 1 "$shale_status" 'which exit status'
+  assert_contains "$build_err" "$msg" 'build stderr'
+  # doctor's report is its result, so the same line lands on its stdout.  The
+  # split is the one every doctor case makes, not a difference in what is said.
+  assert_contains "$doctor_out" "$msg" 'doctor stdout'
+  assert_contains "$shale_err" "$msg" 'which stderr'
+  assert_not_contains "$build_err" 'has no directory' 'build stderr'
+  assert_not_contains "$doctor_out" 'has no directory' 'doctor stdout'
+  # which's own half, unchanged: no winner is named around a layer it could not
+  # see into.
+  assert_empty "$shale_out" 'which stdout'
 }
 
 test_build_a_layer_path_that_is_not_a_directory_stops_the_build() {
@@ -3767,19 +3858,31 @@ test_doctor_notes_only_unrecognised_directories() {
 # silent, which on a directory doctor never read is a clean bill of health for a
 # setup no build can get through.  0111 is the interesting mode because the
 # config is still readable through it, so nothing else in the report says a word.
-test_doctor_a_dotfiles_directory_it_cannot_read_is_a_finding() {
-  local mode
+#
+# One mode per word, because the two states are not one state: 0111 is the
+# directory the glob cannot list, and 0444 is the one it lists perfectly well
+# with ls while every -d inside it is false.  0000 is missing both, and says
+# 'search' for the reason every other message here does - it is the word which
+# can test for, and doctor must not spell one directory two ways in one report.
+test_doctor_a_dotfiles_directory_it_cannot_scan_is_a_finding() {
+  local mode verb
   skip_if_root
-  for mode in 0111 0444; do
+  for mode in 0111 0444 0000; do
     conf 'base personal/base'
     mklayer personal/base .zshrc
     sandbox_mkdir "$HOME/.dotfiles/stray"
+    case "$mode" in
+      0111) verb='cannot read' ;;
+      *) verb='cannot search' ;;
+    esac
     chmod "$mode" "$HOME/.dotfiles" || fail "could not set mode $mode"
     run_shale doctor
     chmod 0755 "$HOME/.dotfiles" || fail 'could not restore the mode'
     assert_status 1 "$shale_status" "$mode exit status"
     assert_contains "$shale_out" \
-      "shale: cannot list $HOME/.dotfiles: permission denied" "$mode stdout"
+      "shale: $verb $HOME/.dotfiles: permission denied" "$mode stdout"
+    assert_contains "$shale_out" \
+      'shale:   check the permissions on that directory' "$mode stdout"
     assert_not_contains "$shale_out" 'no problems found' "$mode stdout"
   done
 }
@@ -3788,30 +3891,61 @@ test_doctor_a_dotfiles_directory_it_cannot_read_is_a_finding() {
 # that test is true of a directory nothing can be got out of, so a layer at mode
 # 0000 collected a clean bill of health from a doctor that had not looked in it
 # and could not have.  The three modes are the three ways a walk of it fails, and
-# each is asserted against build's own refusal in the same case: doctor exists to
-# say what build would say before build is run, so a disagreement here is the
-# whole defect however the message is worded.
-test_doctor_a_layer_directory_it_cannot_read_is_a_finding() {
-  local mode dir doctor_out doctor_status
+# each is asserted against build's and which's own answers in the same case:
+# doctor exists to say what build would say before build is run, so a
+# disagreement here is the whole defect however the message is worded.
+#
+# The verb is the mode's, not one word for all three: at 0444 the directory
+# lists with ls and it is the search bit that is gone, so 'cannot read' about it
+# is a claim the reader disproves in one command.  0000 is missing both and says
+# 'search', which is the tie which decides - it tests that bit alone, and the
+# three commands have to say one thing about one directory.
+#
+# 0111 is the state which does not report at all, and must not: it stats one
+# path and lists nothing, so the bit it needs is there and the answer it gives
+# is right while build cannot walk the same directory.
+test_doctor_a_layer_directory_it_cannot_walk_is_a_finding() {
+  local mode dir verb msg doctor_out doctor_status build_err build_status
   skip_if_root
   dir=$HOME/.dotfiles/personal/base
   for mode in 0000 0111 0444; do
     conf 'base personal/base'
     mklayer personal/base .zshrc
+    case "$mode" in
+      0111) verb='cannot read' ;;
+      *) verb='cannot search' ;;
+    esac
+    msg="shale: layer 'base': $verb $dir: permission denied"
     chmod "$mode" "$dir" || fail "could not set mode $mode"
     run_shale doctor
     doctor_out=$shale_out
     doctor_status=$shale_status
     run_shale build
+    build_err=$shale_err
+    build_status=$shale_status
+    run_shale which .zshrc
     chmod 0755 "$dir" || fail 'could not restore the mode'
     assert_status 1 "$doctor_status" "$mode doctor exit status"
+    assert_contains "$doctor_out" "$msg" "$mode doctor stdout"
     assert_contains "$doctor_out" \
-      "shale: layer 'base': cannot read $dir: permission denied" "$mode doctor stdout"
+      'shale:   check the permissions on that directory' "$mode doctor stdout"
     assert_contains "$doctor_out" 'shale: 1 problem found' "$mode doctor stdout"
     assert_not_contains "$doctor_out" 'no problems found' "$mode doctor stdout"
-    assert_status 1 "$shale_status" "$mode build exit status"
-    assert_contains "$shale_err" \
-      "shale: cannot read $dir: permission denied" "$mode build stderr"
+    assert_status 1 "$build_status" "$mode build exit status"
+    assert_contains "$build_err" "$msg" "$mode build stderr"
+    assert_contains "$build_err" \
+      'shale:   check the permissions on that directory' "$mode build stderr"
+    if [ "$mode" = 0111 ]; then
+      assert_status 0 "$shale_status" "$mode which exit status"
+      assert_eq "winner    base  $dir/.zshrc" "$shale_out" "$mode which stdout"
+      assert_empty "$shale_err" "$mode which stderr"
+    else
+      assert_status 1 "$shale_status" "$mode which exit status"
+      assert_contains "$shale_err" "$msg" "$mode which stderr"
+      assert_contains "$shale_err" \
+        'shale:   check the permissions on that directory' "$mode which stderr"
+      assert_empty "$shale_out" "$mode which stdout"
+    fi
   done
 }
 
@@ -5023,6 +5157,10 @@ test_which_a_layer_it_cannot_read_is_not_answered_around() {
     assert_empty "$shale_out" "$variant stdout"
     assert_contains "$shale_err" \
       "shale: layer '$layer': cannot search $dir: permission denied" "$variant stderr"
+    # The action, which every other permission message carries: a refusal that
+    # names a cause and no remedy is one the reader cannot act on.
+    assert_contains "$shale_err" \
+      'shale:   check the permissions on that directory' "$variant stderr"
     assert_contains "$shale_err" \
       "shale: cannot say which layer provides '.config/git/config'" "$variant stderr"
     assert_not_contains "$shale_err" 'winner' "$variant stderr"
@@ -5038,8 +5176,11 @@ test_which_a_layer_it_cannot_read_is_not_answered_around() {
   run_shale build
   chmod 0755 "$HOME/.dotfiles/local/.config" || fail 'could not restore the mode'
   assert_status 1 "$shale_status" 'the build'
+  # 'search', as which says of the same directory: mode 0000 is missing both
+  # bits, and the word the two commands share is the one which can test for.
   assert_contains "$shale_err" \
-    "shale: cannot read $HOME/.dotfiles/local/.config: permission denied" 'the build stderr'
+    "shale: layer 'local': cannot search $HOME/.dotfiles/local/.config: permission denied" \
+    'the build stderr'
 }
 
 # The other half: only the directories on the way to the path asked about are
