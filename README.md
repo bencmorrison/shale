@@ -49,8 +49,10 @@ Shale clones a layer that has a url and creates no layer that has not, so every 
 to exist before the first apply — `local`, in both shipped examples. `examples/minimal.conf` is the
 smaller starting point: one repository layer and that same local directory.
 
-Already stowing dotfiles by hand? Unstow the old packages before the first apply:
-[docs/migrating.md](docs/migrating.md).
+Dotfiles already in `$HOME`? Whether they are ordinary files or stow packages you stow by hand, they
+have to stop being files at those paths before the first apply, and anything of yours worth keeping
+has to be copied into a layer by hand — shale merges nothing.
+[docs/migrating.md](docs/migrating.md) takes both starting points step by step.
 
 ## Configuration
 
@@ -112,6 +114,17 @@ above. The four commands in it are the whole surface: there are no others, and n
 | `shale doctor` | Checks the prerequisites, the config, the layers and `$HOME`, and reports what it finds |
 | `shale which PATH` | Names every layer providing `PATH`, winner first, and when `build` would refuse the set |
 
+After editing a file a layer already has, `build` is the whole loop: `~/.zshrc` is a link into
+`current`, so rebuilding the tree it points at makes the edit live at that instant. `apply` is for
+when a *path* appears or disappears — a file or directory added to a layer has nothing in `$HOME`
+pointing at it until stow makes the link, and one deleted from every layer leaves a link behind
+until stow prunes it. Apply when unsure: it builds first, so it is never less than a build.
+[docs/layers.md](docs/layers.md) has the boundary case by case.
+
+Every build after an edit also reports the file as one the built tree held an older copy of, and
+names `stow --adopt` while doing so; that is the built tree having been out of date, not an
+accusation, and [docs/layers.md](docs/layers.md) says why shale cannot tell the two apart.
+
 Shale chooses between three exit codes, and no others:
 
 - **0** — shale did what was asked.
@@ -166,6 +179,12 @@ $ shale which .zshrc
 winner    work   /home/you/.dotfiles/work/base/.zshrc
 shadowed  base   /home/you/.dotfiles/personal/base/.zshrc
 ```
+
+Spell the path however you have it to hand: `.zshrc`, `./.zshrc`, `~/.zshrc`, an absolute path and a
+trailing slash all name the same thing, as do the copies of it in the built tree and inside a layer
+when those are spelled from `~` or absolutely — `~/.dotfiles/current/.zshrc` answers for `.zshrc`,
+while `.dotfiles/current/.zshrc` is just a path no layer provides. A path outside `$HOME`, a path
+containing `..`, and `$HOME` or the built tree itself are refused with a diagnosis and exit 1.
 
 Directories merge rather than shadow, and the report says so instead of naming a winner:
 
@@ -251,17 +270,34 @@ into authoring a layer.
 
 ## Uninstalling
 
+Removing the links leaves `$HOME` with no dotfiles at all, which is what you want between an apply
+you regret and the next one:
+
 ```sh
 stow -D -d ~/.dotfiles -t ~ current
 ```
 
-This is also the escape hatch if an apply goes wrong. It removes the links into `current` and leaves
-your layers, your config and the built tree alone; `shale apply` puts them back.
+It leaves your layers, your config and the built tree alone; `shale apply` puts the links back. To
+leave shale altogether and keep your dotfiles as ordinary files, copy the built tree back over them
+first:
+
+```sh
+stow -D -d ~/.dotfiles -t ~ current    # every link into current/ goes
+cp -RL ~/.dotfiles/current/. ~/        # the built tree lands as real files
+rm ~/.stow-local-ignore                # the one file in that tree that is shale's own
+rm -rf ~/.dotfiles                     # layers, config and built tree, once the repos are pushed
+```
+
+What the copy deposits is exactly what `ls -a ~/.dotfiles/current` lists. The order matters, and
+[docs/migrating.md](docs/migrating.md) says what `cp` here does and does not preserve.
 
 ## Known limits
 
 - Rebuilding replaces `~/.dotfiles/current` in place, so there is a brief window in which the
   symlinks in `$HOME` point at nothing. Apply relinks immediately afterwards.
+- No build is incremental: every one composes every layer from scratch, so a one-character edit
+  costs what a first build costs. Roughly two milliseconds a file — 4.1 seconds for a 2000-file
+  tree, 31 milliseconds for a seven-file one, on the container these were measured in.
 - When a whole directory leaves every layer, stow does not visit it and the links inside it are left
   dangling by an apply that still exits 0. `shale doctor` finds them and prints what to do about
   them; [docs/migrating.md](docs/migrating.md) covers the case in full.

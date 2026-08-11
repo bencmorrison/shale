@@ -1,13 +1,16 @@
-# Migrating from a plain stow setup
+# Migrating to shale
 
-You have `~/.dotfiles/common` and `~/.dotfiles/local` as stow packages, and you stow them by hand.
-Shale composes the same trees into one package and stows that. The move is mechanical: unstow what
-is there, turn the packages into layers, list them, apply.
+There are two starting points. If your dotfiles are ordinary files sitting in `$HOME`, which is the
+commoner one, go straight to *Coming from plain files*. If you already have stow packages such as
+`~/.dotfiles/common` and stow them by hand, start at *Unstow first*: shale composes the same trees
+into one package and stows that, so the move is mechanical — unstow what is there, turn the packages
+into layers, list them, apply. Both paths meet at *What a first apply refuses, and why*, and the way
+back out is the same for both.
 
-Do it from a shell you can afford to lose. Unstowing removes `~/.zshrc`, `~/.profile` and everything
-else the package owns, and every shell opened between then and the apply falls back to the system
-defaults. Keep a second session already running, and do this over a connection you are not relying
-on the dotfiles to make.
+Do it from a shell you can afford to lose. Either path takes `~/.zshrc`, `~/.profile` and everything
+beside them out of `$HOME` for a while — unstowed, or moved aside — and every shell opened between
+then and the apply falls back to the system defaults. Keep a second session already running, and do
+this over a connection you are not relying on the dotfiles to make.
 
 One thing to know before you start, rather than after: do not use `stow --adopt`. Your first apply
 will refuse a pile of conflicts, `--adopt` is what a search turns up for clearing them, and here it
@@ -16,7 +19,139 @@ next `shale build` overwrites. That build says so and keeps the whole previous t
 so an adopted file survives one build and no more — the build after it reaps `current.old`. Copy the
 file into a layer instead. The refusals themselves are covered below, each with what to do about it.
 
+## Coming from plain files
+
+`~/.zshrc`, `~/.profile`, `~/.gitconfig` and a `~/.config/nvim/init.lua`, ordinary files that nothing
+manages. There is no package to unstow, so this section is the whole of the move.
+
+Two things to know before the first command. Shale never merges: where a layer provides a path, its
+file replaces yours whole, and nothing reads what is inside either copy. And shale will not overwrite
+your file in order to do it — stow refuses at any path holding a real file, which is the wall further
+down. Every line of reconciliation between your version and a layer's is yours to do by hand.
+
+If **your own files are to be the layer** — you are starting shale from your dotfiles rather than
+adopting anyone else's — the move is a `mv` and an apply, and there is nothing to reconcile:
+
+```
+$ mkdir -p ~/.dotfiles/local/.config
+$ printf "local  local\n" > ~/.dotfiles/shale.conf
+$ mv ~/.zshrc ~/.profile ~/.gitconfig ~/.dotfiles/local/
+$ mv ~/.config/nvim ~/.dotfiles/local/.config/
+$ shale apply
+shale: composed layer 'local' from /home/you/.dotfiles/local
+```
+
+`mv` rather than `cp`: each file has to be gone from `$HOME` before the apply, or it collides with
+the link stow wants to put in its place. Make `~/.dotfiles/local` a git repository whenever you want
+one — to shale it is a directory either way.
+
+If **a layer already provides those paths**, from a repository you are adopting, then your file and
+the layer's are two versions of one path and exactly one of them can win. Write `shale.conf` and
+create the url-less layers as the README's bootstrap has it, then apply with your files still in
+place, and stow refuses the lot. On stow 2.3.1 that means every path named twice, once for the
+unstow phase and once for the stow phase:
+
+```
+$ shale apply
+shale: composed layer 'base' from /home/you/.dotfiles/personal/base
+shale: composed layer 'local' from /home/you/.dotfiles/local
+WARNING! unstowing current would cause conflicts:
+  * existing target is neither a link nor a directory: .config/nvim/init.lua
+  * existing target is neither a link nor a directory: .gitconfig
+  * existing target is neither a link nor a directory: .profile
+  * existing target is neither a link nor a directory: .zshrc
+WARNING! stowing current would cause conflicts:
+  * existing target is neither a link nor a directory: .config/nvim/init.lua
+  * existing target is neither a link nor a directory: .gitconfig
+  * existing target is neither a link nor a directory: .profile
+  * existing target is neither a link nor a directory: .zshrc
+All operations aborted.
+shale: stow failed; nothing in /home/you was relinked
+shale:   stow plans the whole operation and abandons all of it rather than half-applying one
+shale:   /home/you/.dotfiles/current is built and correct: fix what stow reported above, in /home/you or in a layer, then apply again
+```
+
+Stow 2.4.1 refuses exactly the same set in half the lines: one `stowing current would cause
+conflicts` block rather than two, each path named once, and each line ending `since neither a link
+nor a directory and --adopt not specified`. Read the intent rather than the shape, because the shape
+is what moved between the versions — and read that last clause as a suggestion from a program that
+knows nothing about shale. `--adopt` moves your file into `~/.dotfiles/current`, which the next build
+overwrites, for the reason at the top of this page. The five steps below are the version of that
+suggestion which keeps your file.
+
+Nothing in `$HOME` changed either way, and no file of yours was read or altered. The list is your
+work queue. Take it in this order.
+
+1. **Build, which touches nothing in `$HOME`.** `shale build` writes only `~/.dotfiles/current`, so
+   it is safe to run with your files where they are, and it gives you the layers' version of each
+   path to compare against.
+
+2. **Compare, path by path.** `shale which` names the layer a version came from, and `diff` says what
+   adopting it would cost you:
+
+   ```
+   $ shale which .zshrc
+   winner    base   /home/you/.dotfiles/personal/base/.zshrc
+
+   $ diff -u ~/.zshrc ~/.dotfiles/current/.zshrc
+   --- /home/you/.zshrc
+   +++ /home/you/.dotfiles/current/.zshrc
+   @@ -1,2 +1 @@
+   -export EDITOR=vim
+   -alias gs="git status"
+   +export EDITOR=nvim
+   ```
+
+   A path whose diff is empty needs nothing — `~/.config/nvim/init.lua` here — and goes straight in
+   the pile at step 4. Everywhere else the diff is the reconciliation, and it is manual: five years
+   of accumulated aliases do not come across on their own, and nothing but that diff will tell you
+   they went.
+
+3. **Move what you are keeping into a layer, and build again.** Your line goes in the layer that
+   should own it — usually `local`, above the repository you are adopting — and the diff is how you
+   know when you are finished:
+
+   ```
+   $ diff -u ~/.zshrc ~/.dotfiles/current/.zshrc
+   --- /home/you/.zshrc
+   +++ /home/you/.dotfiles/current/.zshrc
+   @@ -1,2 +1,2 @@
+   -export EDITOR=vim
+   +export EDITOR=nvim
+    alias gs="git status"
+   ```
+
+   The alias survived because it was copied into `~/.dotfiles/local/.zshrc` by hand; `EDITOR` differs
+   because that difference was the point of adopting the layer.
+
+   The build you run here reports one file in `current` older than the layer copy that replaced it,
+   and its first clause names `--adopt` again. It is describing the file you just wrote, which is
+   newer than the built tree it is about to replace, and it says so of every layer edit — see *The
+   everyday loop* in [layers.md](layers.md). Nothing has adopted anything.
+
+4. **Move the originals out of `$HOME`.** They are what stow named, and they only have to stop being
+   files at those paths. Keep them until you have lived with the result for a week:
+
+   ```
+   $ mkdir -p ~/pre-shale/.config/nvim
+   $ mv ~/.zshrc ~/.profile ~/.gitconfig ~/pre-shale/
+   $ mv ~/.config/nvim/init.lua ~/pre-shale/.config/nvim/
+   ```
+
+5. **Apply.**
+
+   ```
+   $ shale apply
+   shale: composed layer 'base' from /home/you/.dotfiles/personal/base
+   shale: composed layer 'local' from /home/you/.dotfiles/local
+   ```
+
+   Nothing more is printed and nothing more is needed: `~/.zshrc` is now a link into the built tree.
+   `~/pre-shale` stays an ordinary directory that shale neither reads nor reports.
+
 ## Unstow first
+
+Only where the old setup is stow packages; from plain files there is nothing to unstow.
 
 ```sh
 stow -D -d ~/.dotfiles -t ~ common
@@ -103,7 +238,10 @@ inside the built tree, where the next build would discard them.
 Stow plans the whole operation and abandons all of it if any part conflicts, so a failed apply
 changes nothing in `$HOME`. The built tree is fine; clear what stow named and apply again. Apply
 restows, so stow runs an unstow phase and then a stow phase, and a collision both phases see is
-named once for each.
+named once for each. Every transcript below is stow 2.3.1's. Match the intent rather than the shape,
+because the shape is what moves between stow versions: on 2.4.1 two of these three arrive as one
+block rather than two, one of them loses the `=> package/path` half of the line, and the third is
+reworded into advice to use `--adopt` — see *Coming from plain files*.
 
 An old package still stowed over a path the built tree also provides:
 
@@ -130,18 +268,10 @@ All operations aborted.
 Stow can split a folded directory apart when the link points inside the stow directory it was given,
 and it cannot when the link points anywhere else. Unstow the old package and the fold goes with it.
 
-An ordinary file, not a link, already sitting at the path:
-
-```
-WARNING! unstowing current would cause conflicts:
-  * existing target is neither a link nor a directory: .profile
-WARNING! stowing current would cause conflicts:
-  * existing target is neither a link nor a directory: .profile
-All operations aborted.
-```
-
-That file is not in any layer and shale will not overwrite it. Move it aside, or copy its contents
-into the layer that should own it and then delete it.
+An ordinary file, not a link, already sitting at the path — `existing target is neither a link nor a
+directory`, quoted in full under *Coming from plain files*. That file is not in any layer and shale
+will not overwrite it. Move it aside, or copy what you want from it into the layer that should own it
+and then move it aside anyway.
 
 Do not reach for `stow --adopt` to clear any of these, for the reason given at the top. It moves the
 file from `$HOME` into the package — which here means into `~/.dotfiles/current`, generated output —
@@ -204,13 +334,73 @@ longer holds. It also says when `chkstow` could not walk all of `$HOME` — a `.
 marker makes it skip a directory — because a walk that stopped early has nothing to say about what it
 did not reach. Either way the walk is not quick.
 
-## Uninstalling
+## Backing out one apply
 
 ```sh
 stow -D -d ~/.dotfiles -t ~ current
 ```
 
-This is also the escape hatch when an apply leaves `$HOME` in a state you would rather back out of.
-It removes only the links into `current`; your layers, your config and the built tree are untouched,
-and `shale apply` puts everything back. Directories stow created on the way in are left behind
-empty.
+The escape hatch when an apply leaves `$HOME` in a state you would rather back out of. It removes
+only the links into `current`; your layers, your config and the built tree are untouched, and
+`shale apply` puts everything back. Directories stow created on the way in are left behind empty.
+
+On its own it leaves you with no dotfiles at all, which is the right state only if you are about to
+apply again.
+
+## Leaving shale, with your dotfiles
+
+Four commands, in this order. The first two are the whole of it; the last two are cleanup you can put
+off:
+
+```sh
+stow -D -d ~/.dotfiles -t ~ current    # every link into current/ goes; $HOME keeps the directories
+cp -RL ~/.dotfiles/current/. ~/        # the built tree lands as ordinary files, filling them again
+rm ~/.stow-local-ignore                # shale's own file, copied back with everything else
+rm -rf ~/.dotfiles                     # layers, config and built tree, once the repos are pushed
+```
+
+`.` in `~/.dotfiles/current/.` is what makes the copy the *contents* of the tree rather than a
+`~/current` directory, and it takes the dotfiles with it. `-L` reads through a symlink a layer ships
+and writes a real file, so nothing you keep points into a tree you are about to delete. The price of
+`-L` is that a layer symlink pointing at nothing has nothing to read: `cp` copies everything else,
+reports that one and exits 1 —
+
+```
+cp: cannot stat '/home/you/.dotfiles/current/./.danglink': No such file or directory
+```
+
+— and the fourth command would then delete the only copy of it. Deal with the named entry before you
+delete anything.
+
+What lands is exactly what the built tree holds, and shale generates one file of its own in there:
+`~/.stow-local-ignore`, the third command. Run `ls -a ~/.dotfiles/current` before the copy and that
+listing is what you are about to get — worth doing, because this copy pays no attention to
+`.stow-local-ignore` and so brings out whatever it was suppressing. Give a layer a subdirectory of
+its repository, as `docs/layers.md` says to, and that is nothing at all. Name a repository root as a
+layer instead and its `README.md` and `LICENSE` have been in the built tree all along, kept out of
+`$HOME` only by that ignore file; the copy puts them in `$HOME` beside your dotfiles.
+
+Modes come across for the bit that matters: an executable stays executable, and a `~/.netrc` at 600
+arrives at 600. Two smaller things `cp` does here without `-p`, which are why `-p` is deliberately
+absent: a new file is created subject to your `umask`, so a 666 file in the tree arrives 644 under
+the usual 022 — and a directory that already exists in `$HOME`, such as a `~/.ssh` you keep at 700,
+keeps its own mode rather than being widened to the tree's. Add `-p` only if you want the tree's
+modes and timestamps exactly, and know that it will chmod those existing directories.
+
+Order matters. Copy before the unstow and every destination is still a link back into the source, so
+GNU coreutils 9.4 refuses each of those and exits 1:
+
+```
+cp: '/home/you/.dotfiles/current/./.zshrc' and '/home/you/./.zshrc' are the same file
+```
+
+Nothing of yours is overwritten, but the run is not a no-op: `.stow-local-ignore` is the one entry in
+the built tree stow never linked, so it has no link to collide with and it lands in `$HOME` anyway —
+the file the third command exists to delete. That refusal is `cp`'s doing rather than stow's or
+shale's, so treat it as a mess to avoid and not as a guard. Unstow first. Delete `~/.dotfiles` before
+the copy and there is nothing left to copy from; take that last line seriously, because
+`~/.dotfiles/local` is the layer that was never anywhere else.
+
+That is the whole of shale's footprint: it writes nothing outside `~/.dotfiles`, and the script is
+the copy you made yourself, at `~/.local/bin/shale` or wherever you put it. Delete that too and
+shale is gone.

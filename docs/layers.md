@@ -47,6 +47,40 @@ winner    local  /home/you/.dotfiles/local/.zshrc
 shadowed  base   /home/you/.dotfiles/personal/base/.zshrc
 ```
 
+Give it the path however you have it to hand: `.zshrc`, `./.zshrc`, `~/.zshrc`, `/home/you/.zshrc`
+and a trailing slash all name the same thing, and so do the copies of it in the built tree and in a
+layer — `~/.dotfiles/current/.zshrc` and `~/.dotfiles/personal/base/.zshrc` both answer for `.zshrc`,
+spelled from `~` or absolutely. It refuses, with a diagnosis and exit 1, a path outside `$HOME`, a
+path containing `..`, and `$HOME` or the built tree itself rather than something in it.
+
+Whole file is worth taking literally, because the loss is silent. A four-line `.gitconfig` in `local`
+displaces every line of the one below it, and the apply that installs it says nothing, since nothing
+is wrong:
+
+```
+$ shale which .gitconfig
+winner    local  /home/you/.dotfiles/local/.gitconfig
+shadowed  base   /home/you/.dotfiles/personal/base/.gitconfig
+
+$ diff -u /home/you/.dotfiles/personal/base/.gitconfig /home/you/.dotfiles/local/.gitconfig
+--- /home/you/.dotfiles/personal/base/.gitconfig
++++ /home/you/.dotfiles/local/.gitconfig
+@@ -1,7 +1,2 @@
+-[include]
+-	path = ~/.config/git/conf.d/50-work.conf
+-[alias]
+-	st = status
+-	lg = log --oneline
+-[core]
+-	excludesfile = ~/.gitignore
++[user]
++	email = me@example.com
+```
+
+The include, both aliases and the excludesfile are gone, and only that diff says so. Run it between
+the two paths `which` printed before adding a small override, not after. Where you wanted the four
+lines *as well*, use the tool's own include mechanism below rather than a second copy of the file.
+
 A layer cannot replace a directory with a file, or a file with a directory. `build` calls that a
 conflict, names both layers and the two paths, and rebuilds nothing; `which` reports the same pair
 as a note. Rename one of them.
@@ -251,7 +285,39 @@ shale:   what was in /home/you/.dotfiles/current before this build is kept at /h
 Shale cannot tell that from a built tree its layers have moved past, and does not guess. Look in
 `current.old` if you were not expecting it.
 
-## Updating layers after the first run
+## The everyday loop: build, and when to apply
+
+Edit a file a layer already has, and `shale build` is the whole loop. `~/.zshrc` is a link into
+`current/`, so rebuilding the tree it points at makes the edit live at that instant — there is
+nothing for stow to do, because the link is already right.
+
+That build also reports the file you just edited as one the built tree held an older copy of, and
+says `stow --adopt` in the same breath. It is not accusing you of anything: the built copy carries
+the layer's timestamp from the build before, your edit made the layer's copy newer, and shale cannot
+tell that apart from a file something moved into the tree. Expect it after every edit, and read it
+as *the built tree was out of date*, which it was.
+
+`shale apply` is what you need when a **path** appears or disappears, since making and unmaking links
+is stow's job and nothing else does it:
+
+- **A new file in a layer.** After a build it is in `current/` and no link in `$HOME` points at it.
+  The apply creates one.
+- **A new directory.** The same, and the apply creates the directory in `$HOME` as well.
+- **A file deleted from every layer.** The build takes it out of `current/` and leaves the link in
+  `$HOME` pointing at nothing. The apply prunes it.
+- **A file that changes hands between layers.** No apply. The path is unchanged, so the link is
+  unchanged, and the build alone changes what it resolves to — which is also how a `local` override
+  takes effect the moment you build it.
+
+Apply when you are unsure: it builds first, so it is never less than a build, and the cost is one
+stow run. The one case it does not cover is a whole directory leaving every layer, whose links stow
+never visits — `shale doctor` finds those, and `docs/migrating.md` says what to do about them.
+
+Nothing about a build is incremental. Every one of them composes every layer from scratch, so a
+one-character edit costs what a first build costs: on this machine 4.1 seconds for a 2000-file tree,
+against 31 milliseconds for a seven-file one, and the edited build was 4.08 seconds — roughly two
+milliseconds a file, on whatever your disk does. There is nothing to tune and no cache to warm; keep
+the trees the size the dotfiles actually are.
 
 Shale clones a layer root that is missing and never touches it again; updating a checkout is git's
 job. Pull each clone root, then apply:
@@ -262,6 +328,8 @@ git -C ~/.dotfiles/work pull
 shale apply
 ```
 
-The first build after a pull that changed anything reports the files in `current` that were older
-than their new layer copies, and keeps `current.old`. That is expected here and nothing to act on;
-the build after it is quiet again. There is no `shale sync`.
+The first build after anything changes a layer — a pull, or your own edit a moment ago — reports
+the files in `current` that were older than their new layer copies, and keeps `current.old`. It is
+expected there and nothing to act on. A build with nothing changed since the last one is the quiet
+one; in an edit loop that is not the next build, it is the one you run twice in a row. There is no
+`shale sync`.
