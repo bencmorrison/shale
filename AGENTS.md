@@ -10,9 +10,9 @@ shale.
 
 A pass contains `N passed, 0 failed, 0 skipped`. **A skip is a failure**, and CI fails on any skip
 rather than trusting the count. A case skips only for a missing or wrong-versioned `shellcheck`, a
-missing `mkfifo`, or a run as root — and root is the one that costs you thirteen cases about mode
-bits, silently, in the containers where it is the default. A missing `git`, `stow` or `chkstow`
-aborts the run instead, before any case executes.
+missing `mkfifo`, or a run as root — and root is the one that costs you every case about mode bits,
+silently, in the containers where it is the default. A missing `git`, `stow` or `chkstow` aborts the
+run instead, before any case executes.
 
 ## The shape of the thing
 
@@ -35,14 +35,21 @@ so there is no `fixtures/` tree to add one to.
 - Shale knows nothing of `profile.d`, `rc.d` or `helpers.sh` — `test_meta_no_fragment_conventions`.
   `docs/layers.md` teaches that convention at length to layer authors, so a contributor arrives
   believing the tool implements it. It must not, and the grep is what says so.
-- The portability floor — `test_meta_no_banned_constructs` greps thirteen patterns.
+- The portability floor — `test_meta_no_banned_constructs` greps for the constructs off it by name.
 
 ## Where those greps do not reach
 
 They enforce **constructs, not meanings**. Identical source behaves differently on the bash 3.2 floor
 and on the container's bash 5.2, and no grep can see it — `"$dir"/.*` skips `.` and `..` under 5.2's
-`globskipdots` and matches them under 3.2, which is issue #40. Treating a clean meta run as
-portability evidence is the mistake; the macOS CI job is what catches this class, after you push.
+`globskipdots` and matches them under 3.2. The standing answer, stated once at `dir_is_empty`, is
+that every glob listing a directory drops those two names by hand;
+`test_meta_dot_globs_answer_the_same_under_both_glob_meanings` runs the script under the older
+meaning on both jobs. Treating a clean meta run as portability evidence is the mistake; the macOS CI
+job is what catches the rest of this class, after you push.
+
+A new external command joins `cmd_doctor`'s tool list and the harness's `stub_path_without`, or its
+absence goes unreported and nothing fails to say so. The enforcement runs the other way only: adding
+to doctor's list alone reddens doctor cases, adding to neither reddens nothing.
 
 The same trap runs outward. The container has GNU Stow 2.3.1 and the macOS runner 2.4.1; they differ
 in conflict wording, in whether an unmanaged file is an unstow conflict, and in whether an absolute

@@ -220,7 +220,7 @@ layer's own copy directly and you get `no problems found`, because no layer shad
 Watch for `~/.stowrc` and `~/.dotfiles/.stowrc`. Their `--ignore` patterns are *appended* to the
 ones stow is already using rather than overriding them, so a stray `--ignore=zshrc` leaves
 `~/.zshrc` silently unlinked with `shale apply` exiting 0. `shale doctor` notes a resource file if
-one exists.
+one exists, and names the stow options it sets.
 
 ## Never edit `current/`
 
