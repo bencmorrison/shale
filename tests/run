@@ -12,9 +12,10 @@
 # before the write, leaf included; and nothing may already exist at a path the
 # harness is about to create for itself.  See "guarded writes" below - every
 # write in this file goes through it except two classes, both named there: the
-# guard's own diagnostic channel, which cannot guard itself, and the rigs the
-# guard cases build under $CASE_DIR/trip, unproven because they are what is
-# being proven against.
+# guard's own diagnostic channel, which cannot prove a path at the moment it is
+# used and is held open as a descriptor instead, and the rigs the guard cases
+# build under $CASE_DIR/trip, unproven because they are what is being proven
+# against.
 #
 # A third rule is a convention rather than an invariant: a case that has had a
 # guard trip swallowed should not go on to run anything.  require_sandbox
@@ -195,13 +196,24 @@ TEST_ROOT=$resolved_root
 # "nothing may already exist here" the primitives enforce, established by mktemp
 # rather than by a check.  Its emptiness is what the -s tests on it mean, so
 # creating it changes nothing.
-: >"$TEST_ROOT/guard-tripped" || exit 1
+#
+# The create and the descriptor are one redirection: under noclobber '>' is
+# O_CREAT|O_EXCL, so the refusal and the open that every later write goes through
+# are the same operation and there is no name to plant at in between.  See
+# "guarded writes" for why the diagnostic channels are descriptors at all.
+exec 6>"$TEST_ROOT/guard-tripped" || exit 1
+CHANNEL_ROOT=$TEST_ROOT
 
 # ----------------------------------------------------------- case-side helpers
 #
 # Everything below runs inside a case's subshell.  CASE_DIR is set by run_case.
 
 CASE_DIR=$TEST_ROOT
+# The directory descriptors 7, 8 and 9 were opened on, set by run_case with them.
+# Empty until the first case starts, which is one of the two states in which the
+# writers below fall back to appending by name; the other is a guard case that
+# has pointed CASE_DIR at a rig of its own.
+CHANNEL_DIR=
 SHALE_RUNS=0
 # Set to 1 in the copy run_inner_suite builds, by a line appended after this
 # one.  A plain assignment, not ${INNER_SUITE-}: innerness is a property of the
@@ -214,13 +226,51 @@ shale_out=
 shale_err=
 inner_status=0
 inner_out=
+channel_probe=
+
+# True when descriptors 7, 8 and 9 are the ones for the CASE_DIR in force.  It is
+# false in exactly two places, and both want the old by-name append: the main
+# shell, whose CASE_DIR is still the test root and whose trips belong in the root
+# sentinel; and a guard case that has pointed CASE_DIR at a rig it built and
+# asserts on the files there, which must not have its deliberate trips land in
+# the real case's sentinel and abort the run.
+channels_are_mine() {
+  [ "$CASE_DIR" = "$CHANNEL_DIR" ]
+}
+
+# Every line of the guard's own diagnostics goes through one of these three, so
+# that "the descriptor, or the name when it is not ours" is answered in one place
+# rather than at each call site.  Each returns the status of the write, which is
+# what lets guard_trip fall through to the sentinel one directory up.
+sentinel_write() {
+  if channels_are_mine; then
+    printf '%s\n' "$1" >&7
+  else
+    printf '%s\n' "$1" >>"$CASE_DIR/guard-tripped"
+  fi
+}
+
+sentinel_fallback_write() {
+  if [ "$TEST_ROOT" = "$CHANNEL_ROOT" ]; then
+    printf '%s\n' "$1" >&6
+  else
+    printf '%s\n' "$1" >>"$TEST_ROOT/guard-tripped"
+  fi
+}
+
+# One printf for every line: the format is reused until the arguments run out,
+# which is a POSIX property of printf and not a bashism.
+failure_write() {
+  if channels_are_mine; then
+    printf '%s\n' "$@" >&8
+  else
+    printf '%s\n' "$@" >>"$CASE_DIR/failure"
+  fi
+}
 
 fail() {
-  local line
   [ $# -gt 0 ] || set -- 'assertion failed'
-  for line in "$@"; do
-    printf '%s\n' "$line" >>"$CASE_DIR/failure"
-  done
+  failure_write "$@"
   exit 1
 }
 
@@ -273,17 +323,31 @@ EOF
 # never ran shale reporting a pass.  run_case checks for it whatever the case's
 # exit status was, and require_sandbox refuses to run anything once it exists.
 # The fallback at $TEST_ROOT covers the one situation where the primary sentinel
-# cannot be written: a $CASE_DIR that is not writable.
+# cannot be written: a $CASE_DIR that is not writable.  That is now reachable
+# only from a rig, the descriptor a real case writes through having been opened
+# while the directory still was.
 guard_trip() {
   ABORTED=1
-  printf '%s\n' "$1" >>"$CASE_DIR/guard-tripped" ||
-    printf '%s\n' "$1" >>"$TEST_ROOT/guard-tripped" ||
+  sentinel_write "$1" ||
+    sentinel_fallback_write "$1" ||
     printf 'tests: COULD NOT WRITE A GUARD SENTINEL ANYWHERE\n' >&2
   printf 'tests: SANDBOX GUARD TRIPPED: %s\n' "$1" >&2
   printf 'tests:   HOME      %s\n' "${HOME-(unset)}" >&2
   printf 'tests:   real home %s\n' "$REAL_HOME" >&2
   printf 'tests:   test root %s\n' "$TEST_ROOT" >&2
   exit 99
+}
+
+# guard_trip for a path that would not resolve.  A test root that has gone from
+# under the run takes every path inside it with it, and the first thing to fail
+# is then whichever case was running - which gets named for it, once as far as
+# its own case directory, a thing no case can do to itself.  Something outside
+# the run reaps them; a private TMPDIR is the answer, not anything this file can
+# do, so this is the sentence and not a remedy.
+guard_trip_unresolved() {
+  [ -d "$TEST_ROOT" ] ||
+    guard_trip "the test root has gone from under the run: $TEST_ROOT"
+  guard_trip "$1"
 }
 
 # Guards every operation that touches $HOME.  All conditions carry weight -
@@ -306,8 +370,8 @@ require_sandbox() {
     guard_trip 'an earlier guard trip in this case was swallowed'
   [ -n "${HOME+set}" ] || guard_trip 'HOME is unset'
   home=$(cd "$HOME" 2>/dev/null && pwd -P) ||
-    guard_trip 'HOME does not resolve to a directory'
-  [ -n "$home" ] || guard_trip 'HOME does not resolve to a directory'
+    guard_trip_unresolved 'HOME does not resolve to a directory'
+  [ -n "$home" ] || guard_trip_unresolved 'HOME does not resolve to a directory'
   [ -f "$home/.shale-test-sandbox" ] ||
     guard_trip 'HOME holds no .shale-test-sandbox marker'
   [ "$home" != "$REAL_HOME" ] || guard_trip 'HOME is the real home directory'
@@ -344,45 +408,80 @@ require_sandbox() {
 # $(...) exits only the substitution, and a caller would carry on with an empty
 # path.
 #
-# The first uncovered class, which cannot be guarded without regress, is the
-# guard's own diagnostic channel: guard-tripped, failure, skip and transcript,
-# written unguarded by guard_trip, fail, skip and the guard cases' own
-# 2>>$CASE_DIR/transcript redirections.  run_case creates all four as regular
-# files in the directory it has just made empty, so the directory is proven,
-# none of them is anything but a regular file when the case starts, and a case
-# that tries to plant something there finds that file in the way.  The fallback
-# sentinel at $TEST_ROOT is the same claim one directory up, established by
-# mktemp -d.  What is left is a case that removes one of them first and puts its
-# own file there:
+# The first uncovered class is the guard's own diagnostic channel: guard-tripped,
+# failure, transcript and skip.  No proof can be made to hold at the moment they
+# are written, because they are how a violation is reported and a proof that
+# tripped would have nothing left to report through; and the first three
+# accumulate, so noclobber has nothing to say about them either - it does not
+# apply to an append, and unlinking before each one would throw away what the
+# append before it wrote.
 #
-#   skip           closed: it unlinks the name before writing, so a planted
-#                  symlink is dropped rather than followed, and the write that
-#                  follows is under O_EXCL like every other create here
-#   failure        loud: victim appended, its content quoted into the report
-#   guard-tripped  loud: victim appended, its content printed to stderr, and the
-#                  fallback at $TEST_ROOT is exposed the same way
-#   transcript     three routes and only the first is caught.  A symlink is
-#                  refused by run_shale's re-proof, which is the weak mode.  A
-#                  hardlink is not seen at all and is silent: every invocation
-#                  is appended to the victim and the run stays green.  A fifo
-#                  with a reader attached is silent too - the append does not
-#                  block, and the transcript leaves the test root; with no
-#                  reader it blocks for ever instead.  report_failure quotes
-#                  whatever is there either way
+# They are not proven, then.  They are opened.  run_case creates each of the
+# first three with '>', which under noclobber is O_CREAT|O_EXCL, so refusing
+# anything already at the name and handing back the descriptor are one operation
+# with no window between them, and holds that descriptor - 7 for guard-tripped, 8
+# for failure, 9 for the transcript - for the life of the case.  Every write to
+# them afterwards goes to the descriptor, and nothing that writes to them names
+# them again, so a case that unlinks one and puts its own file there has nothing
+# left to intercept: the append lands in the file run_case made.  Both silent
+# routes reproduced in #51 - a hardlink to a file outside the test root, and a
+# fifo with a reader attached, each of which carried a whole transcript out with
+# the run reporting 0 failed - are closed by that and by nothing weaker.  The
+# fallback sentinel at $TEST_ROOT is the same arrangement one directory up, on
+# descriptor 6, in a directory mktemp -d had just made.
 #
-# The three that remain all accumulate through '>>', which is why skip's remedy
-# does not travel: noclobber has nothing to say about an append, and unlinking
-# before each one would throw away what the append before it wrote.  Closing them
-# needs a mechanism this file does not have.
+# skip needs no descriptor: it writes once and exits.  It unlinks its name first,
+# so a planted symlink is dropped rather than followed, and the create that
+# follows is under O_EXCL like every other one here.
 #
-# A fifo at failure or guard-tripped blocks the write for ever with no reader,
-# and skip's leaf blocks a read as well: a case that leaves a fifo at
-# $CASE_DIR/skip and exits 77 without ever calling skip blocks run_case's own
-# 'reason=$(cat ...)', in the main shell, after the case subshell has already
-# gone.  Removing a file the harness created is a deliberate act, and the same
-# one that would let a case write anywhere with a bare printf; nothing short of
-# proving an inode closes the three appends, and no primitive here can do that
-# without stat.
+# Two writers still use the names, and both are meant to.  A guard case points
+# CASE_DIR at a rig it built and asserts on the files there, so fail and
+# guard_trip append by name whenever CASE_DIR is not the directory the
+# descriptors were opened on; the main shell is the same question with the same
+# answer, its CASE_DIR being the test root.  Neither is guarded and neither needs
+# to be - the rig is a directory the case made inside its own sandbox - but it is
+# why channels_are_mine exists rather than the writers simply using the fd.
+#
+# What a descriptor cannot say is whether the file still at the name is the file
+# it holds, and everything that *reads* a channel has only the name: run_case's
+# and require_sandbox's -s tests, report_failure, guard_abort.  A case that
+# replaces a leaf and then has a trip or an assertion swallowed by a command
+# substitution has moved no byte out of the test root, but those tests then read
+# the replacement rather than the file the write went to.  run_case closes the
+# crude form of it after the case, by requiring all four leaves to still be
+# regular files at their names: that catches a removal and every file type but
+# the one, and it is also what stops the harness ever opening a fifo left at one
+# of them, which is how a fifo at $CASE_DIR/skip used to block run_case's own
+# 'cat' for ever with the case subshell long gone.
+#
+# The one is a hardlink to an empty file: a regular file at the name, and one
+# that answers no to -s.  It costs a report at two of the leaves, not one.  At
+# guard-tripped a swallowed trip goes unreported, and at failure a swallowed
+# assertion does - both reproduced, both a pass here where the by-name append
+# was a GUARD and a FAIL with the assertion quoted.  Nothing leaves the test root
+# either way, which is the trade; telling that file from the one the descriptor
+# holds needs an inode identity nothing here can prove without stat.
+#
+# One route is neither opened nor closed by any of this and behaves identically
+# before and after: a case that repoints CASE_DIR itself rather than planting at
+# a name, whose sentinel is then written wherever it has said, outside the test
+# root included, with the run reporting ok.  That is the by-name fallback above
+# doing exactly what it is for, and no claim here covers it - a case that assigns
+# CASE_DIR has taken the channel with it, which is the same latitude it has to
+# write under $HOME with a raw printf.
+#
+# The trade runs the other way too, and this closed two routes while opening a
+# third.  A case body owns these descriptors as much as the harness does and can
+# take one away: 'exec 8>&-' and then a fail inside a command substitution is
+# reported here as a pass, where the by-name append recreated the file and
+# run_case caught it - reproduced both ways round.  Redirecting 7 somewhere else
+# hides a swallowed trip in the same way, as does closing 7 and 6 together;
+# closing 7 on its own does not, the failed write falling through to the fallback
+# sentinel, which is the one place this is stronger than it looks.  Closing 9
+# costs transcript entries and nothing else.  All of it is the class the hardlink
+# is in - a case dismantling what reports on it - and none of it is closed,
+# because nothing a file can be phrased to say stops a case from writing its own
+# 'exec'.
 #
 # The second is the rigs the guard cases build under $CASE_DIR/trip: they are
 # the input being proven against, so they go in with plain mkdir, ln and printf.
@@ -405,8 +504,9 @@ sandbox_path=
 sandbox_resolve() {
   local dir=$1 resolved
   resolved=$(cd -- "$dir" 2>/dev/null && pwd -P) ||
-    guard_trip "path does not resolve to a directory: $dir"
-  [ -n "$resolved" ] || guard_trip "path does not resolve to a directory: $dir"
+    guard_trip_unresolved "path does not resolve to a directory: $dir"
+  [ -n "$resolved" ] ||
+    guard_trip_unresolved "path does not resolve to a directory: $dir"
   case "$resolved" in
     "$TEST_ROOT" | "$TEST_ROOT"/*) ;;
     *) guard_trip "path resolves outside the test root: $dir -> $resolved" ;;
@@ -475,7 +575,7 @@ sandbox_mkdir() {
     case "$dir" in
       # Both are directories on any system this can run on, so reaching either
       # without -d having been true means the walk cannot terminate.
-      / | .) guard_trip "path does not resolve to a directory: $1" ;;
+      / | .) guard_trip_unresolved "path does not resolve to a directory: $1" ;;
       */*)
         pending=${dir##*/}${pending:+/}$pending
         dir=${dir%/*}
@@ -625,7 +725,7 @@ shale() {
 # containment proof for either lives; the transcript records them like any other
 # argument, so what ran is what the report shows.
 run_shale() {
-  local n out err transcript
+  local n out err
   SHALE_RUNS=$((SHALE_RUNS + 1))
   n=$SHALE_RUNS
   # All three leaves are proven before shale runs, not one at a time as each is
@@ -633,10 +733,11 @@ run_shale() {
   # rather than have the first two writes land and the third refuse.
   #
   # The capture files are fresh names in a directory run_case made, so nothing
-  # may exist at either.  The transcript is the one run_case created, so it must
-  # exist; the up-front proof is what stops the run before shale does anything,
-  # and it is re-proven below because shale's whole job is creating symlinks and
-  # the invocation sits inside this check-to-write window.
+  # may exist at either.  The transcript is descriptor 9 and no longer decided by
+  # its name, so neither proof of it now says where the bytes go; both stay
+  # because a symlink appearing at that name means something planted it, and the
+  # loud refusal that follows is worth more than carrying on regardless.  The
+  # second is after the invocation because shale's whole job is creating symlinks.
   #
   # The capture files get no re-proof, and one would not buy what it looks like
   # it buys: a plant that lands in the window and is then withdrawn - which is
@@ -655,14 +756,18 @@ run_shale() {
   shale_out=$(cat "$out")
   shale_err=$(cat "$err")
   sandbox_leaf "$CASE_DIR" transcript
-  transcript=$sandbox_path
-  {
-    printf -- '--- shale %s -> exit %s\n' "$*" "$shale_status"
-    printf -- '    stdout:\n'
-    sed 's/^/      /' "$out"
-    printf -- '    stderr:\n'
-    sed 's/^/      /' "$err"
-  } >>"$transcript"
+  transcript_dump "$*" "$shale_status" "$out" "$err" >&9
+}
+
+# The transcript entry for one invocation, on stdout so that the one redirection
+# to descriptor 9 sits at the call site rather than being repeated per line.
+transcript_dump() {
+  local args=$1 status=$2 out=$3 err=$4
+  printf -- '--- shale %s -> exit %s\n' "$args" "$status"
+  printf -- '    stdout:\n'
+  sed 's/^/      /' "$out"
+  printf -- '    stderr:\n'
+  sed 's/^/      /' "$err"
 }
 
 # Runs a copy of this harness with extra cases appended, so the runner's own
@@ -6059,6 +6164,107 @@ EOF
   fi
 }
 
+# The three diagnostic channels are descriptors so that nothing planted at their
+# names can be written through, and that holds only while nothing opens one of
+# those names to write to it.  Seven lines may, and each is here with the reason
+# it is not a channel write that has gone back to being a path - which is the
+# regression this exists for, and which fails the way the whole arrangement is
+# meant to stop it failing: silently, and only once some case plants something.
+#
+# Matched by text *and counted*, exactly as the wrapper case counts its own
+# allow-list.  Text alone says a line of that shape may appear, which is not the
+# claim: a second writer whose body is character-identical to a listed one passed
+# under the first draft of this, which is the opposite of what it is for.
+#
+# What the pattern reaches: a redirection, in any of '>', '>>', '>|' and with a
+# descriptor number in front, whose target either starts at one of the three
+# directory variables - so a leaf held in a variable is still a hit - or ends in
+# one of the three channel names, so a directory held in a variable is too.  Plus
+# 'tee', which appends to a name with no redirection in sight.
+#
+# What it does not reach, and no grep will: any other command handed the path,
+# 'dd of=' and 'cp' included; a path where neither the directory nor the leaf is
+# written literally; and a case body that closes or redirects one of the
+# descriptors, which is a different hole and is described at "guarded writes".
+# Reads are all by name and always were, and the same block says what that
+# leaves open.  The names below are built from variables so that this case's own
+# lines are not hits for its own pattern.
+test_meta_diagnostic_channels_are_written_through_descriptors() {
+  local gt fl tr nl bar into leafname opener pattern allowed counts
+  local hits line trimmed offenders i seen
+  # Quoted: an unquoted 'guard-tripped' reads as arithmetic to shellcheck.
+  gt='guard-tripped'
+  fl=failure
+  tr=transcript
+  nl='
+'
+  # '[{]' rather than '\{': POSIX leaves a backslashed brace undefined in an ERE
+  # and the macOS runner's grep is the one that would decide, where a bracket
+  # expression is defined in both.
+  # Split out of the pattern below so that the two characters of a noclobber
+  # override are never adjacent in this file's source: written together they are
+  # a hit for the allow-list case above, which is not what this line is.
+  bar='|'
+  into="\\\$[{]?(CASE_DIR|TEST_ROOT|case_dir)[}]?\"?/"
+  leafname="[^\"[:space:];&|]*/($gt|$fl|$tr)\"?"
+  opener="([0-9]*>[>$bar]?|(^|[[:space:]]|[;&|(])tee([[:space:]]+-[^[:space:]]+)*)[[:space:]]*\"?"
+  pattern="$opener($into|$leafname)"
+  allowed=(
+    # The fallback sentinel's create, which is also where its descriptor is taken.
+    "exec 6>\"\$TEST_ROOT/$gt\" || exit 1"
+    # The by-name branch of each writer: where a guard case's deliberate trips go
+    # when it has pointed CASE_DIR at a rig it built and asserts on itself.
+    "printf '%s\\n' \"\$1\" >>\"\$CASE_DIR/$gt\""
+    "printf '%s\\n' \"\$1\" >>\"\$TEST_ROOT/$gt\""
+    "printf '%s\\n' \"\$@\" >>\"\$CASE_DIR/$fl\""
+    # skip writes once and exits, so it has no descriptor to write through.
+    "printf '%s\\n' \"\${1-no reason given}\" >\"\$CASE_DIR/skip\""
+    # Both inside probe heredocs: an inner suite's case body writing its own
+    # files, which is a case doing what any case may, not the harness.
+    "exec 5>\"\$CASE_DIR/\$leaf\" || fail \"could not open a writer on \$leaf\""
+    ": >\"\$CASE_DIR/require-sandbox-called\""
+  )
+  counts=()
+  i=0
+  while [ "$i" -lt "${#allowed[@]}" ]; do
+    counts[i]=0
+    i=$((i + 1))
+  done
+  offenders=
+  # Full-line comments are blanked, as in the cases above, so the prose that
+  # describes the arrangement is not read as a use of it.
+  hits=$(sed 's/^[[:space:]]*#.*//' "$SELF" | grep -nE "$pattern")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    trimmed=${line#*:}
+    trimmed=${trimmed#"${trimmed%%[![:space:]]*}"}
+    seen=0
+    i=0
+    while [ "$i" -lt "${#allowed[@]}" ]; do
+      if [ "$trimmed" = "${allowed[$i]}" ]; then
+        counts[i]=$((counts[i] + 1))
+        seen=1
+        break
+      fi
+      i=$((i + 1))
+    done
+    [ "$seen" -eq 1 ] || offenders="$offenders$line$nl"
+  done <<EOF
+$hits
+EOF
+  if [ -n "$offenders" ]; then
+    fail 'these lines write a diagnostic channel by name rather than through its descriptor:' \
+      "$offenders"
+  fi
+  i=0
+  while [ "$i" -lt "${#allowed[@]}" ]; do
+    [ "${counts[$i]}" -eq 1 ] ||
+      fail "an allow-listed line appears ${counts[$i]} times, and exactly one is allowed:" \
+        "${allowed[$i]}"
+    i=$((i + 1))
+  done
+}
+
 # A case that reaches the script by any route other than the wrapper skips
 # require_sandbox entirely.  Every line naming the script - as $SHALE or as
 # $REPO_ROOT/shale - is checked against the shapes that mean "this line can run
@@ -6288,6 +6494,10 @@ test_meta_harness_shellcheck_is_clean() {
 # scratch directory, so the sentinel a trip writes does not abort the run.
 # Nothing here ever points HOME at a directory outside the sandbox: if the guard
 # failed to fire, the worst that runs is shale against a temp directory.
+#
+# '2>&9' on those subshells is the case's transcript, which run_case opened as a
+# descriptor: the deliberate trip's stderr is kept for the failure report, and
+# the redirection cannot be pointed anywhere by anything left at that name.
 
 test_meta_guard_requires_the_marker_file() {
   local trip status
@@ -6299,7 +6509,7 @@ test_meta_guard_requires_the_marker_file() {
     HOME=$trip/unmarked
     export HOME
     shale build
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 99 "$status" 'guard'
   assert_exists "$trip/guard-tripped" 'guard sentinel'
 }
@@ -6313,7 +6523,7 @@ test_meta_guard_rejects_an_unset_home() {
     CASE_DIR=$trip
     unset HOME
     shale build
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 99 "$status" 'guard'
   assert_exists "$trip/guard-tripped" 'guard sentinel'
 }
@@ -6327,7 +6537,7 @@ test_meta_guard_rejects_the_real_home() {
     CASE_DIR=$trip
     REAL_HOME=$HOME
     shale build
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 99 "$status" 'guard'
   assert_exists "$trip/guard-tripped" 'guard sentinel'
 }
@@ -6341,7 +6551,7 @@ test_meta_guard_rejects_a_home_outside_the_test_root() {
     CASE_DIR=$trip
     TEST_ROOT=$trip/elsewhere
     shale build
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 99 "$status" 'guard'
   assert_exists "$trip/guard-tripped" 'guard sentinel'
 }
@@ -6361,7 +6571,7 @@ test_meta_guard_resolves_dot_dot_before_comparing() {
     HOME=$trip/root/sub/../../outside
     export HOME
     shale build
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 99 "$status" 'guard'
   assert_exists "$trip/guard-tripped" 'guard sentinel'
 }
@@ -6381,7 +6591,7 @@ test_meta_guard_resolves_symlinks_before_comparing() {
     HOME=$trip/root/link
     export HOME
     shale build
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 99 "$status" 'guard'
   assert_exists "$trip/guard-tripped" 'guard sentinel'
 }
@@ -6403,7 +6613,7 @@ test_meta_guard_covers_the_fixtures() {
         conf) conf 'base personal/base' ;;
         mklayer) mklayer personal/base .zshrc ;;
       esac
-    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    ) >/dev/null 2>&9 || status=$?
     assert_status 99 "$status" "$helper guard"
     assert_exists "$trip/guard-tripped" "$helper guard sentinel"
     assert_missing "$trip/unmarked/.dotfiles" "$helper wrote into an unguarded HOME"
@@ -6434,7 +6644,7 @@ test_meta_guard_rejects_a_symlinked_fixture_path() {
         conf) conf 'base personal/base' ;;
         mklayer) mklayer personal/base .zshrc ;;
       esac
-    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    ) >/dev/null 2>&9 || status=$?
     assert_status 99 "$status" "$helper guard"
     assert_exists "$trip/guard-tripped" "$helper guard sentinel"
     assert_eq 'PRECIOUS' "$(cat "$trip/decoy/.dotfiles/shale.conf")" \
@@ -6471,7 +6681,7 @@ test_meta_guard_refuses_to_mkdir_through_a_symlinked_directory() {
       HOME=$trip/root/home
       export HOME
       mklayer personal/base .zshrc
-    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    ) >/dev/null 2>&9 || status=$?
     assert_status 99 "$status" "$link guard"
     assert_exists "$trip/guard-tripped" "$link guard sentinel"
     assert_empty "$(ls -A "$trip/decoy")" "$link: what landed inside the decoy"
@@ -6509,7 +6719,7 @@ test_meta_guard_rejects_a_symlinked_write_target() {
         conf) conf 'base personal/base' ;;
         mklayer) mklayer personal/base .zshrc ;;
       esac
-    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    ) >/dev/null 2>&9 || status=$?
     assert_status 99 "$status" "$helper guard"
     assert_exists "$trip/guard-tripped" "$helper guard sentinel"
     assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$helper: the decoy file"
@@ -6535,7 +6745,7 @@ test_meta_sandbox_write_replaces_the_name_not_the_inode() {
     HOME=$trip/root/home
     export HOME
     sandbox_write "$trip/root/home" hardlink 'REPLACED'
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 0 "$status" 'sandbox_write'
   assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" 'the decoy file'
   assert_eq 'REPLACED' "$(cat "$trip/root/home/hardlink")" 'the file that was written'
@@ -6565,7 +6775,7 @@ test_meta_noclobber_refuses_a_write_planted_after_the_check() {
     sandbox_leaf "$trip/root/case" planted new
     ln -s "$trip/decoy/target" "$sandbox_path" || exit 3
     printf 'CLOBBERED\n' >"$sandbox_path"
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 1 "$status" 'the write after the plant'
   assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" 'the decoy file'
 }
@@ -6590,7 +6800,7 @@ test_meta_sandbox_leaf_returns_the_resolved_path() {
     sandbox_leaf "$trip/root/sub/link/.." target
     printf '%s\n' "$sandbox_path" >"$trip/returned"
     printf 'CLOBBERED\n' >"$sandbox_path"
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 0 "$status" 'sandbox_leaf'
   returned=$(cat "$trip/returned" 2>/dev/null)
   assert_eq "$trip/root/sub/target" "$returned" 'sandbox_path'
@@ -6625,7 +6835,7 @@ test_meta_guard_refuses_an_existing_capture_file() {
       (
         CASE_DIR=$trip
         run_shale build
-      ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+      ) >/dev/null 2>&9 || status=$?
       assert_status 99 "$status" "$label guard"
       assert_exists "$trip/guard-tripped" "$label guard sentinel"
       assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$label: the decoy file"
@@ -6659,7 +6869,7 @@ test_meta_guard_rejects_a_symlinked_transcript() {
         }
       fi
       run_shale build
-    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    ) >/dev/null 2>&9 || status=$?
     assert_status 99 "$status" "$when guard"
     assert_exists "$trip/guard-tripped" "$when guard sentinel"
     assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$when: the decoy file"
@@ -6690,7 +6900,7 @@ test_meta_guard_rejects_a_script_that_is_not_a_regular_file() {
     (
       CASE_DIR=$trip
       shale --script "$spelling" doctor
-    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    ) >/dev/null 2>&9 || status=$?
     assert_status 99 "$status" "$spelling guard"
     assert_exists "$trip/guard-tripped" "$spelling guard sentinel"
   done
@@ -6712,7 +6922,7 @@ test_meta_guard_rejects_unsearchable_combined_with_script() {
   (
     CASE_DIR=$trip
     shale --unsearchable "$HOME" --script no-such-script doctor
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 99 "$status" 'the guard'
   assert_exists "$trip/guard-tripped" 'the guard sentinel'
   [ -x "$HOME" ] || fail "the refusal left $HOME unsearchable: $(ls -ld "$HOME")"
@@ -6728,7 +6938,7 @@ test_meta_sandbox_leaf_refuses_an_unknown_mode() {
   (
     CASE_DIR=$trip
     sandbox_leaf "$trip" target nwe
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 99 "$status" 'guard'
   assert_contains "$(cat "$trip/guard-tripped")" 'unknown mode' 'sentinel'
 }
@@ -6750,7 +6960,7 @@ test_meta_sandbox_leaf_refuses_a_leaf_that_is_not_one_component() {
       TEST_ROOT=$trip/root
       sandbox_leaf "$trip/root/case" "$leaf"
       printf 'CLOBBERED\n' >"$sandbox_path"
-    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    ) >/dev/null 2>&9 || status=$?
     assert_status 99 "$status" "'$leaf' guard"
     assert_contains "$(cat "$trip/guard-tripped" 2>/dev/null)" \
       'single path component' "'$leaf' sentinel"
@@ -6766,7 +6976,7 @@ test_meta_sandbox_leaf_refuses_a_leaf_that_is_not_one_component() {
     TEST_ROOT=$trip/root
     sandbox_leaf "$trip/root/case" '../../decoy/created' new
     printf 'CREATED\n' >"$sandbox_path"
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 99 "$status" 'new mode guard'
   assert_missing "$trip/decoy/created" 'a file created outside the root'
   # And the whole thing is reachable through the top-level write helper.
@@ -6782,7 +6992,7 @@ test_meta_sandbox_leaf_refuses_a_leaf_that_is_not_one_component() {
     HOME=$trip/root/home
     export HOME
     sandbox_write "$trip/root/case" '../../decoy/target' 'CLOBBERED'
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 99 "$status" 'sandbox_write guard'
   assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" 'sandbox_write: the decoy file'
 }
@@ -6812,7 +7022,7 @@ test_meta_runner_refuses_an_existing_case_directory() {
     (
       CASE_DIR=$trip
       run_case true "$trip/rig"
-    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    ) >/dev/null 2>&9 || status=$?
     assert_status 99 "$status" "$kind guard"
     assert_exists "$trip/guard-tripped" "$kind guard sentinel"
     assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$kind: the decoy file"
@@ -6820,9 +7030,10 @@ test_meta_runner_refuses_an_existing_case_directory() {
   done
 }
 
-# Creating them, not merely proving them, is what protects the unguarded appends
-# in fail, skip and guard_trip: a case body that tries to plant a symlink at one
-# of those names finds a regular file already there and ln refuses.
+# Creating them, not merely proving them, is what the descriptors are taken from
+# - the create and the open are one redirection - and it is also what skip has
+# instead of one: a case body that tries to plant a symlink at any of the four
+# finds a regular file already there and ln refuses.
 test_meta_runner_pre_creates_the_diagnostic_leaves() {
   local leaf
   for leaf in failure transcript skip guard-tripped; do
@@ -6860,11 +7071,167 @@ test_meta_skip_replaces_its_leaf_rather_than_writing_through_it() {
   (
     CASE_DIR=$trip
     skip 'the probe skipped on purpose'
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 77 "$status" 'skip'
   assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" 'the decoy file'
   [ ! -L "$trip/skip" ] || fail 'skip wrote through the symlink instead of replacing it'
   assert_eq 'the probe skipped on purpose' "$(cat "$trip/skip")" 'the skip reason'
+}
+
+# Builds the rig the four channel cases share and leaves the probe file in
+# channel_probe.  The victim goes in $CASE_DIR/inner/tmp, which is where
+# run_inner_suite points the inner suite's TMPDIR: a file there is one directory
+# above everything the inner run may write, so it is outside that run's test root
+# while staying inside this one's, and a probe reaches it as $TEST_ROOT/../victim.
+# The plant kind travels the same way rather than being interpolated, so hardlink
+# and fifo run the same probe text and any difference in outcome is the harness's.
+channel_probe_rig() {
+  local kind=$1
+  sandbox_write "$CASE_DIR/inner/tmp" victim
+  sandbox_write "$CASE_DIR/inner/tmp" plant "$kind"
+  sandbox_leaf "$CASE_DIR" probe-channels.sh new
+  cat >"$sandbox_path" <<'PROBE' || fail "could not write $sandbox_path"
+# Replaces one diagnostic leaf with something that used to carry the harness's
+# own appends out of the test root, then makes the harness write to that channel.
+# The victim is empty and has to stay empty: where the write goes now is the
+# inode run_case opened, which this rm took the last name off.
+channel_plant() {
+  local leaf=$1 kind victim
+  victim=$TEST_ROOT/../victim
+  kind=$(cat "$TEST_ROOT/../plant")
+  rm -f "$CASE_DIR/$leaf" || fail "could not remove $leaf"
+  case "$kind" in
+    hardlink)
+      ln "$victim" "$CASE_DIR/$leaf" || fail "could not hardlink $leaf"
+      ;;
+    fifo)
+      mkfifo "$CASE_DIR/$leaf" || fail "could not plant a fifo at $leaf"
+      # With nothing reading it an append to a fifo blocks, which is loud.  A
+      # reader is what makes the append return, and that is the shape that was
+      # silent: 385 bytes of transcript left the test root and the run said ok.
+      # Its stdout is the victim and its stderr is discarded, so it holds no end
+      # of the pipe the outer case reads this run through.
+      cat <"$CASE_DIR/$leaf" >>"$victim" 2>/dev/null &
+      CHANNEL_READER=$!
+      # A writer of this probe's own, opened after the reader exists so that the
+      # open returns, and held until channel_reap.  Without it an append by the
+      # harness would open and close the fifo, the reader would see EOF and exit,
+      # and whether it had copied to the victim before the probe stopped it would
+      # be a race - which the case loses by passing.  Held, the reader can only
+      # end when this closes, and it drains the pipe before it does.
+      exec 5>"$CASE_DIR/$leaf" || fail "could not open a writer on $leaf"
+      ;;
+    *) fail "unknown plant kind: $kind" ;;
+  esac
+  # Two of the three probes reach their channel by failing or by tripping and
+  # never return, so the reader is ended on the way out rather than at the end of
+  # the probe.  Left alive it would block for ever on a fifo whose only other end
+  # went with the case.
+  #
+  # The signals matter as much as EXIT: an asynchronous child of a
+  # non-interactive shell has SIGINT ignored and cannot be given it back, so a
+  # Ctrl-C here reaches the harness and not the reader, which then survives
+  # inside a sandbox the abort has just decided to keep.  Each of these ends the
+  # case rather than returning to it, and the exit runs the EXIT trap in turn -
+  # channel_reap is idempotent, which is what makes that harmless.
+  trap channel_reap EXIT
+  trap 'channel_reap; exit 130' INT
+  trap 'channel_reap; exit 143' TERM
+  trap 'channel_reap; exit 129' HUP
+}
+
+channel_reap() {
+  [ -n "${CHANNEL_READER-}" ] || return 0
+  exec 5>&-
+  wait "$CHANNEL_READER" 2>/dev/null
+  CHANNEL_READER=
+  return 0
+}
+
+test_probe_channel_1_transcript() {
+  channel_plant transcript
+  run_shale doctor
+  channel_reap
+}
+
+test_probe_channel_2_failure() {
+  channel_plant failure
+  fail 'the probe failed on purpose'
+}
+
+test_probe_channel_3_guard() {
+  channel_plant guard-tripped
+  HOME=$CASE_DIR/unmarked
+  export HOME
+  mkdir -p "$HOME" || fail 'could not create the unmarked home'
+  shale build
+}
+PROBE
+  channel_probe=$sandbox_path
+}
+
+# #51: guard_trip, fail and the transcript were reopened by name at every write,
+# and noclobber says nothing about an append, so a case that unlinked one of
+# those names and put a hardlink there sent the harness's own diagnostics into a
+# file outside the test root - reproduced, exit 0, '1 passed, 0 failed'.  They are
+# descriptors now and the name is never opened again.
+#
+# The three fit in one inner run because a hardlink is still a regular file at
+# the name, so run_case's after-the-case check passes it and each probe produces
+# the reporting its channel is for: the transcript probe passes, the failure
+# probe fails, the sentinel probe aborts the run.
+test_meta_channel_writes_do_not_follow_a_hardlinked_leaf() {
+  channel_probe_rig hardlink
+  run_inner_suite probe_channel_ "$channel_probe"
+  assert_status 99 "$inner_status" 'inner suite'
+  assert_contains "$inner_out" 'ok    test_probe_channel_1_transcript' 'inner suite output'
+  assert_contains "$inner_out" 'FAIL  test_probe_channel_2_failure' 'inner suite output'
+  assert_contains "$inner_out" 'GUARD test_probe_channel_3_guard' 'inner suite output'
+  assert_exists "$CASE_DIR/inner/tmp/victim" 'the file outside the inner test root'
+  assert_empty "$(cat "$CASE_DIR/inner/tmp/victim")" \
+    'the file outside the inner test root'
+}
+
+# The other half of #51, and the one the old header denied: it said a fifo blocks
+# the write for ever, which is true only with no reader.  With one attached the
+# append returned and the transcript left the test root.
+#
+# One channel per inner run here, where the hardlink took three: a fifo is not a
+# regular file, so run_case's after-the-case check aborts on the first probe that
+# plants one and nothing after it would run.  That abort is half of what is being
+# asserted - the write went to the descriptor, and the leaf that can no longer be
+# read is reported rather than passed over.
+test_meta_channel_writes_do_not_follow_a_fifo_at_the_transcript() {
+  command -v mkfifo >/dev/null 2>&1 || skip 'mkfifo is not available'
+  channel_probe_rig fifo
+  run_inner_suite probe_channel_1_transcript "$channel_probe"
+  assert_status 99 "$inner_status" 'inner suite'
+  assert_contains "$inner_out" 'GUARD test_probe_channel_1_transcript' 'inner suite output'
+  assert_exists "$CASE_DIR/inner/tmp/victim" 'the file outside the inner test root'
+  assert_empty "$(cat "$CASE_DIR/inner/tmp/victim")" \
+    'the file outside the inner test root'
+}
+
+test_meta_channel_writes_do_not_follow_a_fifo_at_the_failure_leaf() {
+  command -v mkfifo >/dev/null 2>&1 || skip 'mkfifo is not available'
+  channel_probe_rig fifo
+  run_inner_suite probe_channel_2_failure "$channel_probe"
+  assert_status 99 "$inner_status" 'inner suite'
+  assert_contains "$inner_out" 'GUARD test_probe_channel_2_failure' 'inner suite output'
+  assert_exists "$CASE_DIR/inner/tmp/victim" 'the file outside the inner test root'
+  assert_empty "$(cat "$CASE_DIR/inner/tmp/victim")" \
+    'the file outside the inner test root'
+}
+
+test_meta_channel_writes_do_not_follow_a_fifo_at_the_guard_sentinel() {
+  command -v mkfifo >/dev/null 2>&1 || skip 'mkfifo is not available'
+  channel_probe_rig fifo
+  run_inner_suite probe_channel_3_guard "$channel_probe"
+  assert_status 99 "$inner_status" 'inner suite'
+  assert_contains "$inner_out" 'GUARD test_probe_channel_3_guard' 'inner suite output'
+  assert_exists "$CASE_DIR/inner/tmp/victim" 'the file outside the inner test root'
+  assert_empty "$(cat "$CASE_DIR/inner/tmp/victim")" \
+    'the file outside the inner test root'
 }
 
 # A trip that was swallowed must stop the case, not just the run: by the time
@@ -6886,7 +7253,7 @@ test_meta_guard_refuses_after_a_swallowed_trip() {
     HOME=$home_ok
     export HOME
     shale build
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   assert_status 99 "$status" 'the call after a swallowed trip'
   assert_contains "$(cat "$trip/guard-tripped")" 'swallowed' 'sentinel'
 }
@@ -6908,7 +7275,7 @@ test_meta_guard_falls_back_to_a_sentinel_at_the_test_root() {
     HOME=$trip/root/home
     export HOME
     conf 'base personal/base'
-  ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+  ) >/dev/null 2>&9 || status=$?
   chmod 0755 "$trip/unwritable" || fail 'could not restore the write bit'
   assert_status 99 "$status" 'guard'
   assert_missing "$trip/unwritable/guard-tripped" 'primary sentinel'
@@ -7184,7 +7551,7 @@ test_meta_inner_suite_refuses_an_existing_file() {
     (
       CASE_DIR=$trip
       run_inner_suite usage_bare_prints /dev/null
-    ) >/dev/null 2>>"$CASE_DIR/transcript" || status=$?
+    ) >/dev/null 2>&9 || status=$?
     assert_status 99 "$status" "$leaf guard"
     assert_exists "$trip/guard-tripped" "$leaf guard sentinel"
     assert_eq 'PRECIOUS' "$(cat "$trip/decoy/target")" "$leaf: the decoy file"
@@ -7234,17 +7601,23 @@ report_failure() {
 # Must not return: run_all has no abort check, so a guard trip that got this far
 # and then carried on would let the rest of the suite run and report.
 guard_abort() {
-  local name=$1 case_dir=$2
+  local name=$1 case_dir=$2 reason=${3-}
   FAILED=$((FAILED + 1))
   ABORTED=1
   printf 'GUARD %s\n' "$name"
-  if [ -s "$case_dir/guard-tripped" ]; then
+  # For a caller whose reason cannot be in the sentinel: the leaf check below
+  # fires on a case that removed guard-tripped, and writing the reason to the
+  # descriptor would put it in an inode with no name for the read here to find.
+  [ -z "$reason" ] || printf 'tests: %s\n' "$reason" >&2
+  # -f as well as -s on all three, because -s is true of a directory and sed on
+  # one prints a read error where the diagnostic should have been.
+  if [ -f "$case_dir/guard-tripped" ] && [ -s "$case_dir/guard-tripped" ]; then
     sed 's/^/tests: /' "$case_dir/guard-tripped" >&2
   fi
-  if [ -s "$TEST_ROOT/guard-tripped" ]; then
+  if [ -f "$TEST_ROOT/guard-tripped" ] && [ -s "$TEST_ROOT/guard-tripped" ]; then
     sed 's/^/tests: (fallback sentinel) /' "$TEST_ROOT/guard-tripped" >&2
   fi
-  if [ -s "$case_dir/stderr" ]; then
+  if [ -f "$case_dir/stderr" ] && [ -s "$case_dir/stderr" ]; then
     cat "$case_dir/stderr" >&2
   fi
   printf 'tests: the sandbox guard tripped; aborting the run\n' >&2
@@ -7271,14 +7644,22 @@ run_case() {
   # Everything below lands in a directory this function has just created empty,
   # so no 'new' check here can fire; they go through the primitive so that the
   # rule holds by construction rather than by an argument about the caller.  The
-  # four diagnostic leaves exist as regular files before the case body runs,
-  # which is what lets fail/skip/guard_trip append to them unguarded.
+  # four diagnostic leaves exist as regular files before the case body runs, and
+  # three of them are opened here and never named again - see "guarded writes".
+  # The descriptor is the create: '>' under noclobber refuses anything already at
+  # the name and yields the descriptor in one operation, which is what leaves no
+  # window for a plant between proving the name and opening it.
   sandbox_leaf "$case_home" .shale-test-sandbox new
   : >"$sandbox_path" || return 2
-  for leaf in failure transcript skip guard-tripped; do
-    sandbox_leaf "$case_dir" "$leaf" new
-    : >"$sandbox_path" || return 2
-  done
+  sandbox_leaf "$case_dir" skip new
+  : >"$sandbox_path" || return 2
+  sandbox_leaf "$case_dir" guard-tripped new
+  exec 7>"$sandbox_path" || return 2
+  sandbox_leaf "$case_dir" failure new
+  exec 8>"$sandbox_path" || return 2
+  sandbox_leaf "$case_dir" transcript new
+  exec 9>"$sandbox_path" || return 2
+  CHANNEL_DIR=$case_dir
   # Not pre-created: the redirection below is their only write, and it is the
   # proven path that is redirected to.
   sandbox_leaf "$case_dir" stdout new
@@ -7309,6 +7690,26 @@ run_case() {
     "$name"
   ) >"$case_out" 2>"$case_err" || status=$?
 
+  # Before every other check, because every one of them reads a leaf by name and
+  # this is the only thing that says the name is still the file this function
+  # made.  The writes go to descriptors and cannot be diverted, but a replaced
+  # leaf makes the reads answer for the replacement - and a fifo left at one
+  # makes them block: 'reason=$(cat "$case_dir/skip")' below hung here for ever,
+  # in the main shell, with the case subshell long gone.  Anything but a regular
+  # file at any of the four is the case tampering with what reports on it.
+  for leaf in failure transcript skip guard-tripped; do
+    if [ ! -f "$case_dir/$leaf" ] || [ -L "$case_dir/$leaf" ]; then
+      # A test root reaped from outside the run takes all four leaves at once,
+      # and the case did not do it - same claim as guard_trip_unresolved, on the
+      # one path that reaches this check without going through a resolve.
+      [ -d "$TEST_ROOT" ] ||
+        guard_abort "$name" "$case_dir" \
+          "the test root has gone from under the run: $TEST_ROOT"
+      guard_abort "$name" "$case_dir" \
+        "the case replaced its $leaf leaf: nothing here can be read"
+    fi
+  done
+
   # Both checks come before the status, because either signal raised inside a
   # command substitution kills only that subshell and leaves the case's own
   # status at 0.
@@ -7319,7 +7720,7 @@ run_case() {
   fi
   if [ "$status" -eq 0 ] && [ -s "$case_dir/failure" ]; then
     printf '%s\n' 'the assertion above was raised inside a command substitution;' \
-      'the case then carried on and returned 0' >>"$case_dir/failure"
+      'the case then carried on and returned 0' >&8
     status=1
   fi
 
@@ -7336,8 +7737,7 @@ run_case() {
 "
       ;;
     99)
-      printf '%s\n' 'a case exited 99 without tripping the guard' \
-        >>"$case_dir/guard-tripped"
+      printf '%s\n' 'a case exited 99 without tripping the guard' >&7
       guard_abort "$name" "$case_dir"
       ;;
     *)
