@@ -651,23 +651,36 @@ pad_right() {
 # kind.  Recorded rather than printed: the caller prints them all and exits.
 conflict() {
   local srel=$1 kind=$2 path=$3
-  local other_kind other_label other_path label i width
+  local other_kind other_label other_path label i width lpath lkind
   other_kind='file'
   if [ -d "$NEW/$srel" ] && [ ! -L "$NEW/$srel" ]; then
     other_kind='directory'
   fi
-  # Everything in the composed tree was put there by an earlier layer, so the
-  # highest one that provides this path is the one to name.  The fallback
-  # wording covers a layer tree that changed under the build.
+  # The kind is the composed tree's, so the layer named beside it must be one
+  # whose own copy is that kind: the highest layer below this one that provides
+  # the path *and agrees with the tree*.  A nearer provider of the other kind
+  # collided here itself and never landed, so naming it would put one layer's
+  # kind against another layer's path - and send someone to remove a layer that
+  # is not in this collision, which removing would not clear it.  With two
+  # layers there is only ever one provider below and the two readings coincide.
+  # The fallback wording covers a layer tree that changed under the build.
   other_label='the composed tree'
   other_path=$NEW/$srel
   i=$((SRC_INDEX - 1))
   while [ "$i" -ge 0 ]; do
-    if [ -e "$DOTFILES/${LAYER_PATHS[$i]}/$srel" ] ||
-      [ -L "$DOTFILES/${LAYER_PATHS[$i]}/$srel" ]; then
-      other_label="layer '${LAYER_NAMES[$i]}'"
-      other_path=$DOTFILES/${LAYER_PATHS[$i]}/$srel
-      break
+    lpath=$DOTFILES/${LAYER_PATHS[$i]}/$srel
+    if [ -e "$lpath" ] || [ -L "$lpath" ]; then
+      # The composer's own test, so a link to a directory is a file here as it
+      # is there.
+      lkind='file'
+      if [ -d "$lpath" ] && [ ! -L "$lpath" ]; then
+        lkind='directory'
+      fi
+      if [ "$lkind" = "$other_kind" ]; then
+        other_label="layer '${LAYER_NAMES[$i]}'"
+        other_path=$lpath
+        break
+      fi
     fi
     i=$((i - 1))
   done
