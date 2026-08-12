@@ -2227,6 +2227,155 @@ test_build_summarises_older_files_in_one_group_and_forgets_them_next_build() {
   assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
 }
 
+# -nt follows symlinks, so a link whose target a higher layer shadows puts two
+# different files on the two sides: current/zlink resolves through current/.zshrc
+# to local's copy, base/zlink to base's own.  Whichever of those is the older,
+# the guard fires - and it fires on every build for ever, because a rebuild
+# changes neither target's age.  Both orderings, because they are two arms and a
+# fix that skips one converts the defect rather than removing it.
+#
+# The two layer copies are dated rather than written in order: bash 3.2's -nt
+# compares whole seconds, so two writes inside one second would leave both arms
+# false and the case would pass having measured nothing.
+test_build_a_layer_symlink_shadowed_by_a_higher_layer_rebuilds_quietly() {
+  local pass base_date local_date i
+  for pass in older newer; do
+    case "$pass" in
+      older)
+        base_date=202601010000
+        local_date=202001010000
+        ;;
+      *)
+        base_date=202001010000
+        local_date=202601010000
+        ;;
+    esac
+    # The second pass starts from nothing: a current/ left by the first would be
+    # the previous build of a different fixture.
+    sandbox_mkdir "$HOME/.dotfiles"
+    rm -rf "$sandbox_dir/current" "$sandbox_dir/current.old" \
+      "$sandbox_dir/personal" "$sandbox_dir/local" ||
+      fail 'could not clear the previous pass'
+    conf 'base personal/base' 'local local'
+    mklayer personal/base .zshrc
+    mklayer local .zshrc
+    sandbox_mkdir "$HOME/.dotfiles/personal/base"
+    touch -t "$base_date" "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+    sandbox_leaf "$sandbox_dir" zlink new
+    ln -s .zshrc "$sandbox_path" || fail 'could not create the symlink'
+    sandbox_mkdir "$HOME/.dotfiles/local"
+    touch -t "$local_date" "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+    i=1
+    while [ "$i" -le 3 ]; do
+      run_shale build
+      assert_status 0 "$shale_status" "$pass build $i exit status"
+      assert_empty "$shale_err" "$pass build $i stderr"
+      assert_missing "$HOME/.dotfiles/current.old" "$pass build $i"
+      i=$((i + 1))
+    done
+    assert_symlink_to "$HOME/.dotfiles/current/zlink" \
+      "$HOME/.dotfiles/current/.zshrc" "$pass composed link"
+    assert_eq 'local/.zshrc' "$(cat "$HOME/.dotfiles/current/zlink")" \
+      "$pass through the composed link"
+  done
+}
+
+# Every shape a layer link can have, against a target the layer above shadows.
+# Only the relative one resolves apart, and it is therefore the only one that
+# fails without the skip: the absolute one and the one pointing out of the tree
+# name the same file from both sides, so neither arm fires either way, and -f
+# alone already excludes the dangling one and the one pointing at a directory.
+# The other four are here for the half of the claim the silence does not carry -
+# that skipping the comparison still leaves every shape composed as the link it
+# was - and it is the assertions at the end, not the empty stderr, that say so.
+test_build_compares_no_layer_symlink_whatever_its_shape() {
+  local base i
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer personal/base real/inside
+  mklayer local .zshrc
+  sandbox_write "$HOME/outside" thing 'OUTSIDE'
+  sandbox_mkdir "$HOME/outside"
+  touch -t 202601010000 "$sandbox_dir/thing" || fail 'could not date the outside file'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  base=$sandbox_dir
+  touch -t 202601010000 "$base/.zshrc" || fail 'could not date the layer file'
+  sandbox_leaf "$base" rel new
+  ln -s .zshrc "$sandbox_path" || fail 'could not create the relative link'
+  sandbox_leaf "$base" abs new
+  ln -s "$HOME/.dotfiles/personal/base/.zshrc" "$sandbox_path" ||
+    fail 'could not create the absolute link'
+  sandbox_leaf "$base" todir new
+  ln -s real "$sandbox_path" || fail 'could not create the directory link'
+  sandbox_leaf "$base" dangling new
+  ln -s nowhere "$sandbox_path" || fail 'could not create the dangling link'
+  sandbox_leaf "$base" outward new
+  ln -s "$HOME/outside/thing" "$sandbox_path" || fail 'could not create the outward link'
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  touch -t 202001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  i=1
+  while [ "$i" -le 3 ]; do
+    run_shale build
+    assert_status 0 "$shale_status" "build $i exit status"
+    assert_empty "$shale_err" "build $i stderr"
+    assert_missing "$HOME/.dotfiles/current.old" "build $i"
+    i=$((i + 1))
+  done
+  assert_symlink_to "$HOME/.dotfiles/current/rel" \
+    "$HOME/.dotfiles/current/.zshrc" 'the relative link'
+  assert_symlink_to "$HOME/.dotfiles/current/abs" \
+    "$HOME/.dotfiles/personal/base/.zshrc" 'the absolute link'
+  assert_symlink_to "$HOME/.dotfiles/current/todir" \
+    "$HOME/.dotfiles/current/real" 'the directory link'
+  assert_dangling_symlink "$HOME/.dotfiles/current/dangling" 'the dangling link'
+  assert_symlink_to "$HOME/.dotfiles/current/outward" \
+    "$HOME/outside/thing" 'the outward link'
+}
+
+# The three states where the two sides are not the same kind, which is what makes
+# testing only the built copy insufficient.  Each path is a regular file on one
+# side and a link on the other, and each fires a different arm: the built link
+# resolving newer than the layer's plain file reports the tree as edited, the
+# layer's link resolving newer than the built plain file reports it as adopted,
+# and the layer's dangling link reports it as edited because -nt is true outright
+# when its second operand does not exist.
+test_build_compares_nothing_at_a_path_that_changes_between_a_file_and_a_link() {
+  local base
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base tolink 'PLAIN'
+  mklayer personal/base todangling 'PLAIN'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  base=$sandbox_dir
+  touch -t 202601010000 "$base/.zshrc" || fail 'could not date the layer file'
+  touch -t 202001010000 "$base/tolink" || fail 'could not date the layer file'
+  touch -t 202001010000 "$base/todangling" || fail 'could not date the layer file'
+  sandbox_leaf "$base" tofile new
+  ln -s .zshrc "$sandbox_path" || fail 'could not create the symlink'
+  run_shale build
+  assert_status 0 "$shale_status" 'the first build exit status'
+  assert_empty "$shale_err" 'the first build stderr'
+  # Each layer entry now provides the other kind, while the built tree still
+  # holds what the build above put there.
+  rm -f "$base/tofile" "$base/tolink" "$base/todangling" ||
+    fail 'could not clear the layer entries'
+  sandbox_write "$HOME/.dotfiles/personal/base" tofile 'NOW A FILE'
+  touch -t 202001010000 "$base/tofile" || fail 'could not date the layer file'
+  sandbox_leaf "$base" tolink new
+  ln -s .zshrc "$sandbox_path" || fail 'could not create the symlink'
+  sandbox_leaf "$base" todangling new
+  ln -s nowhere "$sandbox_path" || fail 'could not create the dangling link'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_missing "$HOME/.dotfiles/current.old"
+  assert_eq 'NOW A FILE' "$(cat "$HOME/.dotfiles/current/tofile")" 'the composed file'
+  [ ! -L "$HOME/.dotfiles/current/tofile" ] || fail 'the composed file is still a symlink'
+  assert_symlink_to "$HOME/.dotfiles/current/tolink" \
+    "$HOME/.dotfiles/current/.zshrc" 'the composed link'
+  assert_dangling_symlink "$HOME/.dotfiles/current/todangling" 'the composed dangling link'
+}
+
 # The warning names current.old, which only the swap creates.  Reported during
 # the walk it would promise a path that an aborted build never makes - or worse,
 # point at a stale current.old holding something else entirely.
