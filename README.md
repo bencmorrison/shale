@@ -111,7 +111,7 @@ above. The four commands in it are the whole surface: there are no others, and n
 |---|---|
 | `shale build` | Clones any missing clone root that has a url, then composes the layers into `~/.dotfiles/current` |
 | `shale apply` | Builds, then stows `current` over `$HOME`, replacing the last apply's links |
-| `shale doctor` | Checks the prerequisites, the config, the layers, the built tree and `$HOME`, and reports what it finds |
+| `shale doctor` | Checks the prerequisites, the config, the layers, the built tree and `$HOME`; it will not exit 0 on a setup `build` is certain to refuse |
 | `shale which PATH` | Names every layer providing `PATH`, winner first, and when `build` would refuse the set |
 
 After editing a file a layer already has, `build` is the whole loop: `~/.zshrc` is a link into
@@ -237,11 +237,14 @@ build.
 ## Checking the setup
 
 `shale doctor` checks that every tool shale runs is installed, that the config parses, that every
-configured layer directory is there, that the build lock is neither held nor uncreatable, that
-nothing in `~/.dotfiles` is a stray, that no layer ships shale itself, and that no link in `$HOME`
-points into the built tree at a path it no longer provides. Where a `.stowrc` exists it names the
-stow options that file sets, because several of them change an apply and three of them make it do
-nothing at all. It changes nothing itself.
+configured layer directory is there and that nothing in one is a directory it cannot search or a file
+it cannot open, that no two layers disagree about whether a path
+is a file or a directory, that no layer ships `.stow-local-ignore` — which shale writes itself — or
+shale itself, that `~/.dotfiles/current` is a directory rather than a file or a link to one, that the
+build lock is neither held nor uncreatable, that nothing in `~/.dotfiles` is a stray, and that no
+link in `$HOME` points into the built tree at a path it no longer provides. Where a `.stowrc` exists
+it names the stow options that file sets, because several of them change an apply and three of them
+make it do nothing at all. It changes nothing itself.
 
 ```
 $ shale doctor
@@ -250,7 +253,13 @@ shale: no problems found
 
 Doctor reports two kinds of line. A *problem* is a defect in the setup: it counts towards the total
 and makes doctor exit 1. Everything else is a note about something worth knowing, and neither counts
-nor changes the exit code. Below, a `vim  vim` line was added to the config for a layer that is not
+nor changes the exit code. Every state doctor can see that stops a build outright is a problem, so
+`no problems found` is a strong signal that `shale build` will run rather than a guarantee that it
+must. What it does not see: an absolute symlink in a layer, which stow refuses at apply time and the
+two stow versions disagree about — so shale asserts nothing about it, and
+[docs/layers.md](docs/layers.md) covers it — nor whether `$HOME` is writable, which fails an apply
+rather than a build, nor whether a leftover `current.old` can be removed. Below, a `vim  vim` line
+was added to the config for a layer that is not
 there, and a stray `~/.dotfiles/old-tmux` directory was created — the first is the problem, the
 second the note:
 

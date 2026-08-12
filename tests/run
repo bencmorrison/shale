@@ -6404,18 +6404,627 @@ test_doctor_says_when_there_is_no_built_tree_to_check_links_against() {
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
 }
 
-# The same silence, and a state 'shale build' refuses rather than repairs.
-test_doctor_says_when_the_built_tree_is_not_a_directory() {
+# The plausible layering mistake, and the one 'shale which' already answers on
+# the same tree while doctor reported the setup sound.  Every build from now on
+# exits 1, so it is a finding, and the pair it names is the pair to fix.
+test_doctor_two_layers_disagreeing_about_a_path_is_a_finding() {
+  conf 'base personal/base' 'work work'
+  mklayer personal/base .zshrc
+  mklayer personal/base both/inner
+  mklayer work both
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 'build' would fail at both — it is a directory in layer 'base' and a file in layer 'work'" \
+    'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.dotfiles/personal/base/both" 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.dotfiles/work/both" 'stdout'
+  # build's own two closing lines, word for word.
+  assert_contains "$shale_out" \
+    'shale:   a layer cannot replace a directory with a file, or a file with a directory' 'stdout'
+  assert_contains "$shale_out" 'shale:   remove or rename one of them' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  # The build it predicts, which is what makes the finding true rather than
+  # merely alarming.
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" 'shale: conflict at both' 'the build stderr'
+  # And the remedy carried out: one of the two goes, and the build runs.
+  sandbox_mkdir "$HOME/.dotfiles/work"
+  rm -f "$sandbox_dir/both" || fail 'could not remove the layer file'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build after the remedy'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the remedy'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# A conflict after a successful build is the same finding: the built tree is
+# stale from the moment the layers stopped composing, and nothing in it says so.
+test_doctor_a_conflict_introduced_after_a_build_is_still_a_finding() {
+  conf 'base personal/base' 'work work'
+  mklayer personal/base .zshrc
+  mklayer work .vimrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  mklayer personal/base both/inner
+  mklayer work both
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 'build' would fail at both — it is a directory in layer 'base' and a file in layer 'work'" \
+    'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+}
+
+# build reports a collision against the nearest provider below, so three layers
+# disagreeing at one path give it two of them.  Doctor names the lowest pair,
+# once: that is the pair to fix, and the one above it follows from it - and a
+# finding per layer would turn one mistake into a report that grows with the
+# config.
+test_doctor_names_one_pair_when_three_layers_disagree() {
+  conf 'base personal/base' 'mid mid' 'work work'
+  mklayer personal/base both/inner
+  mklayer mid both
+  mklayer work both
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 'build' would fail at both — it is a directory in layer 'base' and a file in layer 'mid'" \
+    'stdout'
+  assert_not_contains "$shale_out" "in layer 'work'" 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  # Said only where a third layer is in it: with two providers, removing either
+  # of the named pair is the whole of the fix and this line would be noise.
+  assert_contains "$shale_out" \
+    'shale:   3 layers provide both, so removing one of the two named here may leave another pair that disagrees' \
+    'stdout'
+  # build, on the same tree, reports both collisions: doctor's one finding is a
+  # deliberate narrowing rather than a disagreement about what is wrong.
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" "shale: 2 conflicts; $HOME/.dotfiles/current not rebuilt" \
+    'the build stderr'
+}
+
+# Two layers is the whole of the fix, so the line above must not appear.
+test_doctor_says_nothing_about_a_third_layer_when_there_is_none() {
+  conf 'base personal/base' 'work work'
+  mklayer personal/base both/inner
+  mklayer work both
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" "shale: 'build' would fail at both" 'stdout'
+  assert_not_contains "$shale_out" 'layers provide' 'stdout'
+}
+
+# build collides a layer against the *nearest* provider below it, not the first
+# one, so with base and mid both holding a directory and work a file, the pair
+# to send someone to is mid and work.  Naming base instead names a layer build's
+# own report never mentions, and removing base leaves the build failing exactly
+# as before.  All six arrangements of three layers, because which pair is right
+# is a property of the ordering and not of the count.
+test_doctor_names_the_pair_build_names() {
+  local kinds a b c layer kind lower upper lowkind upkind
+  # Three names of one length, so build's own column padding adds no spaces to
+  # one label and not another and the assertions below can be substrings of it.
+  for kinds in 'dir dir file' 'dir file dir' 'file dir dir' \
+    'dir file file' 'file file dir' 'file dir file'; do
+    # Rebuilt from scratch per arrangement: one $HOME cannot hold six of them.
+    sandbox_mkdir "$HOME/.dotfiles"
+    rm -rf "$sandbox_dir/low" "$sandbox_dir/mid" "$sandbox_dir/top" \
+      "$sandbox_dir/current" || fail 'could not clear the layers'
+    conf 'low low' 'mid mid' 'top top'
+    read -r a b c <<EOF
+$kinds
+EOF
+    for layer in low mid top; do
+      case "$layer" in
+        low) kind=$a ;;
+        mid) kind=$b ;;
+        *) kind=$c ;;
+      esac
+      if [ "$kind" = dir ]; then
+        mklayer "$layer" "d/in-$layer"
+      else
+        mklayer "$layer" d
+      fi
+    done
+    # build's pair, derived the way build derives it: the lowest layer whose
+    # kind differs from the one the layer below it established, and the
+    # provider immediately below that layer.
+    if [ "$a" != "$b" ]; then
+      lower=low
+      upper=mid
+      lowkind=$a
+      upkind=$b
+    else
+      lower=mid
+      upper=top
+      lowkind=$b
+      upkind=$c
+    fi
+    [ "$lowkind" != dir ] || lowkind=directory
+    [ "$upkind" != dir ] || upkind=directory
+    run_shale doctor
+    assert_status 1 "$shale_status" "$kinds doctor"
+    assert_contains "$shale_out" \
+      "shale: 'build' would fail at d — it is a $lowkind in layer '$lower' and a $upkind in layer '$upper'" \
+      "$kinds doctor stdout"
+    assert_contains "$shale_out" "shale:   $HOME/.dotfiles/$lower/d" "$kinds doctor stdout"
+    assert_contains "$shale_out" "shale:   $HOME/.dotfiles/$upper/d" "$kinds doctor stdout"
+    # And build, which has to name the same two paths in its first conflict.
+    run_shale build
+    assert_status 1 "$shale_status" "$kinds build"
+    assert_contains "$shale_err" "shale:   layer '$upper' provides a $upkind" "$kinds build stderr"
+    assert_contains "$shale_err" "shale:   layer '$lower' provides a $lowkind" "$kinds build stderr"
+  done
+}
+
+# A symlink is a leaf to the composer whatever it points at, so a link to a
+# directory under a real directory in a higher layer is a collision - and
+# calling the link a directory here would make doctor promise a merge that
+# build refuses.
+test_doctor_a_layer_symlink_under_a_layer_directory_is_a_finding() {
+  conf 'base personal/base' 'work work'
+  mklayer personal/base .zshrc
+  mklayer work d/inner
+  sandbox_mkdir "$HOME/elsewhere"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" d new
+  ln -s "$HOME/elsewhere" "$sandbox_path" || fail 'could not plant the link'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 'build' would fail at d — it is a file in layer 'base' and a directory in layer 'work'" \
+    'stdout'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" 'shale: conflict at d' 'the build stderr'
+}
+
+# build does not descend a layer that collided at a directory, so nothing under
+# it is composed and nothing under it can be a defect either.  The unsearchable
+# directory below the collision is real and build never reaches it: reporting it
+# would send someone to fix a permission that is not what stops the build.
+test_doctor_looks_no_further_under_a_layer_that_disagrees() {
+  local doctor_out doctor_status
+  skip_if_root
+  conf 'base personal/base' 'work work'
+  mklayer personal/base d 'a file where work has a directory'
+  mklayer work d/deeper/f
+  chmod 0000 "$HOME/.dotfiles/work/d/deeper" || fail 'could not remove the mode bits'
+  run_shale doctor
+  doctor_out=$shale_out
+  doctor_status=$shale_status
+  chmod 0755 "$HOME/.dotfiles/work/d/deeper" || fail 'could not restore the mode'
+  assert_status 1 "$doctor_status"
+  assert_contains "$doctor_out" \
+    "shale: 'build' would fail at d — it is a file in layer 'base' and a directory in layer 'work'" \
+    'stdout'
+  assert_not_contains "$doctor_out" 'deeper' 'stdout'
+  assert_contains "$doctor_out" 'shale: 1 problem found' 'stdout'
+}
+
+# The same provenance as the unsearchable directory below, and the commoner
+# half of it: a layer restored under another uid holds unreadable files more
+# often than unreadable directories, and build stops at the first cp that
+# cannot open one.  Every layer's copy is checked, not the winner's, because
+# build copies each in turn - so a file in a layer something else shadows stops
+# the build just the same.
+test_doctor_a_layer_file_it_cannot_read_is_a_finding() {
+  local doctor_out doctor_status
+  skip_if_root
+  conf 'base personal/base' 'work work'
+  mklayer personal/base .zshrc
+  mklayer personal/base secret
+  # Shadowed by a higher layer, and still fatal: this is the half that says the
+  # check is not scoped to the copy that wins.
+  mklayer work secret
+  chmod 0000 "$HOME/.dotfiles/personal/base/secret" ||
+    fail 'could not remove the mode bits'
+  run_shale doctor
+  doctor_out=$shale_out
+  doctor_status=$shale_status
+  run_shale build
+  chmod 0644 "$HOME/.dotfiles/personal/base/secret" ||
+    fail 'could not restore the mode'
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" \
+    "shale: could not copy $HOME/.dotfiles/personal/base/secret to $HOME/.dotfiles/current.new/secret" \
+    'the build stderr'
+  assert_status 1 "$doctor_status" 'the doctor'
+  assert_contains "$doctor_out" \
+    "shale: layer 'base': cannot read $HOME/.dotfiles/personal/base/secret: permission denied" \
+    'the doctor stdout'
+  assert_contains "$doctor_out" \
+    'shale:   shale composes a layer by copying its files, and build stops there' \
+    'the doctor stdout'
+  assert_contains "$doctor_out" 'shale:   check the permissions on that file' 'the doctor stdout'
+  assert_contains "$doctor_out" 'shale: 1 problem found' 'the doctor stdout'
+  # The remedy, carried out.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build after the remedy'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the remedy'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# The three shapes an unreadable-looking entry takes that a build composes
+# without ever opening one, so a finding about any of them is a false one.  All
+# three are measured against the build rather than argued: '-f' alone takes the
+# fifo, and '-f' without '! -L' takes the link, whose target '-r' answers for
+# while cp copies the link and never reads through it.
+test_doctor_says_nothing_about_a_layer_entry_no_build_reads() {
+  skip_if_root
+  command -v mkfifo >/dev/null 2>&1 || skip 'mkfifo is not available'
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # A file outside every layer, unreadable, with a layer link pointing at it.
+  sandbox_write "$CASE_DIR/outside" target 'PRECIOUS'
+  chmod 0000 "$sandbox_path" || fail 'could not remove the mode bits'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" tolink new
+  ln -s "$CASE_DIR/outside/target" "$sandbox_path" || fail 'could not plant the link'
+  sandbox_leaf "$sandbox_dir" dangling new
+  ln -s nowhere "$sandbox_path" || fail 'could not plant the dangling link'
+  sandbox_leaf "$sandbox_dir" pipe new
+  mkfifo "$sandbox_path" || fail 'could not plant the fifo'
+  chmod 0000 "$sandbox_path" || fail 'could not remove the fifo mode bits'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_not_contains "$shale_out" 'cannot read' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  # And the build that says so: it composes all three and exits 0.
+  run_shale build
+  chmod 0644 "$CASE_DIR/outside/target" || fail 'could not restore the mode'
+  assert_status 0 "$shale_status" 'the build'
+  assert_empty "$shale_err" 'the build stderr'
+  assert_exists "$HOME/.dotfiles/current/tolink" 'the copied link'
+  assert_dangling_symlink "$HOME/.dotfiles/current/dangling" 'the copied dangling link'
+}
+
+# build reports one of these and stops; this walk finds every one, and a layer
+# restored under another uid can hold dozens.  Ten named and the rest counted is
+# the shape every other multi-item report in doctor uses.
+test_doctor_bounds_the_layer_permission_findings_at_ten() {
+  local doctor_out doctor_status i n
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # Two digits, so the glob order the walk sees is the counting order and the
+  # assertions below can name which two fall past the cap.
+  i=0
+  while [ "$i" -lt 12 ]; do
+    n=$(printf 'd%02d' "$i")
+    mklayer personal/base "$n/f"
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -lt 12 ]; do
+    n=$(printf 'd%02d' "$i")
+    chmod 0000 "$HOME/.dotfiles/personal/base/$n" || fail "could not set the mode on $n"
+    i=$((i + 1))
+  done
+  run_shale doctor
+  doctor_out=$shale_out
+  doctor_status=$shale_status
+  i=0
+  while [ "$i" -lt 12 ]; do
+    n=$(printf 'd%02d' "$i")
+    chmod 0755 "$HOME/.dotfiles/personal/base/$n" || fail "could not restore the mode on $n"
+    i=$((i + 1))
+  done
+  assert_status 1 "$doctor_status"
+  # The cap changes what is printed and never what is counted.
+  assert_contains "$doctor_out" 'shale: 12 problems found' 'stdout'
+  assert_contains "$doctor_out" \
+    'shale: and 2 more layer paths shale cannot read, not named here' 'stdout'
+  # Ten named, and the eleventh and twelfth in walk order not.
+  assert_contains "$doctor_out" \
+    "shale: layer 'base': cannot search $HOME/.dotfiles/personal/base/d00: permission denied" 'stdout'
+  assert_contains "$doctor_out" \
+    "shale: layer 'base': cannot search $HOME/.dotfiles/personal/base/d09: permission denied" 'stdout'
+  assert_not_contains "$doctor_out" \
+    "$HOME/.dotfiles/personal/base/d10: permission denied" 'stdout'
+  assert_not_contains "$doctor_out" \
+    "$HOME/.dotfiles/personal/base/d11: permission denied" 'stdout'
+}
+
+# doctor checked the layer root only, so the ordinary way this arrives - a layer
+# restored or cloned under another user - was silent while every build stopped
+# at it.  The wording is the layer-root arm's, because it is the same fault one
+# level down.
+test_doctor_a_layer_subdirectory_it_cannot_search_is_a_finding() {
+  local doctor_out doctor_status
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  chmod 0000 "$HOME/.dotfiles/personal/base/.config" ||
+    fail 'could not remove the mode bits'
+  run_shale doctor
+  doctor_out=$shale_out
+  doctor_status=$shale_status
+  run_shale build
+  chmod 0755 "$HOME/.dotfiles/personal/base/.config" ||
+    fail 'could not restore the mode'
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" \
+    "shale: layer 'base': cannot search $HOME/.dotfiles/personal/base/.config: permission denied" \
+    'the build stderr'
+  assert_status 1 "$doctor_status" 'the doctor'
+  assert_contains "$doctor_out" \
+    "shale: layer 'base': cannot search $HOME/.dotfiles/personal/base/.config: permission denied" \
+    'the doctor stdout'
+  assert_contains "$doctor_out" \
+    'shale:   shale composes a layer by walking it, and build stops there' 'the doctor stdout'
+  assert_contains "$doctor_out" 'shale: 1 problem found' 'the doctor stdout'
+  # The remedy, carried out.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build after the remedy'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the remedy'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# Not merely quiet but false: shale writes current/.stow-local-ignore itself, so
+# the built copy is always older than a layer's, the built-tree note fired on
+# every run, and it promised a current.old the refused build never creates.
+test_doctor_a_layer_providing_a_stow_local_ignore_is_a_finding() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  mklayer personal/base .stow-local-ignore '^/secret'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  # build's three lines, word for word.
+  assert_contains "$shale_out" \
+    "shale: layer 'base' provides $HOME/.dotfiles/personal/base/.stow-local-ignore" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   shale writes $HOME/.dotfiles/current/.stow-local-ignore itself" 'stdout'
+  assert_contains "$shale_out" 'shale:   remove it from that layer' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  # The note that used to fire here, and the promise inside it.  No build lands
+  # a layer copy at that path, so neither the replacement nor the current.old
+  # ever comes.
+  assert_not_contains "$shale_out" 'does not match the layer copy' 'stdout'
+  assert_not_contains "$shale_out" 'current.old' 'stdout'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_missing "$HOME/.dotfiles/current.old" 'the tree the note promised'
+  # The remedy, carried out.
+  sandbox_leaf "$HOME/.dotfiles/personal/base" .stow-local-ignore
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build after the remedy'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the remedy'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# 'build one with: shale build' is a remedy, and a remedy that exits 1 is worse
+# than none: it sends the reader past the finding that says why.  Both halves,
+# because the line is right in one of them and the case would pass vacuously on
+# a doctor that had simply stopped printing it.
+test_doctor_offers_no_build_it_has_already_said_will_fail() {
+  conf 'base personal/base' 'work work'
+  mklayer personal/base .zshrc
+  mklayer work .vimrc
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .zshrc new
+  ln -s "$HOME/.dotfiles/current/.zshrc" "$sandbox_path" || fail 'could not plant the link'
+  assert_missing "$HOME/.dotfiles/current" 'the built tree'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the sound setup'
+  assert_contains "$shale_out" 'shale:   build one with: shale build' 'the sound setup stdout'
+  # The same tree with a collision in it: the note stays, the remedy goes.
+  mklayer personal/base both/inner
+  mklayer work both
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the setup that cannot build'
+  assert_contains "$shale_out" \
+    "shale: there is no built tree at $HOME/.dotfiles/current, so shale cannot tell a link into it from any other broken link" \
+    'the stdout that cannot build'
+  assert_not_contains "$shale_out" 'build one with' 'the stdout that cannot build'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build the remedy would have named'
+}
+
+# The conjunction, which neither half is: a missing git stops no build on its
+# own - a machine holding every layer builds without it - and a clone root with
+# a url and nothing at its path is an ordinary first-run state.  Together they
+# are a build that dies in clone_missing_roots, and doctor is holding both.
+#
+# The url is one no clone could succeed from, so an implementation that cloned
+# eagerly fails this case rather than passing it slowly.
+# shellcheck disable=SC2123
+test_doctor_offers_no_build_that_would_die_fetching() {
+  local saved
+  conf 'base personal/base' "vim vim $CASE_DIR/repos/absent"
+  mklayer personal/base .zshrc
+  stub_path_without git
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" 'shale: git is not installed' 'stdout'
+  assert_contains "$shale_out" \
+    "shale: layer 'vim' has no directory at $HOME/.dotfiles/vim yet" 'stdout'
+  assert_not_contains "$shale_out" 'build one with' 'stdout'
+  # The build that remedy would have named.
+  PATH=$stub_path
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" \
+    "shale: git is not installed, and $HOME/.dotfiles/vim must be cloned from $CASE_DIR/repos/absent" \
+    'the build stderr'
+}
+
+# And the half of it that is not build-blocking: no git, nothing to clone, so
+# the build runs and the offer stands.  Without this the case above passes on a
+# doctor that suppressed the offer whenever git was missing at all.
+# shellcheck disable=SC2123
+test_doctor_offers_a_build_a_missing_git_does_not_stop() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  stub_path_without git
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" 'shale: git is not installed' 'stdout'
+  assert_contains "$shale_out" 'shale:   build one with: shale build' 'stdout'
+  PATH=$stub_path
+  run_shale build
+  PATH=$saved
+  assert_status 0 "$shale_status" 'the build'
+}
+
+# The other promise about a build that will not run: the built-tree note names a
+# replacement and a current.old, and with a collision above it neither arrives.
+# The count is the guard on the everyday half - the note itself stays a note.
+test_doctor_promises_no_replacement_from_a_build_that_will_not_run() {
+  conf 'base personal/base' 'work work'
+  mklayer personal/base .zshrc
+  mklayer work .vimrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  touch -t 202601010000 "$sandbox_path" || fail 'could not date the layer file'
+  # Without the collision: the promise is true, and made.
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the sound setup'
+  assert_contains "$shale_out" \
+    "shale:   the next build replaces it with the layer copy, keeping what is there now at $HOME/.dotfiles/current.old" \
+    'the sound setup stdout'
+  mklayer personal/base both/inner
+  mklayer work both
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the setup that cannot build'
+  assert_contains "$shale_out" \
+    "shale: 1 file in $HOME/.dotfiles/current does not match the layer copy that provides it" \
+    'the stdout that cannot build'
+  assert_contains "$shale_out" \
+    'shale:   no build will run until the problems above are fixed, so nothing here is replaced yet' \
+    'the stdout that cannot build'
+  assert_not_contains "$shale_out" 'the next build' 'the stdout that cannot build'
+  assert_not_contains "$shale_out" 'current.old' 'the stdout that cannot build'
+  # And the build it describes: refused, and nothing kept.
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_missing "$HOME/.dotfiles/current.old" 'the tree the note would have promised'
+}
+
+# The everyday loop #75 exists for: edit a layer, run doctor.  A built tree the
+# layers have moved past is the ordinary state between an edit and a build, and
+# making it exit 1 would move the warning fatigue rather than remove it.
+test_doctor_an_edited_layer_is_still_a_note_and_still_exit_zero() {
+  conf 'base personal/base' 'work work'
+  mklayer personal/base .zshrc
+  mklayer work .vimrc
+  # cp -p carries the layer file's mtime into the built tree, so the edit below
+  # has to move it forward from a date the build already copied.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  touch -t 202601010000 "$sandbox_path" || fail 'could not date the layer file'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 1 file in $HOME/.dotfiles/current does not match the layer copy that provides it" \
+    'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  # And the build that follows says nothing at all, which is the other half of
+  # the quiet loop.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_empty "$shale_err" 'the build stderr'
+}
+
+# Two layers holding the same directory merge, and a file over a file is the
+# shadowing this whole tool is for.  Neither is a collision, and a walk that
+# called either one would fire on every setup that has more than one layer.
+test_doctor_says_nothing_about_layers_that_merge_or_shadow() {
+  conf 'base personal/base' 'work work'
+  mklayer personal/base .config/nvim/init.lua
+  mklayer work .config/nvim/spell.add
+  mklayer personal/base .zshrc
+  mklayer work .zshrc
+  mklayer personal/base .config/git/ignore
+  mklayer work .config/git/ignore
+  run_shale build
+  assert_status 0 "$shale_status"
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# A .git is skipped at every depth in the composer, so nothing inside one is
+# ever composed and nothing inside one can collide.  Without the skip a layer
+# that is a working repository and a layer that is not would collide on every
+# path git keeps at a different kind, and doctor would refuse a setup that
+# builds.
+test_doctor_says_nothing_about_a_git_directory_in_a_layer() {
+  conf 'base personal/base' 'work work'
+  mklayer personal/base .zshrc
+  mklayer personal/base .git/config 'GIT'
+  mklayer work .git 'not a directory here'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_missing "$HOME/.dotfiles/current/.git" 'the built tree'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# A state 'shale build' refuses rather than repairs, so it is counted and doctor
+# says it in build's own words.
+test_doctor_a_built_tree_that_is_not_a_directory_is_a_finding() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
   sandbox_write "$HOME/.dotfiles" current 'not a tree'
   run_shale doctor
-  assert_status 0 "$shale_status"
+  assert_status 1 "$shale_status"
   assert_contains "$shale_out" \
-    "shale: $HOME/.dotfiles/current exists but is not a directory, so there is no built tree to check the links in $HOME against" \
-    'stdout'
-  assert_contains "$shale_out" 'shale:   shale builds into it: remove it, or move it aside' 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+    "shale: $HOME/.dotfiles/current exists but is not a directory" 'stdout'
+  assert_contains "$shale_out" 'shale:   shale builds into it' 'stdout'
+  assert_contains "$shale_out" 'shale:   remove it, or move it aside' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  # No build to offer, so none is offered: the tree cannot be built until this
+  # is fixed, and the note about there being no built tree is not printed at all
+  # because there is something at that path.
+  assert_not_contains "$shale_out" 'build one with' 'stdout'
+  # The clause the note this replaced carried.  Everything below it in doctor
+  # returns without a word against a $CUR that is not a directory, and silence
+  # from a walk that did not run reads as a clean answer.
+  assert_contains "$shale_out" \
+    "shale:   until then there is no built tree to check the links in $HOME against" 'stdout'
+  # build says the same thing about the same path, which is what makes the
+  # finding's remedy the one that works.
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/current exists but is not a directory" 'the build stderr'
+  # And the remedy carried out clears it.
+  sandbox_mkdir "$HOME/.dotfiles"
+  rm -f "$sandbox_dir/current" || fail 'could not remove the planted file'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build after the remedy'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the remedy'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # The report #66 put in build, moved here.  This is the shape it exists for: a
@@ -6817,11 +7426,12 @@ test_doctor_says_nothing_about_a_git_directory_in_the_built_tree() {
   assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
 }
 
-# Every line of the note says what the next build will do with what was found,
-# and against a symlink at current no build does anything: it refuses the tree
-# and exits 1.  That this walk would follow the link is the smaller half; the
-# promise about a build that will not run is the half that would be false.
-test_doctor_says_nothing_about_a_built_tree_reached_through_a_symlink() {
+# A link to a directory answers -d as readily as a directory does, so this is
+# the shape doctor used to pass in silence while every build refused it - a
+# regular file and a dangling link at that path both said something.  Counted
+# now, in build's words; and the note about the built tree still says nothing,
+# because every line of it describes a build that will not run.
+test_doctor_a_built_tree_that_is_a_symlink_is_a_finding() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
   sandbox_mkdir "$HOME/.dotfiles/personal/base"
@@ -6837,7 +7447,15 @@ test_doctor_says_nothing_about_a_built_tree_reached_through_a_symlink() {
   sandbox_leaf "$sandbox_dir" .zshrc
   touch -t 202601010000 "$sandbox_path" || fail 'could not date the layer file'
   run_shale doctor
-  assert_status 0 "$shale_status"
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" "shale: $HOME/.dotfiles/current is a symlink" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   shale builds into it, and would write through the link' 'stdout'
+  assert_contains "$shale_out" 'shale:   remove it, or move it aside' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  # The link audit walks straight through a link to a directory - -d follows one
+  # - so this is the one shape that must not claim there was nothing to check.
+  assert_not_contains "$shale_out" 'no built tree to check the links' 'stdout'
   assert_not_contains "$shale_out" 'does not match the layer copy' 'stdout'
   assert_not_contains "$shale_out" 'do not match the layer copies' 'stdout'
   assert_not_contains "$shale_out" 'the next build' 'stdout'
@@ -6845,6 +7463,17 @@ test_doctor_says_nothing_about_a_built_tree_reached_through_a_symlink() {
   run_shale build
   assert_status 1 "$shale_status"
   assert_contains "$shale_err" "shale: $HOME/.dotfiles/current is a symlink" 'the build stderr'
+  # The remedy: the link goes, and the build that was refused runs.  Both halves
+  # run, because a remedy doctor prints has to work.  The directory it pointed
+  # at goes with it, or it is a stray package doctor then has a note about.
+  sandbox_mkdir "$HOME/.dotfiles"
+  rm -f "$sandbox_dir/current" || fail 'could not remove the link'
+  rm -rf "$sandbox_dir/elsewhere" || fail 'could not remove the moved tree'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build after the remedy'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the remedy'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # A directory this walk cannot enter drops out of it exactly as an empty one
@@ -6924,7 +7553,13 @@ test_doctor_does_not_blame_a_lower_layer_for_one_it_cannot_search() {
   doctor_out=$shale_out
   doctor_status=$shale_status
   chmod 0755 "$HOME/.dotfiles/local/.config" || fail 'could not restore the mode'
-  assert_status 0 "$doctor_status"
+  # The one finding is the layer walk's, which is what build stops at; the note
+  # below adds nothing to the count, which is what this case is about.
+  assert_status 1 "$doctor_status"
+  assert_contains "$doctor_out" \
+    "shale: layer 'local': cannot search $HOME/.dotfiles/local/.config: permission denied" \
+    'stdout'
+  assert_contains "$doctor_out" 'shale: 1 problem found' 'stdout'
   assert_not_contains "$doctor_out" 'does not match the layer copy' 'stdout'
   assert_not_contains "$doctor_out" 'do not match the layer copies' 'stdout'
   assert_contains "$doctor_out" \
@@ -6935,7 +7570,6 @@ test_doctor_does_not_blame_a_lower_layer_for_one_it_cannot_search() {
     "shale:   cannot search $HOME/.dotfiles/local/.config" 'stdout'
   assert_contains "$doctor_out" \
     'shale:   check the permissions on that directory' 'stdout'
-  assert_contains "$doctor_out" 'shale: no problems found' 'stdout'
 }
 
 # Alongside something that is a finding, which is the only way to see that this

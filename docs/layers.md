@@ -83,7 +83,33 @@ lines *as well*, use the tool's own include mechanism below rather than a second
 
 A layer cannot replace a directory with a file, or a file with a directory. `build` calls that a
 conflict, names both layers and the two paths, and rebuilds nothing; `which` reports the same pair
-as a note. Rename one of them.
+as a note, and `shale doctor` reports it as a problem without your having to guess which path to ask
+about. Rename one of them.
+
+```
+shale: 'build' would fail at .config/profile.d — it is a directory in layer 'base' and a file in layer 'work'
+shale:   /home/you/.dotfiles/base/.config/profile.d
+shale:   /home/you/.dotfiles/work/.config/profile.d
+shale:   a layer cannot replace a directory with a file, or a file with a directory
+shale:   remove or rename one of them
+```
+
+More than two layers can disagree at one path, and how many conflicts `build` reports then depends on
+the order rather than on the count: three layers holding directory, directory, file give it one,
+where file, directory, directory give it two. `doctor` reports the lowest of them and names the two
+layers `build` names it against — the nearest provider below, not the first one — and adds a line
+saying how many layers provide the path when it is more than two, because removing one of the pair
+it named can leave another that disagrees.
+
+## A layer restored under another user
+
+A layer cloned or restored under `sudo` keeps its owner, and `build` stops at the first directory it
+cannot search or file it cannot open — `cp` reports the path and shale reports the copy that failed.
+`shale doctor` finds these ahead of the build and names up to ten of them, counting the rest.
+
+Only a regular file matters. A build copies a symlink as a symlink and recreates a FIFO without
+opening either, so neither a link whose target you cannot read nor an unreadable FIFO stops
+anything, and `doctor` says nothing about them.
 
 ## Fragment directories
 
@@ -215,6 +241,11 @@ WARNING! stowing current would cause conflicts:
 All operations aborted.
 ```
 
+`shale doctor` does not report this one, and deliberately: the two stow versions disagree about
+which absolute links they refuse and where, so any finding shale wrote would be right on one of them
+and wrong on the other. Nothing but the apply itself can tell you, which is the reason for the rule
+rather than an exception to it.
+
 ## A layer, or a guard inside a file
 
 Both are right in different cases, and the deciding question is whether the file should exist at all
@@ -306,6 +337,12 @@ Shale cannot tell an adopted file from a built tree its layers have moved past, 
 the note states both readings and it is a note, not a problem — `doctor` still exits 0 on it. Above
 ten files it leads with the count and the directory they are under and names ten of them, so a
 `git pull` that changed two hundred is a dozen lines rather than two hundred.
+
+Where `doctor` has already found something that stops a build — a conflict, a layer it cannot read,
+a `current` that is not a directory — the two lines about the next build are replaced by
+`no build will run until the problems above are fixed, so nothing here is replaced yet`. The files
+are still named; what changes is that nothing promises you a `current.old` that a refused build
+never creates.
 
 `doctor` sees this only in the window between the file arriving and the next build. Afterwards the
 built copy is the layer's again and there is nothing left to notice, so recovery is `current.old`

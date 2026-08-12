@@ -829,6 +829,17 @@ finding() {
   report "$@"
 }
 
+# A finding that also stops the next build outright.  Every line doctor prints
+# that offers a build, or says what the next one will do, is gated on this being
+# zero: with a conflict in the layers, 'build one with: shale build' is a remedy
+# that cannot succeed and 'the next build replaces it' is a promise nothing
+# keeps.  A finding that leaves a build able to run - an orphaned link, a layer
+# shipping the script - is an ordinary one.
+blocking_finding() {
+  BUILD_BLOCKED=$((BUILD_BLOCKED + 1))
+  finding "$@"
+}
+
 note() {
   report "$@"
 }
@@ -1056,6 +1067,215 @@ EOF
   [ "${#STOWRC_OPTIONS[@]}" -gt 0 ]
 }
 
+# A layer path the walk below cannot read, as a finding, up to LAYER_DENIED_CAP
+# of them; above the cap they are counted and not named.  $1 is the layer name,
+# $2 the path, $3 'directory' or 'file'.
+#
+# Capped because build reports one of these and stops, where this walk goes on
+# and finds every one: a layer restored under another uid can hold forty, and
+# forty findings of three lines each is not a report.  The cap changes what is
+# printed and never what is counted, which is audit_broken_links' rule too.
+LAYER_DENIED_CAP=10
+layer_denied() {
+  local name=$1 path=$2 what=$3
+  LAYER_DENIED=$((LAYER_DENIED + 1))
+  if [ "$LAYER_DENIED" -gt "$LAYER_DENIED_CAP" ]; then
+    # Counted as a finding without being printed as one, exactly as the links
+    # above audit_broken_links' cap are.
+    FINDINGS=$((FINDINGS + 1))
+    BUILD_BLOCKED=$((BUILD_BLOCKED + 1))
+    return 0
+  fi
+  if [ "$what" = directory ]; then
+    denied_verb "$path"
+    blocking_finding "layer '$name': $DENIED_VERB $path: permission denied" \
+      'shale composes a layer by walking it, and build stops there' \
+      'check the permissions on that directory'
+    return 0
+  fi
+  blocking_finding "layer '$name': cannot read $path: permission denied" \
+    'shale composes a layer by copying its files, and build stops there' \
+    'check the permissions on that file'
+}
+
+# Every path two layers disagree about the kind of, and every layer path this
+# walk cannot read: the states build refuses that nothing else in doctor sees.
+# The walk is build's own minus the copying - one listing per layer directory
+# and a kind test per entry - because nothing cheaper answers whether the next
+# build will refuse, and doctor promising a build that then refuses is what this
+# exists to stop.
+#
+# $1 is the path relative to the composed tree, '' for the whole of it.  $2 is
+# the indices of the layers whose subtree lands in it, in config order and
+# separated by spaces.  Carrying that list is what makes this build's answer
+# rather than a plain union of the layers: build does not descend a layer that
+# collided at a directory, so nothing under it is composed and nothing under it
+# can collide either.
+#
+# The kind that stands at a path is the first provider's, and it stays that
+# whatever a later layer holds there - build composes into the tree it has, and
+# a collision leaves that tree as it was.  Every later layer of the other kind
+# is therefore a collision, and build reports each of them; doctor reports the
+# lowest, in the same two layers build names it against, because that is the
+# pair standing between the config and a build that runs.  How many build
+# reports depends on the arrangement rather than on the number of layers
+# disagreeing: three layers holding directory, directory, file give it one, and
+# file, directory, directory give it two.
+scan_layer_trees() {
+  local rel=$1 layers=$2 i k here e base srel path alone lines
+  local kind first first_kind last other other_kind other_prev providers children
+  # One layer cannot disagree with anything, so below such a directory the whole
+  # of the comparison is skipped and the walk is only looking for a directory it
+  # cannot enter.  Worth its own arm because it is the ordinary shape: most of a
+  # layer's subtree is a directory no other layer has.
+  alone=1
+  case "$layers" in
+    *' '*) alone=0 ;;
+  esac
+  # Unquoted on purpose: $layers is this function's own list of decimal indices,
+  # and splitting it into words is what is wanted.
+  # shellcheck disable=SC2086
+  for i in $layers; do
+    here=$DOTFILES/${LAYER_PATHS[$i]}${rel:+/$rel}
+    # Neither dotglob nor nullglob is set in doctor, so an unlistable directory
+    # is told from an empty one here rather than by the glob below.  build stops
+    # at this directory, so doctor saying nothing about it is doctor reporting
+    # 'no problems found' on a tree that cannot be composed.  The wording is the
+    # layer-root arm's, which is the same fault one level up.
+    if [ ! -r "$here" ] || [ ! -x "$here" ]; then
+      layer_denied "${LAYER_NAMES[$i]}" "$here" directory
+      continue
+    fi
+    # Both patterns spelled out, and '.' and '..' dropped by name, whatever the
+    # glob options say about them.
+    for e in "$here"/* "$here"/.*; do
+      base=${e##*/}
+      case "$base" in
+        . | ..) continue ;;
+        '*' | '.*')
+          { [ -e "$e" ] || [ -L "$e" ]; } || continue
+          ;;
+      esac
+      # At every depth, as in the composer: a build composes no .git, so nothing
+      # inside one is ever a collision.
+      [ "$base" = .git ] && continue
+      srel=${rel:+$rel/}$base
+      # A symlink is a leaf whatever it points at, because the composer treats
+      # one that way: calling a link to a directory a directory here would
+      # promise a merge build refuses to perform.
+      kind='file'
+      if [ -d "$e" ] && [ ! -L "$e" ]; then
+        kind='directory'
+      fi
+      # A regular file build cannot open, which is the same provenance as the
+      # directory above - a layer restored or cloned under another uid - and the
+      # commoner half of it.  Checked for every layer's copy rather than the
+      # winner's, because build copies each in turn and stops at the first cp
+      # that fails, shadowed or not.
+      #
+      # All three tests earn their place, measured against build rather than
+      # argued: -f alone would take a mode 000 fifo, which cp -RPp recreates
+      # without reading and a build composes fine; and -f is true of a symlink
+      # to an unreadable file, which -r then calls unreadable while cp copies
+      # the link and never opens the target.  Only a regular file that is not a
+      # link stops a build.
+      if [ -f "$e" ] && [ ! -L "$e" ] && [ ! -r "$e" ]; then
+        layer_denied "${LAYER_NAMES[$i]}" "$e" file
+      fi
+      if [ "$alone" -eq 1 ]; then
+        [ "$kind" = directory ] || continue
+        scan_layer_trees "$srel" "$i"
+        continue
+      fi
+      # One pass, in config order, doing four things at once because each of
+      # them costs a stat per layer and none of them is worth a second walk of
+      # the list: it finds the layer that decides this path, it finds the first
+      # layer after that one holding the other kind, it keeps the last provider
+      # before that one, and it collects the layers whose subtree goes on down.
+      # The entry itself is never tested - this loop reached it through $i's own
+      # listing.
+      #
+      # An entry a lower layer already provided leaves the loop at that layer,
+      # so it costs the tests down to it and nothing else: it was examined in
+      # full when that layer's own listing reached it.
+      #
+      # The cost of that is the arrangement to know about.  The scan starts at
+      # the head of the list every time, so a path provided only by layers high
+      # in the config costs the distance to the lowest of them once per provider
+      # above it - Theta(paths * providers * that distance), not linear in the
+      # layer count.  Two dozen layers all providing the same paths is where it
+      # shows, which is a config nobody writes; the ordinary shapes - a path in
+      # one layer, or in a low layer and overridden - leave the loop at the
+      # first or second test.
+      first=-1
+      first_kind=
+      last=-1
+      other=-1
+      other_kind=
+      other_prev=-1
+      providers=0
+      children=
+      # shellcheck disable=SC2086
+      for k in $layers; do
+        if [ "$first" -lt 0 ]; then
+          if [ "$k" -eq "$i" ]; then
+            first=$i
+            first_kind=$kind
+            last=$i
+            providers=1
+            [ "$kind" != directory ] || children=$i
+            continue
+          fi
+          path=$DOTFILES/${LAYER_PATHS[$k]}/$srel
+          { [ -e "$path" ] || [ -L "$path" ]; } || continue
+          first=$k
+          break
+        fi
+        path=$DOTFILES/${LAYER_PATHS[$k]}/$srel
+        { [ -e "$path" ] || [ -L "$path" ]; } || continue
+        providers=$((providers + 1))
+        kind='file'
+        if [ -d "$path" ] && [ ! -L "$path" ]; then
+          kind='directory'
+        fi
+        if [ "$kind" = "$first_kind" ]; then
+          # Two directories merge, and a file over a file is the ordinary
+          # shadowing this whole tool is for.
+          [ "$kind" != directory ] || children="$children $k"
+        elif [ "$other" -lt 0 ]; then
+          other=$k
+          other_kind=$kind
+          other_prev=$last
+        fi
+        last=$k
+      done
+      [ "$first" -eq "$i" ] || continue
+      if [ "$other" -ge 0 ]; then
+        # The pair is build's pair: build collides against the *nearest*
+        # provider below, so naming the first one instead sends someone to a
+        # layer build never mentions.  Every provider between them agrees with
+        # the kind that stands, this being the first disagreement, so the kind
+        # named for it is that one.  The two closing lines are build's own, word
+        # for word: a reader who meets both reports meets one answer.
+        lines=("'build' would fail at $srel — it is a $first_kind in layer '${LAYER_NAMES[$other_prev]}' and a $other_kind in layer '${LAYER_NAMES[$other]}'"
+          "$DOTFILES/${LAYER_PATHS[$other_prev]}/$srel"
+          "$DOTFILES/${LAYER_PATHS[$other]}/$srel"
+          'a layer cannot replace a directory with a file, or a file with a directory'
+          'remove or rename one of them')
+        # Only where a third layer is in it.  With two providers, removing
+        # either one of them is the whole of the fix; with more, which one goes
+        # decides whether what is left still disagrees, and shale cannot say
+        # which without being told.
+        [ "$providers" -le 2 ] ||
+          lines[${#lines[@]}]="$providers layers provide $srel, so removing one of the two named here may leave another pair that disagrees"
+        blocking_finding ${lines[@]+"${lines[@]}"}
+      fi
+      [ "$first_kind" = directory ] || continue
+      scan_layer_trees "$srel" "$children"
+    done
+  done
+}
+
 # Records the directory $1 that this check could not enter, once each and up to
 # $2 of them, setting UNREACHABLE_MORE when it stops keeping them.  Either half
 # of the comparison can be behind one, and either way the walk has seen less than
@@ -1195,6 +1415,14 @@ scan_built_tree() {
     # promising that the next build will replace this one would be false, and so
     # would the current.old it promises with it.
     [ "$base" = .git ] && continue
+    # The same reasoning for the one file shale writes into the built tree
+    # itself, at the top of it and nowhere else: no build ever lands a layer's
+    # copy here - it refuses the whole tree while a layer provides one - so the
+    # note would promise a replacement and a current.old that never come.  A
+    # layer providing it is a finding of its own, with the remedy that works.
+    if [ -z "$rel" ] && [ "$base" = .stow-local-ignore ]; then
+      continue
+    fi
     srel=${rel:+$rel/}$base
     # A symlink to a directory is a leaf here as it is in the composer, and
     # descending one would walk out of the built tree.
@@ -1299,9 +1527,17 @@ audit_built_tree() {
 
   lines=("$n $files in $CUR $matches"
     "either something $moved the built tree, which is what stow --adopt does, or a layer changed and there has been no build since"
-    ${where[@]+"${where[@]}"}
-    "the next build $replaces, keeping what is there now at $OLD"
-    "the build after that removes $OLD, so a file moved into the built tree is recoverable for one build and no longer")
+    ${where[@]+"${where[@]}"})
+  # What the next build does with these is worth saying only where there is a
+  # next build.  With a finding above that stops one outright, the two lines
+  # below name a replacement and a current.old that never arrive, and the file
+  # this note exists to save is the one they would be wrong about.
+  if [ "$BUILD_BLOCKED" -gt 0 ]; then
+    lines[${#lines[@]}]='no build will run until the problems above are fixed, so nothing here is replaced yet'
+  else
+    lines[${#lines[@]}]="the next build $replaces, keeping what is there now at $OLD"
+    lines[${#lines[@]}]="the build after that removes $OLD, so a file moved into the built tree is recoverable for one build and no longer"
+  fi
   i=0
   while [ "$i" -lt "${#MISMATCH_PATHS[@]}" ]; do
     lines[${#lines[@]}]=${MISMATCH_PATHS[$i]}
@@ -1333,15 +1569,40 @@ audit_broken_links() {
   local out err marker line link dest target cur dots home qdots qhome n lines
   local stream cap rest msg samples remedy where
 
-  # Uncounted, and before every other check here, which all need a built tree to
-  # mean anything.
-  if [ -d "$DOTFILES" ] && [ ! -d "$CUR" ]; then
-    if [ -e "$CUR" ] || [ -L "$CUR" ]; then
-      note "$CUR exists but is not a directory, so there is no built tree to check the links in ${HOME-} against" \
-        'shale builds into it: remove it, or move it aside'
-    else
-      note "there is no built tree at $CUR, so shale cannot tell a link into it from any other broken link" \
-        'build one with: shale build'
+  # Before every other check here, which all need a built tree to mean anything.
+  #
+  # The two states build refuses are findings, in build's own words: a link to a
+  # directory answers -d as readily as a directory does, so without the -L arm
+  # the one shape that says nothing at all is the one a build would write
+  # through.  Nothing at that path is not a defect - it is the state before the
+  # first build - and stays a note.
+  #
+  # Both findings carry the clause the note they replaced had, and carry it
+  # only where it is true: everything below this returns without a word when
+  # $CUR is not a directory, and silence from a walk that did not run reads as
+  # a clean answer.  A link to a directory is the one shape where the walk does
+  # run - -d follows it - so that is the one that must not say it.
+  if [ -d "$DOTFILES" ]; then
+    if [ -L "$CUR" ]; then
+      lines=("$CUR is a symlink"
+        'shale builds into it, and would write through the link'
+        'remove it, or move it aside')
+      [ -d "$CUR" ] ||
+        lines[${#lines[@]}]="until then there is no built tree to check the links in ${HOME-} against"
+      blocking_finding ${lines[@]+"${lines[@]}"}
+    elif [ -e "$CUR" ] && [ ! -d "$CUR" ]; then
+      blocking_finding "$CUR exists but is not a directory" \
+        'shale builds into it' \
+        'remove it, or move it aside' \
+        "until then there is no built tree to check the links in ${HOME-} against"
+    elif [ ! -d "$CUR" ]; then
+      lines=("there is no built tree at $CUR, so shale cannot tell a link into it from any other broken link")
+      # Offered only where it would work.  With a layer conflict or an
+      # unreadable layer above, 'shale build' is a command that exits 1, and
+      # sending a reader to it is the failure this whole check exists to stop.
+      [ "$BUILD_BLOCKED" -gt 0 ] ||
+        lines[${#lines[@]}]='build one with: shale build'
+      note ${lines[@]+"${lines[@]}"}
     fi
   fi
 
@@ -2011,18 +2272,28 @@ cmd_apply() {
 # Nothing here exits early or short-circuits: every check runs whatever the ones
 # before it found, and only the finding count decides the exit status.
 cmd_doctor() {
-  local tool i name path root dir entry leaf known remedy qlock lines
+  local tool i name path root dir entry leaf known remedy qlock lines layers
+  local pending
 
   FINDINGS=0
+  BUILD_BLOCKED=0
+  pending=0
 
   # Every tool shale runs, and the list a new one joins.  Elsewhere a tool is
   # checked at its point of use only where its absence would be silent or would
   # name something other than the missing tool; doctor is where that stops,
   # because checking is its point of use and it promises prerequisites.
   for tool in cp git mkdir mv rm rmdir stow; do
-    command -v "$tool" >/dev/null 2>&1 ||
-      finding "$tool is not installed" \
-        "install it with your system package manager: shale installs nothing"
+    command -v "$tool" >/dev/null 2>&1 && continue
+    # git is wanted only for a clone root that has a url and nothing at its
+    # path, and stow only by apply, so neither of those two stops a build on its
+    # own; the other five do, and no line below may then offer one.
+    case "$tool" in
+      git | stow) ;;
+      *) BUILD_BLOCKED=$((BUILD_BLOCKED + 1)) ;;
+    esac
+    finding "$tool is not installed" \
+      "install it with your system package manager: shale installs nothing"
   done
   command -v chkstow >/dev/null 2>&1 ||
     note "chkstow is not installed" \
@@ -2037,16 +2308,16 @@ cmd_doctor() {
       # One input reaches this arm and is told something false: a symlink whose
       # target sits under a directory that cannot be searched.  Naming that needs
       # readlink, checked for lazily, so the line prescribes nothing.
-      finding "$DOTFILES exists but is not a directory" \
+      blocking_finding "$DOTFILES exists but is not a directory" \
         "shale keeps your layers, your config and its build output there"
     elif first_unsearchable_ancestor "$DOTFILES"; then
       # No remedy line: parse_config's arm names this same directory and this
       # same cause a moment later, and one is enough for both.
-      finding "cannot search $UNSEARCHABLE: permission denied" \
+      blocking_finding "cannot search $UNSEARCHABLE: permission denied" \
         "shale cannot tell whether there is a dotfiles directory at $DOTFILES"
     else
       shell_quote "$DOTFILES"
-      finding "no dotfiles directory at $DOTFILES" \
+      blocking_finding "no dotfiles directory at $DOTFILES" \
         "create it with: mkdir -p $QUOTED"
     fi
   fi
@@ -2057,7 +2328,7 @@ cmd_doctor() {
   # all - but the finding states both readings rather than calling it stale:
   # nothing shale can read tells a live holder from a killed one.
   if [ -L "$LOCK" ]; then
-    finding "$LOCK is a symlink" \
+    blocking_finding "$LOCK is a symlink" \
       'build and apply take their lock by creating that directory, and will not follow a link to one' \
       'remove it, or move it aside, or neither will run'
   elif [ -d "$LOCK" ]; then
@@ -2065,18 +2336,18 @@ cmd_doctor() {
     qlock=$QUOTED
     remedy="rmdir $qlock"
     dir_is_empty "$LOCK" || remedy="rm -rf $qlock"
-    finding "a shale has the lock at $LOCK, or a killed one left it behind" \
+    blocking_finding "a shale has the lock at $LOCK, or a killed one left it behind" \
       "build and apply take it so that two of them cannot rebuild $CUR at once, and both refuse while it is there" \
       'nothing shale can read tells a live holder from a dead one, so this is a lock to remove only if no other shale is running' \
       "remove it with: $remedy"
   elif [ -e "$LOCK" ]; then
-    finding "$LOCK exists but is not a directory" \
+    blocking_finding "$LOCK exists but is not a directory" \
       'build and apply take their lock by creating that directory' \
       'remove it, or move it aside, or neither will run'
   elif [ -d "$DOTFILES" ] && [ -x "$DOTFILES" ] && [ ! -w "$DOTFILES" ]; then
     # acquire_lock's last refusal, and the only one with nothing at the lock
     # path to look at.  The last line is build's own remedy, word for word.
-    finding "no build or apply can create the lock at $LOCK" \
+    blocking_finding "no build or apply can create the lock at $LOCK" \
       'they take their lock by creating that directory, and stop where they cannot' \
       "check that $DOTFILES is writable"
   fi
@@ -2086,6 +2357,9 @@ cmd_doctor() {
   # its errors as a finding, so each must land in the report the count describes.
   parse_config 2>&1
   FINDINGS=$((FINDINGS + CONFIG_ERRORS))
+  # Every one of them stops a build: build calls this same parse as
+  # 'parse_config || exit 1'.
+  BUILD_BLOCKED=$((BUILD_BLOCKED + CONFIG_ERRORS))
 
   i=0
   while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
@@ -2095,30 +2369,79 @@ cmd_doctor() {
     dir=$DOTFILES/$path
     if [ -d "$dir" ] && { [ ! -r "$dir" ] || [ ! -x "$dir" ]; }; then
       denied_verb "$dir"
-      finding "layer '$name': $DENIED_VERB $dir: permission denied" \
+      blocking_finding "layer '$name': $DENIED_VERB $dir: permission denied" \
         'shale composes a layer by walking it, and build stops there' \
         'check the permissions on that directory'
     elif [ -d "$dir" ]; then
       :
     elif obscured_ancestor "$DOTFILES" "$path"; then
-      finding "layer '$name': cannot search $OBSCURED: permission denied" \
+      blocking_finding "layer '$name': cannot search $OBSCURED: permission denied" \
         "shale cannot tell whether there is a directory at $dir" \
         'check the permissions on that directory'
     elif [ -e "$dir" ] || [ -L "$dir" ]; then
-      finding "layer '$name': $dir exists but is not a directory"
+      blocking_finding "layer '$name': $dir exists but is not a directory"
     elif [ -d "$DOTFILES/$root" ]; then
-      finding "layer '$name' has no directory at $dir, but its clone at $DOTFILES/$root exists" \
+      blocking_finding "layer '$name' has no directory at $dir, but its clone at $DOTFILES/$root exists" \
         "check the path on line ${LAYER_LINES[$i]}"
     elif [ -e "$DOTFILES/$root" ] || [ -L "$DOTFILES/$root" ]; then
-      finding "layer '$name' has no directory at $dir" \
+      blocking_finding "layer '$name' has no directory at $dir" \
         "its clone root $DOTFILES/$root exists but is not a directory" \
         'remove it, or move it aside'
     elif clone_url "$root"; then
+      # Nothing is at the clone root, so build will fetch it: this is
+      # will_clone's answer, reached by the same arms in the same order.
+      pending=1
       note "layer '$name' has no directory at $dir yet" \
         "its clone root '$root' has a url: $CLONE_URL"
     else
-      finding "layer '$name' has no directory at $dir and no url for '$root'" \
+      blocking_finding "layer '$name' has no directory at $dir and no url for '$root'" \
         "add a url on that line, or create the directory"
+    fi
+    i=$((i + 1))
+  done
+
+  # Missing git is a finding above and stops no build on its own - a machine
+  # holding every layer builds with no git at all.  Together with a layer whose
+  # clone root has a url and nothing at its path it does stop one, in
+  # clone_missing_roots, and doctor has both halves in hand: counted here so
+  # that nothing below offers a build that dies fetching.  No second finding -
+  # the missing tool is already one.
+  if [ "$pending" -eq 1 ] && ! command -v git >/dev/null 2>&1; then
+    BUILD_BLOCKED=$((BUILD_BLOCKED + 1))
+  fi
+
+  # The layers as build composes them, once the loop above has said which of
+  # them there is anything to walk.  A root that is missing, unreadable or not a
+  # directory is that loop's finding and is left out here rather than reported
+  # twice; every layer left is one build would walk.
+  layers=
+  i=0
+  while [ "$i" -lt "${#LAYER_PATHS[@]}" ]; do
+    dir=$DOTFILES/${LAYER_PATHS[$i]}
+    if [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ]; then
+      layers="$layers $i"
+    fi
+    i=$((i + 1))
+  done
+  LAYER_DENIED=0
+  [ -z "$layers" ] || scan_layer_trees '' "${layers# }"
+  # Under the cap every one of them is printed above and this says nothing.
+  if [ "$LAYER_DENIED" -gt "$LAYER_DENIED_CAP" ]; then
+    i=$((LAYER_DENIED - LAYER_DENIED_CAP))
+    note "and $i more layer paths shale cannot read, not named here"
+  fi
+
+  # build's own refusal, in build's own words.  It is checked against the layers
+  # rather than against the composed tree because that is where the file has to
+  # be removed from, and because a layer providing one refuses every build from
+  # now on: shale writes that path itself, so no build can be made to accept it.
+  i=0
+  while [ "$i" -lt "${#LAYER_NAMES[@]}" ]; do
+    dir=$DOTFILES/${LAYER_PATHS[$i]}/.stow-local-ignore
+    if [ -e "$dir" ] || [ -L "$dir" ]; then
+      blocking_finding "layer '${LAYER_NAMES[$i]}' provides $dir" \
+        "shale writes $CUR/.stow-local-ignore itself" \
+        'remove it from that layer'
     fi
     i=$((i + 1))
   done
