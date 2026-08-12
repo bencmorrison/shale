@@ -177,10 +177,15 @@ about a file the build never touches. A
 build composes into `~/.dotfiles/current.new` and renames that into place, so a `current.new` left
 lying about is a run that died mid-build and is safe to delete.
 
-One file in there is shale's own rather than a copy: `current/.stow-local-ignore`, which keeps a
-`README`, `LICENSE` or `COPYING` at the top of the built tree out of `$HOME`. A layer that ships a
-`.stow-local-ignore` at its own top level fails the build, naming the layer; one further down is an
-ordinary file and is copied like any other.
+One file in there is shale's own rather than a copy: `current/.stow-local-ignore`, which is GNU Stow
+2.4.1's default ignore list. It keeps a `README`, `LICENSE` or `COPYING` at the top of the built tree
+out of `$HOME`, and at any depth a `.gitignore`, a `.gitmodules`, an editor backup like `.zshrc~`, an
+emacs autosave or lock file like `#notes#` or `.#lockfile`, and
+the furniture of RCS, CVS, Subversion, Darcs and Mercurial. Stow reads a package's own list *instead
+of* its built-in one rather than as well, so the file has to carry the whole of it; writing 2.4.1's
+is also what makes stow 2.3.1 apply the same tree. A layer that ships a `.stow-local-ignore` at its
+own top level fails the build, naming the layer; one further down is an ordinary file and is copied
+like any other.
 
 To update your layers, pull each clone root with git, then apply:
 
