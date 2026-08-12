@@ -242,6 +242,27 @@ tmux's `source-file` keeps the last value, as git's include does, so it goes at 
 directory; the base layer's `tmux.conf` still names what it sources, and the layers supply those
 files.
 
+Whichever tool it is, a higher layer must not replace the file that carries the include. Reconciling
+`~/.gitconfig` the ordinary way — a whole `.gitconfig` in `local`, per *Replacing a file, and adding
+one* above — takes the `[include]` line with the rest of the file, and every fragment it named stops
+being read. Nothing reports it, and `which` is the wrong question to ask: the fragment is still in
+the built tree, still linked into `$HOME`, and still the winner at its own path. Only the tool
+knows, and what it answers with is the overriding file's value rather than the fragment's:
+
+```
+$ git config --get user.email
+me@example.com
+
+$ shale which .config/git/conf.d/50-work.conf
+winner    local  /home/you/.dotfiles/local/.config/git/conf.d/50-work.conf
+```
+
+A value you put in a fragment coming back as something else — or as nothing, exit 1 — is how you
+notice. Then ask `which` about the *including* file rather than the fragment: a `shadowed` line
+under `.gitconfig` says a higher layer replaced it, and that layer's copy has to carry the
+`[include]` too. Where both layers have a claim on the file itself, that copy is the one to add it
+to.
+
 ## Symlinks in a layer
 
 A symlink is copied as a symlink, target text unchanged, and it is a leaf: shale never recurses into

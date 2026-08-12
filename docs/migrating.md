@@ -384,7 +384,21 @@ apply again.
 
 ## Leaving shale, with your dotfiles
 
-Four commands, in this order, each one conditional on the one before it. Paste the block whole:
+Run this first, before the block below and while the links are still there. It names every file in
+`$HOME` that the copy is about to overwrite:
+
+```sh
+( cd ~/.dotfiles/current && find . ! -type d -exec sh -c 'for p; do p=${p#./}; [ -L "$HOME/$p" ] || [ ! -e "$HOME/$p" ] || printf "%s\n" "$HOME/$p"; done' sh {} + )
+```
+
+Every path it prints is one the copy will overwrite; move each aside, or fold it into a layer,
+first. On a `$HOME` that only shale writes to it prints nothing at all. It is a separate command
+rather than a flag on the copy because GNU `cp` has a `-n` that skips an existing destination
+instead of overwriting it, and GNU coreutils 9.4 answers every use of it with `warning: behavior of
+-n is non-portable and may change in future` — so the recipe stays as it is and the check does the
+work. What can be on that list, and why nothing in the block itself stops on it, is below the block.
+
+Then four commands, in this order, each one conditional on the one before it. Paste the block whole:
 
 ```sh
 stow -D -d ~/.dotfiles -t ~ current &&
@@ -413,20 +427,9 @@ instead of writing through it, is one. A path the built tree carries but stow wa
 is the other, which is what `.stow-local-ignore` does to the `README.md`, `LICENSE` and `COPYING` at
 the top of a repository-root layer: your own `~/README.md` has no link there for `cp` to collide
 with, so the repository's lands on top of it. Neither is a conflict to stow or a refusal to `cp`, so
-neither stops the block, and the fourth command then deletes the copy in `~/.dotfiles`.
-
-This names every one of them, and it has to be run before the block, while the links are still
-there:
-
-```sh
-( cd ~/.dotfiles/current && find . ! -type d -exec sh -c 'for p; do p=${p#./}; [ -L "$HOME/$p" ] || [ ! -e "$HOME/$p" ] || printf "%s\n" "$HOME/$p"; done' sh {} + )
-```
-
-Every path it prints is one the copy will overwrite; move each aside, or fold it into a layer, first.
-On a `$HOME` that only shale writes to it prints nothing at all. GNU `cp` has a `-n` that skips an
-existing destination rather than overwriting it, and GNU coreutils 9.4 answers every use of it with
-`warning: behavior of -n is non-portable and may change in future`, so the recipe stays as it is and
-the check does the work.
+neither stops the block, and the fourth command then deletes the copy in `~/.dotfiles`. The check at
+the top of this section names both, which is the whole of why it is run before the block rather than
+after it.
 
 `.` in `~/.dotfiles/current/.` is what makes the copy the *contents* of the tree rather than a
 `~/current` directory, and it takes the dotfiles with it. `-L` reads through a symlink a layer ships
@@ -503,8 +506,8 @@ The newer stow does not refuse at all. 2.4.1 — the likelier one to be on a Mac
 where a Mac gets stow — unstows straight past that file and exits 0, and the block then runs to the
 end: the copy replaces your edited file with the built tree's version of it, and the fourth command
 deletes the tree that version came from. The whole run exits 0 with nothing on either stream.
-Chaining cannot catch that one, because nothing failed. The check above is what catches it, and only
-if you run it before the block.
+Chaining cannot catch that one, because nothing failed. The check this section opens with is what
+catches it, and it can only catch it there — run after the block, it has nothing left to look at.
 
 That is the whole of shale's footprint: it writes nothing outside `~/.dotfiles`, and the script is
 the copy you made yourself, at `~/.local/bin/shale` or wherever you put it. Delete that too and
