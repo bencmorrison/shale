@@ -31,9 +31,17 @@ Copy the script to any directory on your `PATH`:
 ```sh
 mkdir -p ~/.local/bin
 cp shale ~/.local/bin/shale
+command -v shale
 ```
 
-Shale never needs to know where it lives, and there is nothing else to install.
+`~/.local/bin` is the usual choice, and it is often not on `PATH` on the machine you are
+bootstrapping, because putting it there is a thing your dotfiles do and they are not applied yet.
+That is what the third line is for: nothing printed means this shell cannot find shale, and
+`export PATH="$HOME/.local/bin:$PATH"` is enough to get through the bootstrap below. Applying your
+layers is what makes it permanent.
+
+Shale never needs to know where it lives, and there is nothing else to install. There is no version
+command: shale is one file, and the copy you have is whatever the repository held when you copied it.
 
 ## Bootstrap on a new machine
 
