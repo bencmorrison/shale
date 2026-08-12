@@ -1136,6 +1136,181 @@ layer_denied() {
     'check the permissions on that file'
 }
 
+# The paths in $HOME that stow will refuse to write over, collected by the layer
+# walk below.  Capped like every other list doctor keeps: the cap changes what is
+# printed and never what is counted.
+APPLY_CONFLICT_CAP=10
+APPLY_CONFLICTS=0
+APPLY_CONFLICT_PATHS=()
+# The subtree below a path already answered for, empty when there is none.
+HOME_CONFLICT_SKIP=
+
+# Records $HOME/$1 when what stands there is not the built tree's own copy of
+# the path and a build would provide that path as a $2 - 'file' or 'directory'.
+# stow refuses every one of them, verified against 2.3.1 and 2.4.1, which word
+# the refusal differently, report it from different phases, and agree on which
+# shapes are refused.
+#
+# The layers rather than the built tree, because apply builds before it stows:
+# a path the built tree still holds and no layer provides any more is gone by
+# the time stow looks, and naming it would be a finding about a tree that apply
+# replaces on its way past.
+#
+# Two directories are the one pair that is not a refusal - stow puts its links
+# inside a directory that is already there - and the only reason the kind is
+# passed in at all.
+#
+# A symlink is the shape that costs the thought.  What stow accepts is the link
+# an apply wrote and nothing else: relative, and resolving to the built tree's
+# copy of that same path.  A link to another path in the tree is 'stowed to a
+# different package', one to anywhere else is 'not owned by stow', and both are
+# refusals on both versions.  -ef is what answers that in two stats and no fork,
+# because an apply's link resolves to the very file it is compared against -
+# where readlink would be a process per path in $HOME, on the walk that has to
+# stay cheap.  It is read only where it cannot mislead: -ef is true of an
+# absolute link to the right file as well, and stow refuses that one, so this
+# check is silent about a link nobody but a hand makes.  A dangling link is the
+# one shape -ef cannot speak for at all, and the only one readlink is spent on:
+# there is at most a handful in any $HOME, and every one of them costs a fork.
+home_conflict() {
+  local srel=$1 kind=$2 path
+  # Everything below a path this has already answered for.  Two shapes need it:
+  # a directory in $HOME that is a symlink, under which every path here could
+  # name resolves outside $HOME and would send the reader to delete the wrong
+  # file; and a directory the ignore list names by segment, under which stow
+  # never goes.
+  if [ -n "$HOME_CONFLICT_SKIP" ]; then
+    case "$srel" in
+      "$HOME_CONFLICT_SKIP"/*) return 0 ;;
+    esac
+  fi
+  # The ignore list cmd_build writes, read as stow reads it, and it has to stay
+  # that list: a name missing here is a finding on a working setup for ever - a
+  # ~/.gitignore of the reader's own beside a layer that has one - and a name
+  # here that is not in the list is a refusal doctor goes quiet about.  Inline
+  # rather than a predicate of its own because this runs once per composed path
+  # and a bash function call is not free at that count.
+  #
+  # Stow compiles the list into two regexps, checked against both 2.3.1 and
+  # 2.4.1.  A pattern holding a '/' is matched against the whole path anchored
+  # at its ends, so the four below match at the top of the tree only and cover
+  # everything under a directory one of them names; stow adds
+  # '^/\.stow-local-ignore$' to whatever the file holds, which is the fourth.  A
+  # pattern without one is matched against a single path segment at any depth,
+  # and stow skips the directory as it descends, as the skip above does here.
+  case "${srel%%/*}" in
+    .stow-local-ignore | COPYING | README* | LICENSE*)
+      [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
+      return 0
+      ;;
+  esac
+  case "${srel##*/}" in
+    RCS | CVS | .cvsignore | .svn | _darcs | .hg | .git | .gitignore | .gitmodules | \
+      ?*,v | '.#'?* | ?*~ | '#'*'#')
+      # '.+,v', '\.\#.+', '.+~' and '\#.*\#' in glob: '.+' is one character or
+      # more, and '.*' is none or more.
+      [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
+      return 0
+      ;;
+  esac
+  # An empty HOME would make every path below the root directory's.
+  [ -n "${HOME-}" ] || return 0
+  path=$HOME_PREFIX/$srel
+  if [ -L "$path" ]; then
+    # The applied state, and the whole of it: one lstat and one pair of stats.
+    [ ! "$path" -ef "$CUR/$srel" ] || return 0
+    [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
+    if [ ! -e "$path" ]; then
+      # Dangling, and -ef cannot answer for one at all: what it points at is
+      # what decides, and the next apply builds before it stows.
+      ! link_points_into_the_tree "$path" || return 0
+    fi
+  else
+    [ -e "$path" ] || return 0
+    if [ "$kind" = directory ] && [ -d "$path" ]; then
+      return 0
+    fi
+  fi
+  APPLY_CONFLICTS=$((APPLY_CONFLICTS + 1))
+  [ "$APPLY_CONFLICTS" -gt "$APPLY_CONFLICT_CAP" ] ||
+    APPLY_CONFLICT_PATHS+=("$path")
+  return 0
+}
+
+# Non-zero unless the symlink $1 points into the built tree the way an apply
+# writes one, which for a link with nothing at the end of it is the whole of what
+# stow needs: it removes its own links before it re-links, so a dangling relative
+# one pointing anywhere inside the tree is made good by the build and the stow an
+# apply runs in that order.  Whether it points at the tree's copy of its own path
+# or at another of them makes no difference while it dangles, and the package
+# holding a file or a directory there makes none either - all four run, on 2.3.1
+# and 2.4.1, exit 0.  A link that resolves is a different question and -ef has
+# already answered it: the same cross-tree link, once its target exists, is
+# 'stowed to a different package' on both.
+#
+# Called only for a dangling link, which is the one shape -ef cannot answer, and
+# it forks readlink - so the caller's guard is what keeps that off the walk.
+#
+# 'Cannot say' answers the same as 'it is the tree's', which is the answer that
+# reports nothing: a missing readlink is a note doctor has already printed, and a
+# finding raised on a guess is the failure this whole check exists to avoid.
+link_points_into_the_tree() {
+  local path=$1 dest
+  command -v readlink >/dev/null 2>&1 || return 0
+  dest=$(readlink "$path") || return 0
+  [ -n "$dest" ] || return 0
+  case "$dest" in
+    # An absolute link is refused wherever it points, on both versions.
+    /*) return 1 ;;
+    *) dest=${path%/*}/$dest ;;
+  esac
+  normalise_path "$dest"
+  dest=$NORMALISED
+  normalise_path "$CUR"
+  case "$dest" in
+    "$NORMALISED" | "$NORMALISED"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# One finding however many paths, and a finding rather than a note: stow plans
+# the whole operation and abandons all of it, so this is one apply that will not
+# run - and doctor reporting green on the state where apply fails is the reading
+# of 'is this machine set up' that costs a reader the most.
+#
+# It stops no build, so BUILD_BLOCKED is left alone: the layers compose fine and
+# every line elsewhere that offers a build keeps its offer.
+report_home_conflicts() {
+  local n=$APPLY_CONFLICTS i lines paths hold each rest
+  [ "$n" -gt 0 ] || return 0
+  paths='paths'
+  hold='hold something no apply put there, and a layer provides each of them'
+  each='each of these is'
+  if [ "$n" -eq 1 ]; then
+    paths='path'
+    hold='holds something no apply put there, and a layer provides it'
+    each='it is'
+  fi
+  # Both halves of 'it does not go through', because the two kinds fail
+  # differently: stow refuses the whole operation at a file, and dies part-way
+  # with 'unstow_contents() called with non-directory path' at a directory the
+  # layers provide a file at - which is cmd_apply's 'stow failed part-way', so a
+  # doctor promising nothing was relinked would contradict shale's own apply.
+  lines=("$n $paths in $HOME $hold"
+    'apply gives the composed tree to stow, and stow will not write over what it did not create: it refuses the whole operation, or stops part-way through one'
+    "no apply finishes until $each moved aside, or copied into a layer and removed from $HOME")
+  i=0
+  while [ "$i" -lt "${#APPLY_CONFLICT_PATHS[@]}" ]; do
+    lines[${#lines[@]}]=${APPLY_CONFLICT_PATHS[$i]}
+    i=$((i + 1))
+  done
+  if [ "$n" -gt "$APPLY_CONFLICT_CAP" ]; then
+    rest=$((n - APPLY_CONFLICT_CAP))
+    lines[${#lines[@]}]="and $rest more, not named here"
+  fi
+  finding ${lines[@]+"${lines[@]}"}
+}
+
 # Every path two layers disagree about the kind of, and every layer path this
 # walk cannot read: the states build refuses that nothing else in doctor sees.
 # The walk is build's own minus the copying - one listing per layer directory
@@ -1221,6 +1396,9 @@ scan_layer_trees() {
         layer_denied "${LAYER_NAMES[$i]}" "$e" file
       fi
       if [ "$alone" -eq 1 ]; then
+        # One layer holds this subtree, so this listing is the only one that
+        # reaches this path and the kind here is the kind that lands.
+        home_conflict "$srel" "$kind"
         [ "$kind" = directory ] || continue
         scan_layer_trees "$srel" "$i"
         continue
@@ -1288,6 +1466,11 @@ scan_layer_trees() {
         last=$k
       done
       [ "$first" -eq "$i" ] || continue
+      # Below this line the walk is at the layer that decides this path, which is
+      # once per composed path however many layers provide it.  first_kind, not
+      # kind: the loop above reused kind for the layers it compared, and the kind
+      # that lands in the composed tree is the first provider's.
+      home_conflict "$srel" "$first_kind"
       if [ "$other" -ge 0 ]; then
         # The pair is build's pair: build collides against the *nearest*
         # provider below, so naming the first one instead sends someone to a
@@ -1588,6 +1771,39 @@ audit_built_tree() {
   note ${lines[@]+"${lines[@]}"}
 }
 
+# Non-zero unless the next apply removes the orphaned link $1 by itself, so that
+# the remedy printed for it is the one that works: $1 is the link's path
+# normalised, $2 is $HOME normalised, and $3 is 'relative' or 'absolute' for the
+# way the link's own target is spelled.
+#
+# Both halves were run, against 2.3.1 and 2.4.1, which agree on every one of
+# them.  A link spelled as an absolute path is never pruned - 2.3.1 says 'BUG in
+# find_stowed_path?' on its stderr and carries on, 2.4.1 says nothing - and a
+# relative one is pruned exactly where the built tree still holds the directory
+# it sits in, that being the directory stow's unstow phase walks.  Apply's own
+# links are relative, so the ordinary case of a file leaving its only layer is
+# one 'shale apply' and no rm at all; a directory that left every layer is the
+# case rm is for.
+apply_prunes_link() {
+  local nlink=$1 nhome=$2 spelling=$3 prefix rel dir
+  [ "$spelling" = relative ] || return 1
+  # A home of '/' is the one whose join would come out doubled, and the one
+  # whose prefix is empty.
+  prefix=${nhome%/}
+  case "$nlink" in
+    "$prefix"/*) rel=${nlink#"$prefix"/} ;;
+    *) return 1 ;;
+  esac
+  case "$rel" in
+    */*) dir=$CUR/${rel%/*} ;;
+    # A link directly in $HOME, whose directory is the built tree itself.
+    *) dir=$CUR ;;
+  esac
+  # A symlink to a directory is a leaf to stow as it is to the composer, so it
+  # is not a directory the unstow phase walks into.
+  [ -d "$dir" ] && [ ! -L "$dir" ]
+}
+
 # Every link under $HOME that points into the built tree at a path the built
 # tree no longer holds: one finding each, and the remedy once.  Up to $cap of
 # them the remedy follows the findings; past it the count, the directory they
@@ -1605,7 +1821,7 @@ audit_built_tree() {
 # own dangling symlink judged against itself would be reported for ever.
 audit_broken_links() {
   local out err marker line link dest target cur dots home qdots qhome n lines
-  local stream cap rest msg samples remedy where
+  local stream cap rest msg samples remedy where nlink nhome spelling prunable
 
   # Before every other check here, which all need a built tree to mean anything.
   #
@@ -1657,6 +1873,11 @@ audit_broken_links() {
   cur=$NORMALISED
   normalise_path "$DOTFILES"
   dots=$NORMALISED
+  # For the same comparison against a link's own path that $dots is for: both
+  # sides normalised, so the two spellings compare rather than the strings as
+  # they arrived.
+  normalise_path "$HOME"
+  nhome=$NORMALISED
 
   # Exactly one trailing slash.  File::Find will not descend a top directory
   # that is itself a symlink unless the path ends in '/', so a $HOME reached
@@ -1678,6 +1899,7 @@ audit_broken_links() {
   out=$( { err=$(chkstow -b -t "$home" 2>&1 1>&3 3>&-); printf '%s\n%s' "$marker" "$err"; } 3>&1 )
 
   n=0
+  prunable=0
   lines=()
   samples=()
   stream=out
@@ -1734,12 +1956,18 @@ audit_broken_links() {
     case "$NORMALISED" in
       "$dots" | "$dots"/*) continue ;;
     esac
+    # Kept, because the next normalise_path overwrites it and the remedy below
+    # needs the link's own path as well as its target's.
+    nlink=$NORMALISED
     dest=$(readlink "$link") || continue
     [ -n "$dest" ] || continue
     # A relative target is what stow writes, and it is relative to the directory
-    # holding the link rather than to anywhere shale is.
+    # holding the link rather than to anywhere shale is.  Which of the two it is
+    # decides whether an apply removes this link, so it is recorded before the
+    # join takes the difference away.
+    spelling=relative
     case "$dest" in
-      /*) ;;
+      /*) spelling=absolute ;;
       *) dest=${link%/*}/$dest ;;
     esac
     normalise_path "$dest"
@@ -1757,6 +1985,9 @@ audit_broken_links() {
     # this quadratic - and the ancestor is folded in one link at a time.
     n=$((n + 1))
     [ "$n" -gt "$cap" ] || samples+=("$link points at $target, which the built tree no longer provides")
+    # Counted for every link and not only for the ones named: the cap decides
+    # what is printed, and the remedy is about all of them.
+    ! apply_prunes_link "$nlink" "$nhome" "$spelling" || prunable=$((prunable + 1))
     common_ancestor "$link"
   done <<EOF
 $out
@@ -1785,17 +2016,46 @@ EOF
   # line unindented: a sentence there about what stow prunes reads as one more
   # finding, against a summary that has just counted them.  An imperative reads
   # as the answer to them, which is what this block is.
-  if [ "$n" -le "$cap" ]; then
-    remedy=('remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying')
+  #
+  # Three shapes, because the links have two causes and one remedy fits only
+  # one of them.  A file that left its only layer leaves a link the next apply
+  # removes on its own, and telling the reader to rm it - and that reapplying
+  # will not help - is both more work than the state needs and false about it.
+  # A directory that left every layer is the case that needs the rm, and the
+  # sweep under it is the alternative to doing that by hand.  Where the two are
+  # mixed, the rm is what covers all of them and the apply is named for what it
+  # takes off the list.
+  if [ "$prunable" -eq "$n" ] && [ "$n" -eq 1 ]; then
+    remedy=('clear it with: shale apply'
+      'stow prunes the links an apply wrote — relative, and in a directory the built tree still holds — and this is one of them')
+  elif [ "$prunable" -eq "$n" ]; then
+    remedy=('clear them with: shale apply'
+      'stow prunes the links an apply wrote — relative, and in a directory the built tree still holds — and every one of these is one of them')
   else
-    # The findings are below the remedy in this shape, and most of them are not
-    # printed at all, so there is nothing 'named above' to point at.
-    remedy=('remove them; the built tree is correct, and nothing needs rebuilding or reapplying')
+    if [ "$n" -le "$cap" ]; then
+      if [ "$prunable" -eq 0 ]; then
+        remedy=('remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying')
+      else
+        remedy=('remove the links named above; the built tree is correct and needs no rebuilding')
+      fi
+    else
+      # The findings are below the remedy in this shape, and most of them are not
+      # printed at all, so there is nothing 'named above' to point at.
+      if [ "$prunable" -eq 0 ]; then
+        remedy=('remove them; the built tree is correct, and nothing needs rebuilding or reapplying')
+      else
+        remedy=('remove them; the built tree is correct and needs no rebuilding')
+      fi
+    fi
+    if [ "$prunable" -gt 0 ]; then
+      remedy+=("an apply clears $prunable of them and leaves the rest: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds")
+    else
+      remedy+=('stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links')
+    fi
+    remedy+=('stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' \
+      "  stow -D -p --no-folding -d $qdots -t $qhome current && shale apply" \
+      'earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory')
   fi
-  remedy+=('stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links')
-  remedy+=('stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' \
-    "  stow -D -p --no-folding -d $qdots -t $qhome current && shale apply" \
-    'earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory')
 
   if [ "$n" -le "$cap" ]; then
     for msg in ${samples[@]+"${samples[@]}"}; do
@@ -2150,6 +2410,9 @@ cmd_build() {
   # On 2.4.1 the file changes no outcome, and that is not a reason to delete
   # it: 2.3.1's built-in list has no \.gitmodules, so writing 2.4.1's list is
   # the whole of what makes an apply land the same tree on both.
+  #
+  # doctor reads this same list as stow_ignores, to know which paths in $HOME an
+  # apply never touches.  A pattern added here is added there.
   printf '%s\n' \
     "# Written by shale on every build, which overwrites whatever is here:" \
     "# edit a layer, not this file." \
@@ -2370,15 +2633,15 @@ cmd_doctor() {
   # checked at its point of use only where its absence would be silent or would
   # name something other than the missing tool; doctor is where that stops,
   # because checking is its point of use and it promises prerequisites.
-  for tool in cp git mkdir mv rm rmdir stow; do
+  #
+  # git is not here: it is wanted for one thing only, and whether that thing is
+  # wanted is not known until the layers have been looked at.  Its check is below
+  # them.
+  for tool in cp mkdir mv rm rmdir stow; do
     command -v "$tool" >/dev/null 2>&1 && continue
-    # git is wanted only for a clone root that has a url and nothing at its
-    # path, and stow only by apply, so neither of those two stops a build on its
-    # own; the other five do, and no line below may then offer one.
-    case "$tool" in
-      git | stow) ;;
-      *) BUILD_BLOCKED=$((BUILD_BLOCKED + 1)) ;;
-    esac
+    # stow is wanted only by apply, so it stops no build on its own; the other
+    # five do, and no line below may then offer one.
+    [ "$tool" = stow ] || BUILD_BLOCKED=$((BUILD_BLOCKED + 1))
     finding "$tool is not installed" \
       "install it with your system package manager: shale installs nothing"
   done
@@ -2487,14 +2750,25 @@ cmd_doctor() {
     i=$((i + 1))
   done
 
-  # Missing git is a finding above and stops no build on its own - a machine
-  # holding every layer builds with no git at all.  Together with a layer whose
-  # clone root has a url and nothing at its path it does stop one, in
-  # clone_missing_roots, and doctor has both halves in hand: counted here so
-  # that nothing below offers a build that dies fetching.  No second finding -
-  # the missing tool is already one.
-  if [ "$pending" -eq 1 ] && ! command -v git >/dev/null 2>&1; then
-    BUILD_BLOCKED=$((BUILD_BLOCKED + 1))
+  # git, here rather than in the tool list, because a machine holding every layer
+  # runs build and apply with no git at all: reported against the clone the
+  # config asks for, so that a setup which needs none is not told it has a
+  # problem.  A finding that offers no build is a false one, and the failure mode
+  # worse than the defect it guards against.
+  #
+  # The pending clone is the layer loop's own answer, which is will_clone's, so
+  # this and clone_missing_roots cannot drift over what a build is going to
+  # fetch.  Counted as blocking as well, so that nothing below offers a build
+  # that dies fetching.
+  if ! command -v git >/dev/null 2>&1; then
+    if [ "$pending" -eq 1 ]; then
+      BUILD_BLOCKED=$((BUILD_BLOCKED + 1))
+      finding 'git is not installed, and a layer above has still to be cloned' \
+        'install it with your system package manager: shale installs nothing'
+    else
+      note 'git is not installed' \
+        'shale runs it only to clone a layer this machine has not got, and every configured layer is already here'
+    fi
   fi
 
   # The layers as build composes them, once the loop above has said which of
@@ -2511,12 +2785,18 @@ cmd_doctor() {
     i=$((i + 1))
   done
   LAYER_DENIED=0
+  APPLY_CONFLICTS=0
+  APPLY_CONFLICT_PATHS=()
+  HOME_CONFLICT_SKIP=
   [ -z "$layers" ] || scan_layer_trees '' "${layers# }"
   # Under the cap every one of them is printed above and this says nothing.
   if [ "$LAYER_DENIED" -gt "$LAYER_DENIED_CAP" ]; then
     i=$((LAYER_DENIED - LAYER_DENIED_CAP))
     note "and $i more layer paths shale cannot read, not named here"
   fi
+  # The other half of that walk: what the layers hold, against what is in $HOME
+  # at the same paths.
+  report_home_conflicts
 
   # build's own refusal, in build's own words.  It is checked against the layers
   # rather than against the composed tree because that is where the file has to
@@ -2573,6 +2853,14 @@ cmd_doctor() {
       # dangling symlink, a fifo and a socket are all of that third shape, and
       # a symlink to a directory reads as the directory it is one of.
       if [ -d "$entry" ]; then
+        # Only where every line of the config parsed.  A directory is
+        # unaccounted for either because nothing configured it or because the
+        # line that did failed to parse, and shale cannot tell those apart: the
+        # second line below then invites the reader to delete the layer they are
+        # running doctor to fix, and with a config shale could not read at all -
+        # unreadable, or holding no records - every layer on the machine gets it.
+        # The parse error is above, and it is the one thing to act on.
+        [ "$CONFIG_ERRORS" -eq 0 ] || continue
         note "$entry is not a configured layer" \
           "it may be a leftover stow package, a stray clone, or a layer you removed from the config"
       elif [ -f "$entry" ] && [ ! -L "$entry" ]; then

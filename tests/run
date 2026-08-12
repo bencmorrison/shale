@@ -1766,9 +1766,10 @@ test_config_a_carriage_return_on_one_line_keeps_the_layers_above_it() {
   done <<EOF
 $shale_out
 EOF
-  # Only the refused record's own root, which is a stray for exactly the reason
-  # every other refused record's root is.
-  assert_eq 1 "$count" 'the number of stray-directory notes'
+  # Not even the refused record's own root: ~/.dotfiles/last is the layer line 5
+  # names, and the note's second line offers 'a layer you removed from the
+  # config' about the one directory the reader is running doctor to get back.
+  assert_eq 0 "$count" 'the number of stray-directory notes'
   assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
 }
 
@@ -5990,32 +5991,86 @@ test_doctor_a_stow_resource_file_is_not_globbed() {
 
 # The reason doctor calls parse_config bare where every other command exits on
 # it: a broken config is when you most need the rest of the report.
+# The later checks are the claim, and the stray scan is deliberately not one of
+# them: with no config at all shale cannot tell a layer from a leftover, so the
+# directory gets no note here and the stowrc note below it is what shows the run
+# carried on.
 test_doctor_a_broken_config_does_not_stop_the_later_checks() {
   sandbox_mkdir "$HOME/.dotfiles/common"
   sandbox_write "$HOME" .stowrc '--ignore=secret'
   run_shale doctor
   assert_status 1 "$shale_status"
   assert_contains "$shale_out" "shale: no config file at $HOME/.dotfiles/shale.conf" 'stdout'
-  assert_contains "$shale_out" \
-    "shale: $HOME/.dotfiles/common is not a configured layer" 'stdout'
+  assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
   assert_contains "$shale_out" "shale: a stow resource file exists at $HOME/.stowrc" 'stdout'
   assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
   assert_empty "$shale_err" 'stderr'
 }
 
+# Same again where the config is there and shale could not read a line of it.
+# Every layer on the machine is unaccounted for in that state, and telling the
+# reader that each of them 'may be a layer you removed from the config' is advice
+# to delete the lot.
 test_doctor_an_unreadable_config_still_reports_the_rest() {
   skip_if_root
   conf 'base personal/base'
   sandbox_mkdir "$HOME/.dotfiles/common"
+  sandbox_write "$HOME" .stowrc '--ignore=secret'
   chmod 0000 "$HOME/.dotfiles/shale.conf" || fail 'could not remove the read bit'
   run_shale doctor
   assert_status 1 "$shale_status"
   assert_contains "$shale_out" \
     "shale: cannot read $HOME/.dotfiles/shale.conf: permission denied" 'stdout'
-  assert_contains "$shale_out" \
-    "shale: $HOME/.dotfiles/common is not a configured layer" 'stdout'
+  assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
+  assert_contains "$shale_out" "shale: a stow resource file exists at $HOME/.stowrc" 'stdout'
   assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
   assert_empty "$shale_err" 'stderr'
+}
+
+# The report the issue this came from opened with: a duplicate name two lines up
+# leaves ~/.dotfiles/local unregistered, and the note then offers the reader 'a
+# layer you removed from the config' about the one layer that exists nowhere
+# else.  The parse error is above it, and it is the whole of what there is to do.
+test_doctor_a_parse_error_does_not_call_a_layer_it_names_a_stray() {
+  conf 'base base' 'base local'
+  mklayer base .zshrc
+  mklayer local .vimrc
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/shale.conf:2: duplicate layer name 'base', first used on line 1" 'stdout'
+  assert_not_contains "$shale_out" "$HOME/.dotfiles/local is not a configured layer" 'stdout'
+  assert_not_contains "$shale_out" 'a layer you removed from the config' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+}
+
+# The same for a config that parsed whole and named nothing: an empty file is one
+# every layer is missing from, so every layer would get the note.
+test_doctor_a_config_naming_no_layers_calls_no_directory_a_stray() {
+  conf '# nothing here' ''
+  mklayer base .zshrc
+  mklayer local .vimrc
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: no layers configured in $HOME/.dotfiles/shale.conf" 'stdout'
+  assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+}
+
+# And the other side of it, which is what keeps the scan worth having: a config
+# every line of which parsed says exactly which directories are layers, so a
+# stray really is one.
+test_doctor_a_config_that_parses_still_names_a_stray() {
+  conf 'base base'
+  mklayer base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/leftover"
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/leftover is not a configured layer" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   it may be a leftover stow package, a stray clone, or a layer you removed from the config' 'stdout'
 }
 
 # Problems cluster, and a doctor that stopped at the first is one you have to
@@ -6049,7 +6104,12 @@ test_doctor_reports_its_checks_in_order() {
   local saved line seen
   conf 'base personal/base' 'work work' 'lonely'
   mklayer personal/base .zshrc
-  sandbox_mkdir "$HOME/.dotfiles/common"
+  # A file rather than a directory, because the config above has an error in it
+  # and a directory gets no note in that state.  The scan is the same one.
+  sandbox_write "$HOME/.dotfiles" common 'not a layer'
+  # The path a layer provides that $HOME already holds, which is reported off the
+  # back of the layer walk and belongs with it.
+  sandbox_write "$HOME" .zshrc 'mine'
   # The lock is above the config in the report and has to stay there: it is the
   # one finding that says why a build refused, and every arm this loop does not
   # recognise is ignored, so nothing else here would notice it moving.
@@ -6068,14 +6128,16 @@ test_doctor_reports_its_checks_in_order() {
       'shale: a shale has the lock at '*) seen="$seen lock" ;;
       "shale: $HOME/.dotfiles/shale.conf:3:"*) seen="$seen config" ;;
       "shale: layer 'work'"*) seen="$seen layer" ;;
-      *' is not a configured layer') seen="$seen stray" ;;
+      *' holds something no apply put there, and a layer provides it') seen="$seen home" ;;
+      *' is not a layer, and no build reads it') seen="$seen stray" ;;
       'shale: a stow resource file'*) seen="$seen stowrc" ;;
-      'shale: 4 problems found') seen="$seen summary" ;;
+      'shale: 5 problems found') seen="$seen summary" ;;
     esac
   done <<EOF
 $shale_out
 EOF
-  assert_eq ' prerequisite lock config layer stray stowrc summary' "$seen" 'the order of the report'
+  assert_eq ' prerequisite lock config layer home stray stowrc summary' "$seen" \
+    'the order of the report'
 }
 
 # The stub PATH holds every other binary doctor and the harness need, so this
@@ -6105,12 +6167,15 @@ test_doctor_a_missing_prerequisite_is_named_and_nothing_is_installed() {
 # to report 'no problems found', exit 0, and send the reader to a build that then
 # failed.  One tool removed per run, so each is named on its own rather than one
 # of them carrying the assertion for all.
+#
+# git is not in the loop because it is the one tool whose absence is not a defect
+# on its own: the two cases that pin it are named for the clone.
 # shellcheck disable=SC2123
 test_doctor_names_every_tool_shale_runs() {
   local tool saved
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  for tool in cp git mkdir mv rm rmdir stow; do
+  for tool in cp mkdir mv rm rmdir stow; do
     stub_path_without "$tool"
     saved=$PATH
     PATH=$stub_path
@@ -6128,11 +6193,13 @@ test_doctor_names_every_tool_shale_runs() {
 }
 
 # The whole list at once, which is the state the issue this came from described:
-# a machine with a shell and nothing else.
+# a machine with a shell and nothing else.  The second layer has a url and no
+# directory, which is what puts git among the seven: on a machine with nothing
+# there is a clone to do.
 # shellcheck disable=SC2123
 test_doctor_names_all_the_missing_tools_in_one_run() {
   local tool saved
-  conf 'base personal/base'
+  conf 'base personal/base' "vim vim $CASE_DIR/repos/absent"
   mklayer personal/base .zshrc
   stub_path_without cp git mkdir mv rm rmdir stow
   saved=$PATH
@@ -6161,6 +6228,359 @@ test_doctor_a_missing_chkstow_warns_without_failing() {
   assert_status 0 "$shale_status"
   assert_contains "$shale_out" 'shale: chkstow is not installed' 'stdout'
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# ------------------------------------------ doctor's apply-conflict cases
+#
+# The paths in $HOME that stow will not write over, which is the commonest thing
+# there is to be wrong with a machine: a dotfile that was there before shale, or
+# one an editor replaced a link with.  stow plans the whole operation and
+# abandons all of it, so one of these is an apply that does nothing at all, and
+# doctor reporting green on it is the report costing a reader the most.
+#
+# Every case that says a path is a conflict runs the apply and asserts it failed,
+# and every case that says a path is not runs it and asserts it succeeded: the
+# claim is stow's, made against the stow on the machine, rather than this suite's
+# reading of what stow does.  2.3.1 and 2.4.1 word the refusal differently and
+# report it from different phases, so nothing here pins the text of it.
+
+test_doctor_a_home_path_a_layer_provides_is_a_finding_and_apply_fails() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME" .zshrc 'my existing zshrc'
+  # Before the first build, which is where a new machine meets it: the check is
+  # against the layers, so there is nothing to have built yet.
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor before the first build'
+  assert_contains "$shale_out" \
+    "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   apply gives the composed tree to stow, and stow will not write over what it did not create: it refuses the whole operation, or stops part-way through one' \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   no apply finishes until it is moved aside, or copied into a layer and removed from $HOME" \
+    'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.zshrc" 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  # And the apply it describes, on the same tree.
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+  assert_contains "$shale_err" "shale: stow failed; nothing in $HOME was relinked" 'the apply stderr'
+  assert_eq 'my existing zshrc' "$(cat "$HOME/.zshrc")" 'the file stow refused to replace'
+  # The build is not blocked by it, and the report must not say it is.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_exists "$HOME/.dotfiles/current/.zshrc" 'the built tree'
+}
+
+# Moved aside, and the same run says so: the finding is about $HOME rather than
+# about anything shale keeps, so nothing has to be rebuilt to clear it.
+test_doctor_the_finding_goes_when_the_path_does() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME" .zshrc 'my existing zshrc'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  rm -f "$sandbox_path" || fail 'could not move the file aside'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after'
+  assert_not_contains "$shale_out" 'no apply put there' 'stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+}
+
+# The everyday loop: once an apply has run, every path a layer provides is a
+# link, so this check is silent for ever after.  A layer edited and rebuilt
+# leaves it silent too - that is the state #75 exists about.
+test_doctor_says_nothing_about_a_home_full_of_applied_links() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer local .config/nvim/extra.lua
+  run_shale apply
+  assert_status 0 "$shale_status"
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the apply'
+  assert_not_contains "$shale_out" 'no apply put there' 'stdout'
+  mklayer personal/base .zshrc 'edited'
+  run_shale build
+  assert_status 0 "$shale_status"
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the edit'
+  assert_not_contains "$shale_out" 'no apply put there' 'stdout'
+}
+
+# The whole of the ignore list build writes, one file of the reader's own at
+# every entry of it, and the apply that proves each of them is stow's doing and
+# not this suite's.  A name missing from doctor's copy of the list is a finding
+# on a working setup for ever - a ~/.gitignore beside a layer that has one - so
+# this is the case that fails when the two lists drift apart.
+#
+# The path-anchored patterns are the four that need a top-level and a nested
+# copy to tell apart: only the top-level one is ignored.  The segment patterns
+# match at any depth, and CVS is here as a directory because stow skips the
+# directory and never looks inside it.
+test_doctor_says_nothing_about_a_home_path_stow_never_links() {
+  local name
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # Every entry of the list except '\.stow-local-ignore', which stow adds to
+  # whatever the file holds and which no layer may provide: a layer that does is
+  # a finding of its own, and build refuses the tree.
+  for name in README.md LICENSE COPYING \
+    RCS 'file,v' .cvsignore .svn _darcs .hg .gitignore .gitmodules \
+    '.#lock' 'notes~' '#notes#'; do
+    mklayer personal/base "$name"
+    sandbox_write "$HOME" "$name" 'mine'
+  done
+  mklayer personal/base CVS/keep
+  sandbox_write "$HOME/CVS" keep 'mine'
+  mklayer personal/base .zsh/.gitignore
+  sandbox_write "$HOME/.zsh" .gitignore 'mine'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'no apply put there' 'stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_eq 'mine' "$(cat "$HOME/README.md")" 'the readme stow left alone'
+  assert_eq 'mine' "$(cat "$HOME/.gitignore")" 'the gitignore stow left alone'
+  assert_eq 'mine' "$(cat "$HOME/CVS/keep")" 'the file under CVS stow left alone'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc" 'the one link'
+  # And the anchored names one level down, which stow does link.
+  mklayer personal/base .config/README.md
+  sandbox_write "$HOME/.config" README.md 'mine'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor with the nested copy'
+  assert_contains "$shale_out" "shale:   $HOME/.config/README.md" 'stdout'
+  assert_not_contains "$shale_out" "shale:   $HOME/README.md" 'stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply with the nested copy'
+}
+
+# A symlink of the reader's own at a path a layer provides is a refusal like any
+# other - 'existing target is not owned by stow' on both 2.3.1 and 2.4.1,
+# whether it points at a file or a directory and whether or not it resolves.
+# What stow accepts is the link an apply wrote and nothing else, so the check
+# compares what the link resolves to rather than trusting that it is one.
+test_doctor_names_a_home_symlink_that_is_not_the_built_trees() {
+  local kind
+  for kind in file directory dangling; do
+    conf 'base personal/base'
+    mklayer personal/base .zshrc
+    # A target per variant, because the three run in one sandbox.
+    sandbox_mkdir "$HOME/elsewhere"
+    case "$kind" in
+      file) sandbox_write "$HOME/elsewhere" "$kind" 'mine' ;;
+      directory) sandbox_mkdir "$HOME/elsewhere/$kind" ;;
+      dangling) ;;
+    esac
+    sandbox_mkdir "$HOME"
+    sandbox_leaf "$sandbox_dir" .zshrc new
+    ln -s "$HOME/elsewhere/$kind" "$sandbox_path" || fail 'could not plant the link'
+    run_shale doctor
+    assert_status 1 "$shale_status" "$kind exit status"
+    assert_contains "$shale_out" \
+      "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" \
+      "$kind stdout"
+    assert_contains "$shale_out" "shale:   $HOME/.zshrc" "$kind stdout"
+    run_shale apply
+    assert_status 1 "$shale_status" "$kind apply"
+    # The link itself, not what it points at, and by the one spelling that does
+    # not go through sandbox_leaf: it refuses a name a symlink is at.
+    sandbox_mkdir "$HOME"
+    rm "$sandbox_dir/.zshrc" || fail 'could not remove the planted link'
+  done
+}
+
+# A link an apply wrote, at a path nothing has built yet: the home this machine
+# had before ~/.dotfiles/current was deleted, which is what a re-clone leaves.
+# -ef cannot answer a dangling link at all, so this is the shape readlink is
+# spent on, and it is the shape that must not be a finding - the apply builds
+# before it stows, so the link is one it makes good rather than one it refuses.
+test_doctor_says_nothing_about_a_link_the_built_tree_answers_for() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles"
+  rm -rf "$sandbox_dir/current" || fail 'could not remove the built tree'
+  assert_dangling_symlink "$HOME/.zshrc" 'the link left without a tree'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'no apply put there' 'stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc" 'the link it made good'
+  # The same while it points at another of the tree's paths, which is a refusal
+  # once its target exists and none at all while it does not: stow removes its
+  # own link before it re-links, so the apply's own build settles it.  The
+  # narrower reading - that only a link at its own path is the tree's - makes
+  # this a finding, and the apply after it exits 0.
+  #
+  # Only the absence of this check's finding is asserted, not doctor's status:
+  # a link pointing at a path the built tree has not got is audit_broken_links'
+  # to speak for, and it does, in its own words and with the remedy that works.
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .vimrc new
+  ln -s .dotfiles/current/.gone "$sandbox_path" || fail 'could not plant the link'
+  mklayer personal/base .vimrc
+  run_shale doctor
+  assert_not_contains "$shale_out" 'no apply put there' 'the crossed stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply with the crossed link'
+  assert_symlink_to "$HOME/.vimrc" "$HOME/.dotfiles/current/.vimrc" 'the link it made good'
+}
+
+# A link into the built tree at a different path is 'stowed to a different
+# package' on both versions, which is a refusal like any other.
+test_doctor_names_a_home_link_into_the_tree_at_another_path() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .vimrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .vimrc new
+  ln -s .dotfiles/current/.zshrc "$sandbox_path" || fail 'could not plant the link'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" "shale:   $HOME/.vimrc" 'stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+}
+
+# A directory in $HOME that is a symlink is named itself, and nothing under it
+# is: every path below it resolves outside $HOME, so naming one would be telling
+# the reader to remove a file that is not where the message says it is - and
+# stow's own complaint is about the directory.  #92's third item is the same
+# shape, and this is the one place a walk can wander into it.
+test_doctor_names_a_symlinked_directory_and_nothing_under_it() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_write "$HOME/elsewhere/nvim" init.lua 'mine'
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .config new
+  ln -s "$HOME/elsewhere" "$sandbox_path" || fail 'could not plant the link'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.config" 'stdout'
+  assert_not_contains "$shale_out" "$HOME/.config/nvim" 'stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+}
+
+# Two directories are the one pair stow merges rather than refusing, and the
+# whole reason the kind is compared at all: without it every ~/.config on earth
+# is a finding.  The two crossed pairs are the cases below.
+test_doctor_says_nothing_about_a_directory_home_and_a_layer_both_hold() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_mkdir "$HOME/.config"
+  run_shale doctor
+  assert_status 0 "$shale_status" 'directory over directory'
+  assert_not_contains "$shale_out" 'no apply put there' 'stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply over a directory'
+  assert_real_dir "$HOME/.config" 'the directory stow kept'
+}
+
+test_doctor_names_a_home_file_where_a_layer_has_a_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_write "$HOME" .config 'not a directory'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.config" 'stdout'
+  # Once: nothing below a path stow will not create is reachable to conflict.
+  assert_not_contains "$shale_out" "$HOME/.config/nvim" 'stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+}
+
+# The crossed pair the other way, which stow reports from perl rather than as a
+# conflict - 'unstow_contents() called with non-directory path' on both 2.3.1 and
+# 2.4.1, and an exit status that is neither 0 nor 1.  That is the arm cmd_apply
+# calls a part-way failure, so doctor may not say the apply changes nothing: the
+# two commands are asserted against each other here, which is the whole reason
+# the finding's wording covers both ways of not finishing.
+test_doctor_names_a_home_directory_where_a_layer_has_a_file() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.zshrc"
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" "shale:   $HOME/.zshrc" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   apply gives the composed tree to stow, and stow will not write over what it did not create: it refuses the whole operation, or stops part-way through one' \
+    'stdout'
+  assert_not_contains "$shale_out" 'nothing in ' 'stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+  # shale's own line rather than stow's, which the two versions word
+  # differently; both exit with the status this arm is for.
+  assert_contains "$shale_err" "shale: stow failed part-way: $HOME may be partly relinked" \
+    'the apply stderr'
+}
+
+# One finding however many paths, because it is one apply that will not run.  The
+# list is capped like every other list doctor keeps, and the cap changes what is
+# printed and not what is wrong.
+test_doctor_bounds_the_home_conflict_list_at_ten_paths() {
+  local i named line
+  conf 'base personal/base'
+  i=0
+  while [ "$i" -lt 12 ]; do
+    mklayer personal/base "f$i"
+    sandbox_write "$HOME" "f$i" 'mine'
+    i=$((i + 1))
+  done
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 12 paths in $HOME hold something no apply put there, and a layer provides each of them" 'stdout'
+  assert_contains "$shale_out" 'shale:   and 2 more, not named here' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  named=0
+  while IFS= read -r line; do
+    case "$line" in
+      "shale:   $HOME/f"*) named=$((named + 1)) ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq 10 "$named" 'the number of paths named'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+}
+
+# A path only the higher of two layers provides, and a path both provide: one
+# entry each in the report however many layers hold them, because the walk
+# reports at the layer that decides the path.
+test_doctor_names_a_home_conflict_once_however_many_layers_provide_it() {
+  local count line
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  sandbox_write "$HOME" .zshrc 'mine'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" 'stdout'
+  count=0
+  while IFS= read -r line; do
+    case "$line" in
+      "shale:   $HOME/.zshrc") count=$((count + 1)) ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq 1 "$count" 'the number of times the path is named'
 }
 
 # ----------------------------------------------- doctor's broken-link cases
@@ -6203,6 +6623,10 @@ test_doctor_a_link_into_the_built_tree_it_no_longer_provides_is_a_finding() {
   # It leads the note as well as the remedy, so it is the unindented line: every
   # other line of this block is detail under it, and an unindented one among the
   # findings reads as one more of them against a summary that has counted them.
+  #
+  # The delete rather than the apply because the link planted here is spelled as
+  # an absolute path, which no stow prunes.  The case below is the pair to this
+  # one, and it is what says so.
   assert_contains "$shale_out" \
     'shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
     'stdout'
@@ -6278,6 +6702,152 @@ test_doctor_reports_the_links_a_directory_that_left_every_layer_kept() {
 $shale_out
 EOF
   assert_eq ' finding remedy summary' "$seen" 'the order of the report'
+}
+
+# The other cause of the same finding, and the one the remedy above is wrong
+# about: a single file that left its only layer leaves a link stow prunes by
+# itself, because the built tree still holds the directory it sits in.  'remove
+# the links named above' is more work than the state needs, and 'nothing needs
+# rebuilding or reapplying' is false about it - one apply clears it.
+#
+# The apply is run, so the claim is stow's rather than this suite's.
+test_doctor_the_remedy_for_a_link_an_apply_clears_is_the_apply() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .tmux.conf
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .tmux.conf
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_dangling_symlink "$HOME/.tmux.conf" 'the leftover link'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.tmux.conf points at $HOME/.dotfiles/current/.tmux.conf, which the built tree no longer provides" \
+    'stdout'
+  assert_contains "$shale_out" 'shale: clear it with: shale apply' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   stow prunes the links an apply wrote — relative, and in a directory the built tree still holds — and this is one of them' \
+    'stdout'
+  assert_not_contains "$shale_out" 'remove the links named above' 'stdout'
+  assert_not_contains "$shale_out" 'nothing needs rebuilding or reapplying' 'stdout'
+  # No sweep either: it is the alternative to removing them by hand, and nothing
+  # here has to be removed by hand.
+  assert_not_contains "$shale_out" 'stow -D -p' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  # And the command it names, which is the whole of the claim.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply the remedy names'
+  assert_missing "$HOME/.tmux.conf" 'the link the apply cleared'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the apply'
+  assert_contains "$shale_out" 'shale: no problems found' 'the stdout after the apply'
+}
+
+# The same remedy for more than one of them, which is the other half of its
+# wording and the shape a directory of files leaving one layer makes.
+test_doctor_the_apply_remedy_reads_for_more_than_one_link() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .config/nvim/init.lua
+  mklayer local .config/nvim/extra.lua
+  run_shale apply
+  assert_status 0 "$shale_status"
+  # The directory stays in the built tree, because the higher layer is not the
+  # only one that has it - the lower one keeps .config/nvim alive.
+  mklayer personal/base .config/nvim/keep.lua
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_real_dir "$HOME/.dotfiles/current/.config/nvim" 'the directory the tree still holds'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" 'shale: clear them with: shale apply' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   stow prunes the links an apply wrote — relative, and in a directory the built tree still holds — and every one of these is one of them' \
+    'stdout'
+  assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply the remedy names'
+  assert_missing "$HOME/.config/nvim/init.lua" 'the first link'
+  assert_missing "$HOME/.config/nvim/extra.lua" 'the second link'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the apply'
+}
+
+# The discriminator's other half, which no directory can stand for: a link
+# spelled as an absolute path is one no stow prunes, wherever it sits.  2.3.1
+# says 'BUG in find_stowed_path?' on its stderr and carries on; 2.4.1 says
+# nothing; both leave the link.  So the link here is in a directory the built
+# tree still holds, and the remedy is still the delete.
+test_doctor_an_absolute_link_is_not_one_an_apply_clears() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.config/nvim"
+  sandbox_leaf "$sandbox_dir" gone.lua new
+  ln -s "$HOME/.dotfiles/current/.config/nvim/gone.lua" "$sandbox_path" ||
+    fail 'could not plant the link'
+  assert_real_dir "$HOME/.dotfiles/current/.config/nvim" 'the directory the tree still holds'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    'shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
+    'stdout'
+  assert_not_contains "$shale_out" 'clear them with' 'stdout'
+  # The apply that would have cleared a link stow wrote itself leaves this one.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_dangling_symlink "$HOME/.config/nvim/gone.lua" 'the link the apply left'
+}
+
+# Both causes at once, which is the shape neither remedy alone is right for: the
+# rm covers all of them and is what leads, and the apply is named for the ones it
+# takes off the list rather than left out.
+test_doctor_the_remedy_names_both_where_an_apply_clears_only_some() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .tmux.conf
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .tmux.conf
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_dangling_symlink "$HOME/.tmux.conf" 'the link an apply clears'
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the link it cannot'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    'shale: remove the links named above; the built tree is correct and needs no rebuilding' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   an apply clears 1 of them and leaves the rest: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds' \
+    'stdout'
+  assert_not_contains "$shale_out" 'nothing needs rebuilding or reapplying' 'stdout'
+  # The sweep is still the alternative for the ones that are left.
+  assert_contains "$shale_out" \
+    "shale:     stow -D -p --no-folding -d '$HOME/.dotfiles' -t '$HOME' current && shale apply" 'stdout'
+  assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
+  # And the apply it describes: one gone, one left, and doctor down to the one.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_missing "$HOME/.tmux.conf" 'the link the apply cleared'
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the link it left'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor after the apply'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'the stdout after the apply'
+  assert_contains "$shale_out" \
+    'shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
+    'the stdout after the apply'
 }
 
 # plant_orphans DIR N - N links in $HOME/DIR into the built tree at paths it has
@@ -6767,7 +7337,9 @@ test_doctor_says_when_there_is_no_built_tree_to_check_links_against() {
   mklayer personal/base .zshrc
   sandbox_mkdir "$HOME"
   sandbox_leaf "$sandbox_dir" .zshrc new
-  ln -s "$HOME/.dotfiles/current/.zshrc" "$sandbox_path" || fail 'could not plant the link'
+  # Relative, which is how an apply writes one.  An absolute link at a path a
+  # layer provides is a refusal of stow's own, and a finding of its own with it.
+  ln -s .dotfiles/current/.zshrc "$sandbox_path" || fail 'could not plant the link'
   assert_missing "$HOME/.dotfiles/current" 'the built tree'
   run_shale doctor
   assert_status 0 "$shale_status"
@@ -7391,7 +7963,9 @@ test_doctor_offers_no_build_it_has_already_said_will_fail() {
   mklayer work .vimrc
   sandbox_mkdir "$HOME"
   sandbox_leaf "$sandbox_dir" .zshrc new
-  ln -s "$HOME/.dotfiles/current/.zshrc" "$sandbox_path" || fail 'could not plant the link'
+  # Relative, which is how an apply writes one, and what keeps this setup sound:
+  # an absolute link at a path a layer provides is a refusal of stow's own.
+  ln -s .dotfiles/current/.zshrc "$sandbox_path" || fail 'could not plant the link'
   assert_missing "$HOME/.dotfiles/current" 'the built tree'
   run_shale doctor
   assert_status 0 "$shale_status" 'the sound setup'
@@ -7427,7 +8001,10 @@ test_doctor_offers_no_build_that_would_die_fetching() {
   run_shale doctor
   PATH=$saved
   assert_status 1 "$shale_status"
-  assert_contains "$shale_out" 'shale: git is not installed' 'stdout'
+  # The finding names the clone rather than the tool list, because the clone is
+  # the whole of why a missing git is a problem at all.
+  assert_contains "$shale_out" \
+    'shale: git is not installed, and a layer above has still to be cloned' 'stdout'
   assert_contains "$shale_out" \
     "shale: layer 'vim' has no directory at $HOME/.dotfiles/vim yet" 'stdout'
   assert_not_contains "$shale_out" 'build one with' 'stdout'
@@ -7444,23 +8021,45 @@ test_doctor_offers_no_build_that_would_die_fetching() {
 # And the half of it that is not build-blocking: no git, nothing to clone, so
 # the build runs and the offer stands.  Without this the case above passes on a
 # doctor that suppressed the offer whenever git was missing at all.
+#
+# A note, and exit 0.  A setup that builds and applies must not be called a
+# problem: shale runs git to clone a layer the machine has not got, this machine
+# has every one of them, and a finding here is a false one - the failure mode
+# worse than the defect it guards against.  Both commands are run, so the claim
+# is the commands' and not this case's reading of them.
 # shellcheck disable=SC2123
 test_doctor_offers_a_build_a_missing_git_does_not_stop() {
   local saved
-  conf 'base personal/base'
+  conf 'base personal/base' 'local local'
   mklayer personal/base .zshrc
+  mklayer local .vimrc
   stub_path_without git
   saved=$PATH
   PATH=$stub_path
   run_shale doctor
   PATH=$saved
-  assert_status 1 "$shale_status" 'the doctor'
+  assert_status 0 "$shale_status" 'the doctor'
   assert_contains "$shale_out" 'shale: git is not installed' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   shale runs it only to clone a layer this machine has not got, and every configured layer is already here' 'stdout'
   assert_contains "$shale_out" 'shale:   build one with: shale build' 'stdout'
+  assert_not_contains "$shale_out" 'problem found' 'stdout'
   PATH=$stub_path
   run_shale build
   PATH=$saved
   assert_status 0 "$shale_status" 'the build'
+  PATH=$stub_path
+  run_shale apply
+  PATH=$saved
+  assert_status 0 "$shale_status" 'the apply'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc" 'the applied link'
+  # And the run afterwards, on the setup both commands completed: still no
+  # problem, and still a note.
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  assert_status 0 "$shale_status" 'the second doctor'
+  assert_contains "$shale_out" 'shale: git is not installed' 'the second doctor stdout'
 }
 
 # The other promise about a build that will not run: the built-tree note names a
@@ -8336,7 +8935,13 @@ test_doctor_a_layer_providing_the_running_script_is_a_finding() {
       "shale: layer 'local' provides the running script itself at $HOME/.dotfiles/local/.local/bin/shale" \
       "$variant stdout"
     assert_not_contains "$shale_out" "layer 'base' provides" "$variant stdout"
-    assert_contains "$shale_out" 'shale: 1 problem found' "$variant stdout"
+    # The second finding is the running script itself: it is a regular file at a
+    # path a layer provides, so stow refuses the apply as it would over any
+    # other.  Two findings, and both of them true of this one file.
+    assert_contains "$shale_out" \
+      "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" "$variant stdout"
+    assert_contains "$shale_out" "shale:   $HOME/.local/bin/shale" "$variant stdout"
+    assert_contains "$shale_out" 'shale: 2 problems found' "$variant stdout"
     assert_empty "$shale_err" "$variant stderr"
   done
 }
@@ -8357,7 +8962,9 @@ test_doctor_finds_a_layer_shipping_a_script_that_lives_in_home() {
   assert_status 1 "$shale_status"
   assert_contains "$shale_out" \
     "shale: layer 'local' provides the running script itself at $HOME/.dotfiles/local/shale" 'stdout'
-  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  # And the same file again as the path stow will not write over.
+  assert_contains "$shale_out" "shale:   $HOME/shale" 'stdout'
+  assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
   assert_empty "$shale_err" 'stderr'
 }
 
