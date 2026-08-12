@@ -265,12 +265,20 @@ layer it came from warns and keeps the tree it displaced:
 
 ```
 shale: /home/you/.dotfiles/current/.zshrc was newer than /home/you/.dotfiles/personal/base/.zshrc
-shale:   you edited the built tree; the layer wins
-shale:   your version is kept at /home/you/.dotfiles/current.old/.zshrc
+shale:   either something wrote or moved a file into the built tree, or a different layer now provides this path and its copy is older
+shale:   the layer copy wins; what was there is kept at /home/you/.dotfiles/current.old/.zshrc until the next build, to copy into a layer if it was your edit
 ```
 
-Copy your version back into the layer from `current.old`. The next build reaps `current.old`, so do
-it before then. Never version `current/`, and never point a layer symlink into it.
+Read the kept copy before you act on it, because the message covers two things and shale cannot tell
+them apart. If it is your own file — an edit through the `~/.zshrc` link, or something `stow --adopt`
+moved in — copy it into a layer, and do it before the next build, which reaps `current.old`. If it is
+the copy the layer that used to win this path was providing, there is nothing to do: remove an
+override, drop a layer from `shale.conf`, or reorder precedence, and the copy that wins the path in
+its place is often the older file, which is the same comparison with nobody having touched
+`current/`. Two clone roots pulled minutes apart is enough for that. Copying `current.old` back into
+a layer there would put back the override you just stopped using.
+
+Never version `current/`, and never point a layer symlink into it.
 
 A symlink is never itself compared, in either direction. What a build copies for one is the link, not
 the file at the end of it, so a timestamp comparison there would be about two files the build never
