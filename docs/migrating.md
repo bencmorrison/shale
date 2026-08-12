@@ -110,8 +110,9 @@ work queue. Take it in this order.
    they went.
 
 3. **Move what you are keeping into a layer, and build again.** Your line goes in the layer that
-   should own it — usually `local`, above the repository you are adopting — and the diff is how you
-   know when you are finished:
+   should own it — usually `local`, above the repository you are adopting. Where your version of a
+   path is a whole file in a layer, the diff is how you know when you are finished, and you are
+   finished when everything left in it is a difference you chose:
 
    ```
    $ diff -u ~/.zshrc ~/.dotfiles/current/.zshrc
@@ -126,9 +127,26 @@ work queue. Take it in this order.
    The alias survived because it was copied into `~/.dotfiles/local/.zshrc` by hand; `EDITOR` differs
    because that difference was the point of adopting the layer.
 
-   The build you run here says nothing. A `shale doctor` between the edit and the build would have
-   named the file, because the built tree no longer matches the layer that provides it — that is
-   the state every layer edit leaves, and it clears the moment you build. See *The everyday loop* in
+   A path reconciled through the tool's own include instead — the route *Tools that include natively*
+   in [layers.md](layers.md) gives for git, ssh and tmux — has no diff that can empty, because your
+   lines deliberately live in a second file that the built copy only points at. Ask the tool there,
+   once for each value you meant to keep: read them while your original file is still in `$HOME`, and
+   read them again after the apply in step 5, which is when the include resolves. You are finished
+   when the second reading is still yours.
+
+   ```
+   $ git config --get alias.lg
+   log --oneline --graph
+   ```
+
+   The layer's answer coming back instead — `log --oneline` — is not about which layer wins the file.
+   It means your value sits in a file the tool reads *before* the one that overrides it, and what
+   fixes it is moving the include to the end of the base layer's file, as `layers.md` has it.
+
+   The build you run here says nothing about the file you just edited, beyond the `composed layer`
+   line it prints for each layer. A `shale doctor` between the edit and the build would have named
+   the file, because the built tree no longer matches the layer that provides it — that is the state
+   every layer edit leaves, and it clears the moment you build. See *The everyday loop* in
    [layers.md](layers.md).
 
 4. **Move the originals out of `$HOME`.** They are what stow named, and they only have to stop being

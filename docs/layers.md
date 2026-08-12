@@ -66,13 +66,13 @@ $ diff -u /home/you/.dotfiles/personal/base/.gitconfig /home/you/.dotfiles/local
 --- /home/you/.dotfiles/personal/base/.gitconfig
 +++ /home/you/.dotfiles/local/.gitconfig
 @@ -1,7 +1,2 @@
--[include]
--	path = ~/.config/git/conf.d/50-work.conf
 -[alias]
 -	st = status
 -	lg = log --oneline
 -[core]
 -	excludesfile = ~/.gitignore
+-[include]
+-	path = ~/.config/git/conf.d/50-work.conf
 +[user]
 +	email = me@example.com
 ```
@@ -200,25 +200,47 @@ prepend_path() {
 ## Tools that include natively
 
 Where a tool has its own include mechanism, use it instead of inventing a fragment directory for it.
-They do not all behave alike.
+They do not all behave alike, and what decides the recipe is which value a tool keeps when it reads
+one keyword twice. Where the **last** value wins, the include goes at the *bottom* of the base
+layer's file, below everything a higher layer might override; where the **first** wins, it goes at
+the *top*. At the wrong end a fragment can still add a key the base file never sets, so the recipe
+looks like it works and only the overrides are lost, silently. Establish which rule a tool follows
+by asking the tool for the value it settled on rather than by reading the files — that is
+`git config --get alias.lg` for git and `ssh -G example.com` for ssh. For tmux it is
+`tmux show-options -g`, which answers only against a server that is already running: with none it
+prints nothing and exits 1, which is not the fragment failing to load. A window option needs `-gw`,
+because a value set with `setw -g` is invisible to plain `-g`.
 
-Git's `include.path` takes one path and does not glob: `path = ~/.config/git/conf.d/*.conf` includes
-nothing at all, silently. The base layer therefore names each file it expects, and a higher layer
-supplies it; an include whose file does not exist is ignored without error, so naming a file no
-layer ships costs nothing.
+Git keeps the last value, so the `[include]` goes at the bottom. Its `include.path` takes one path
+and does not glob: `path = ~/.config/git/conf.d/*.conf` includes nothing at all, silently. The base
+layer therefore names each file it expects, and a higher layer supplies it; an include whose file
+does not exist is ignored without error, so naming a file no layer ships costs nothing.
 
 ```
+[alias]
+  lg = log --oneline
 [include]
   path = ~/.config/git/conf.d/50-work.conf
 ```
 
-SSH's `Include` does glob, and `Include ~/.ssh/config.d/*.conf` over a directory that does not exist
-is not an error. Put it at the *top* of `~/.ssh/config`, above any `Host` block: ssh keeps the first
-value it obtains for each keyword, so a `Host *` default written above the `Include` wins over
-everything the included files say.
+Put those two blocks the other way round and a `50-work.conf` setting `alias.lg` is read first and
+beaten by the base layer's line below it. Nothing reports that, and `shale which .gitconfig` cannot
+help, because the base layer genuinely does provide the file and that answer is correct:
 
-tmux's own is `source-file`, and the same shape applies: the base layer's `tmux.conf` names what it
-sources, and the layers supply those files.
+```
+$ git config --get alias.lg
+log --oneline
+```
+
+SSH is the other way about: it keeps the first value it obtains for each keyword, so `Include` goes
+at the *top* of `~/.ssh/config`, above any `Host` block — a `Host *` default written above the
+`Include` would otherwise win over everything the included files say. `Include` does glob, and
+`Include ~/.ssh/config.d/*.conf` over a directory that does not exist is not an error.
+
+tmux's `source-file` keeps the last value, as git's include does, so it goes at the bottom of
+`tmux.conf`, below the `set -g` lines a fragment might replace. It does glob, so one line covers a
+directory; the base layer's `tmux.conf` still names what it sources, and the layers supply those
+files.
 
 ## Symlinks in a layer
 
