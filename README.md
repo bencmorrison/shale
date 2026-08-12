@@ -15,7 +15,9 @@ is the machine's business, not the repos'.
 
 `bash`, `git` and GNU `stow`, installed with your system package manager, and the coreutils any
 system already has — `cp`, `mv`, `rm`, `mkdir`, `rmdir` and `readlink`. Shale installs nothing,
-including itself. `git` is used only to clone a layer repository the machine does not have yet.
+including itself. `git` is used only to clone a layer repository the machine does not have yet, so
+`doctor` reports it missing as a note where no configured layer needs cloning and as a problem where
+one does.
 `chkstow` ships with GNU stow and is what `doctor` audits `$HOME` with; without it `doctor` says so
 and skips that one check. `shale doctor` names every one of these it cannot find, so it is the
 fastest answer to a machine where something will not run.
@@ -121,7 +123,7 @@ above. The four commands in it are the whole surface: there are no others, and n
 |---|---|
 | `shale build` | Clones any missing clone root that has a url, then composes the layers into `~/.dotfiles/current` |
 | `shale apply` | Builds, then stows `current` over `$HOME`, replacing the last apply's links |
-| `shale doctor` | Checks the prerequisites, the config, the layers, the built tree and `$HOME`; it will not exit 0 on a setup `build` is certain to refuse |
+| `shale doctor` | Checks the prerequisites, the config, the layers, the built tree and `$HOME`; it will not exit 0 on a setup `build` or `apply` is certain to refuse |
 | `shale which PATH` | Names every layer providing `PATH`, winner first, and when `build` would refuse the set |
 
 After editing a file a layer already has, `build` is the whole loop: `~/.zshrc` is a link into
@@ -254,9 +256,11 @@ build.
 
 `shale doctor` checks that every tool shale runs is installed, that the config parses, that every
 configured layer directory is there and that nothing in one is a directory it cannot search or a file
-it cannot open, that no two layers disagree about whether a path
-is a file or a directory, that no layer ships `.stow-local-ignore` — which shale writes itself — or
-shale itself, that `~/.dotfiles/current` is a directory rather than a file or a link to one, that the
+it cannot open, that no two layers disagree about whether a path is a file or a directory, that
+nothing in `$HOME` at a path the layers provide is something no apply put there — a file, a
+directory, or a link of your own, none of which stow will write over — that no layer ships
+`.stow-local-ignore`, which shale writes itself, or shale itself, that `~/.dotfiles/current` is a
+directory rather than a file or a link to one, that the
 build lock is neither held nor uncreatable, that nothing in `~/.dotfiles` is a stray, that neither
 `current.new` nor `current.old` has been left beside `current`, and that no
 link in `$HOME` points into the built tree at a path it no longer provides. Where a `.stowrc` exists
@@ -270,12 +274,14 @@ shale: no problems found
 
 Doctor reports two kinds of line. A *problem* is a defect in the setup: it counts towards the total
 and makes doctor exit 1. Everything else is a note about something worth knowing, and neither counts
-nor changes the exit code. Every state doctor can see that stops a build outright is a problem, so
-`no problems found` is a strong signal that `shale build` will run rather than a guarantee that it
-must. What it does not see: an absolute symlink in a layer, which stow refuses at apply time and the
-two stow versions disagree about — so shale asserts nothing about it, and
+nor changes the exit code. Every state doctor can see that stops a build or an apply outright is a
+problem, so `no problems found` is a strong signal that both will run rather than a guarantee that
+they must. What it does not see: an absolute symlink in a layer, which stow refuses at apply time
+and the two stow versions disagree about — so shale asserts nothing about it, and
 [docs/layers.md](docs/layers.md) covers it — nor whether `$HOME` is writable, which fails an apply
-rather than a build, nor whether a leftover `current.old` can be removed. Below, a `vim  vim` line
+rather than a build, nor whether a leftover `current.old` can be removed, nor an *absolute* link in
+`$HOME` pointing at the built tree's own copy of that same path, which stow refuses and which only
+a hand ever makes. Below, a `vim  vim` line
 was added to the config for a layer that is not
 there, and a stray `~/.dotfiles/old-tmux` directory was created — the first is the problem, the
 second the note:
