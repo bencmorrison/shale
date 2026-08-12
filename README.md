@@ -287,17 +287,39 @@ stow -D -d ~/.dotfiles -t ~ current
 
 It leaves your layers, your config and the built tree alone; `shale apply` puts the links back. To
 leave shale altogether and keep your dotfiles as ordinary files, copy the built tree back over them
-first:
+first — as one chained block, so a step that fails stops the ones after it:
 
 ```sh
-stow -D -d ~/.dotfiles -t ~ current    # every link into current/ goes
-cp -RL ~/.dotfiles/current/. ~/        # the built tree lands as real files
-rm ~/.stow-local-ignore                # the one file in that tree that is shale's own
-rm -rf ~/.dotfiles                     # layers, config and built tree, once the repos are pushed
+stow -D -d ~/.dotfiles -t ~ current &&
+cp -RL ~/.dotfiles/current/. ~/ &&
+rm ~/.stow-local-ignore &&
+rm -rf ~/.dotfiles
 ```
 
+Every link into `current/` goes, the built tree lands as real files, shale's own
+`.stow-local-ignore` goes with the rest, and the layers, config and built tree follow once the repos
+are pushed. Those notes are here rather than at the ends of the lines because a `#` pasted into zsh
+is not a comment, and `&&` would bind to it instead of to the next command.
+
+The step that stops the block is usually the first: one ordinary file at a path the built tree also
+provides makes GNU Stow 2.3.1 refuse the unstow, and unchained the last line runs anyway and deletes
+`~/.dotfiles/local`, the layer that is nowhere else.
+
+The chain cannot help where nothing fails, and on stow 2.4.1 nothing does: it unstows past the file
+2.3.1 refuses, and `cp -RL` then overwrites whatever `$HOME` holds at a path the built tree provides.
+That is only ever a file shale never managed — one you edited in place so that it replaced the link,
+or one stow was never allowed to link, which is what a repository-root layer's own `README.md` is.
+Run this first and it names every one of them:
+
+```sh
+( cd ~/.dotfiles/current && find . ! -type d -exec sh -c 'for p; do p=${p#./}; [ -L "$HOME/$p" ] || [ ! -e "$HOME/$p" ] || printf "%s\n" "$HOME/$p"; done' sh {} + )
+```
+
+On a `$HOME` only shale writes to it prints nothing.
+
 What the copy deposits is exactly what `ls -a ~/.dotfiles/current` lists. The order matters, and
-[docs/migrating.md](docs/migrating.md) says what `cp` here does and does not preserve.
+[docs/migrating.md](docs/migrating.md) says what `cp` here does and does not preserve, what it
+overwrites, and how to carry on from a block that stopped.
 
 ## Known limits
 

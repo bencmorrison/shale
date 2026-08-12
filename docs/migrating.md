@@ -362,15 +362,49 @@ apply again.
 
 ## Leaving shale, with your dotfiles
 
-Four commands, in this order. The first two are the whole of it; the last two are cleanup you can put
-off:
+Four commands, in this order, each one conditional on the one before it. Paste the block whole:
 
 ```sh
-stow -D -d ~/.dotfiles -t ~ current    # every link into current/ goes; $HOME keeps the directories
-cp -RL ~/.dotfiles/current/. ~/        # the built tree lands as ordinary files, filling them again
-rm ~/.stow-local-ignore                # shale's own file, copied back with everything else
-rm -rf ~/.dotfiles                     # layers, config and built tree, once the repos are pushed
+stow -D -d ~/.dotfiles -t ~ current &&
+cp -RL ~/.dotfiles/current/. ~/ &&
+rm ~/.stow-local-ignore &&
+rm -rf ~/.dotfiles
 ```
+
+1. every link into `current/` goes; `$HOME` keeps the directories
+2. the built tree lands as ordinary files, filling them again
+3. shale's own file, copied back with everything else
+4. layers, config and built tree, once the repos are pushed
+
+The first two are the whole of it; the last two are cleanup you can put off. The `&&` is what stops
+the block at the step that failed, and it is why those four notes are numbered here rather than
+written at the ends of the lines: `#` starts a comment in an interactive shell only if that shell
+says it does, and zsh out of the box says it does not. There, `&&` binds to the `#` instead of to
+the next line, the block quietly becomes four unconditional commands again, and the last of them is
+`rm -rf ~/.dotfiles`.
+
+`cp -RL` overwrites whatever is in `$HOME` at a path the built tree provides. Once the unstow has
+worked, the paths shale managed are empty, so the only things left for the copy to land on are the
+ones shale never managed — which is to say, the ones that are yours alone. Two of those arrive
+without anything failing anywhere. A file you edited in place, so that your editor replaced the link
+instead of writing through it, is one. A path the built tree carries but stow was told never to link
+is the other, which is what `.stow-local-ignore` does to the `README.md`, `LICENSE` and `COPYING` at
+the top of a repository-root layer: your own `~/README.md` has no link there for `cp` to collide
+with, so the repository's lands on top of it. Neither is a conflict to stow or a refusal to `cp`, so
+neither stops the block, and the fourth command then deletes the copy in `~/.dotfiles`.
+
+This names every one of them, and it has to be run before the block, while the links are still
+there:
+
+```sh
+( cd ~/.dotfiles/current && find . ! -type d -exec sh -c 'for p; do p=${p#./}; [ -L "$HOME/$p" ] || [ ! -e "$HOME/$p" ] || printf "%s\n" "$HOME/$p"; done' sh {} + )
+```
+
+Every path it prints is one the copy will overwrite; move each aside, or fold it into a layer, first.
+On a `$HOME` that only shale writes to it prints nothing at all. GNU `cp` has a `-n` that skips an
+existing destination rather than overwriting it, and GNU coreutils 9.4 answers every use of it with
+`warning: behavior of -n is non-portable and may change in future`, so the recipe stays as it is and
+the check does the work.
 
 `.` in `~/.dotfiles/current/.` is what makes the copy the *contents* of the tree rather than a
 `~/current` directory, and it takes the dotfiles with it. `-L` reads through a symlink a layer ships
@@ -382,8 +416,16 @@ reports that one and exits 1 —
 cp: cannot stat '/home/you/.dotfiles/current/./.danglink': No such file or directory
 ```
 
-— and the fourth command would then delete the only copy of it. Deal with the named entry before you
-delete anything.
+— so the block stops there, before anything is deleted. `~/.dotfiles` is still whole, the entry is
+still in it, and `ls -l ~/.dotfiles/current/.danglink` says what it pointed at. Recreate it in
+`$HOME` yourself, then run the third and fourth commands.
+
+Wherever it stops, what has already run has run, and finishing means running the commands after the
+one that failed rather than pasting the block again — once the copy has run, a 2.3.1 unstow finds an
+ordinary file at every path it linked and refuses the lot. The third command is the quietest place
+to stop: `rm` fails if `~/.stow-local-ignore` is not there, which it is not if you have already done
+part of this by hand, and that leaves `$HOME` complete with `~/.dotfiles` still beside it. Nothing
+is wrong in that state; the only thing left is the fourth command.
 
 What lands is exactly what the built tree holds, and shale generates one file of its own in there:
 `~/.stow-local-ignore`, the third command. Run `ls -a ~/.dotfiles/current` before the copy and that
@@ -391,7 +433,8 @@ listing is what you are about to get — worth doing, because this copy pays no 
 `.stow-local-ignore` and so brings out whatever it was suppressing. Give a layer a subdirectory of
 its repository, as `docs/layers.md` says to, and that is nothing at all. Name a repository root as a
 layer instead and its `README.md` and `LICENSE` have been in the built tree all along, kept out of
-`$HOME` only by that ignore file; the copy puts them in `$HOME` beside your dotfiles.
+`$HOME` only by that ignore file; the copy puts them in `$HOME`, on top of a `README.md` or
+`LICENSE` of your own if you keep one there.
 
 Modes come across for the bit that matters: an executable stays executable, and a `~/.netrc` at 600
 arrives at 600. Two smaller things `cp` does here without `-p`, which are why `-p` is deliberately
@@ -407,12 +450,39 @@ GNU coreutils 9.4 refuses each of those and exits 1:
 cp: '/home/you/.dotfiles/current/./.zshrc' and '/home/you/./.zshrc' are the same file
 ```
 
-Nothing of yours is overwritten, but the run is not a no-op: `.stow-local-ignore` is the one entry in
-the built tree stow never linked, so it has no link to collide with and it lands in `$HOME` anyway —
-the file the third command exists to delete. That refusal is `cp`'s doing rather than stow's or
-shale's, so treat it as a mess to avoid and not as a guard. Unstow first. Delete `~/.dotfiles` before
-the copy and there is nothing left to copy from; take that last line seriously, because
+The refusal covers everything stow linked, and only that: an entry the built tree holds but stow
+never linked has no link to collide with, so it lands in `$HOME` regardless, over anything of yours
+already there. `.stow-local-ignore` is one such entry, and it arrives here as well as in its proper
+place — the file the third command exists to delete. That refusal is `cp`'s doing rather than stow's
+or shale's, so treat it as a mess to avoid and not as a guard. Unstow first. Delete `~/.dotfiles`
+before the copy and there is nothing left to copy from; take that last line seriously, because
 `~/.dotfiles/local` is the layer that was never anywhere else.
+
+The same message means something else entirely when you copied nothing out of order: it is what an
+unstow that *refused* leaves behind, every link it would have removed still in place. On 2.3.1 one
+ordinary file at a path the built tree also provides is enough to make it refuse — an editor that
+replaces `~/.vimrc` rather than writing through the link makes one — and it names the path:
+
+```
+WARNING! unstowing current would cause conflicts:
+  * existing target is neither a link nor a directory: .vimrc
+All operations aborted.
+```
+
+Pasted as the block above, that refusal is all you see, because the copy never runs. Deal with the
+file stow names — keep it, move it aside, or fold it into a layer — and paste the block again. Run
+the four commands unchained instead, typed one at a time or from an older copy of this recipe, and
+the copy runs regardless, reports `are the same file` for every link, overwrites the ordinary file
+that caused the refusal because that one is not a link, and `rm -rf ~/.dotfiles` then takes the
+layers with it. So `are the same file` when you reordered nothing means the unstow refused: stop,
+and do not run the delete.
+
+The newer stow does not refuse at all. 2.4.1 — the likelier one to be on a Mac, since Homebrew is
+where a Mac gets stow — unstows straight past that file and exits 0, and the block then runs to the
+end: the copy replaces your edited file with the built tree's version of it, and the fourth command
+deletes the tree that version came from. The whole run exits 0 with nothing on either stream.
+Chaining cannot catch that one, because nothing failed. The check above is what catches it, and only
+if you run it before the block.
 
 That is the whole of shale's footprint: it writes nothing outside `~/.dotfiles`, and the script is
 the copy you made yourself, at `~/.local/bin/shale` or wherever you put it. Delete that too and
