@@ -1832,7 +1832,7 @@ test_build_is_idempotent_and_drops_a_file_deleted_from_a_layer() {
   assert_eq "$first" "$(cd "$HOME/.dotfiles/current" && find . -print | sort)" 'the tree'
   # The -p in cp -RPp: it leaves the built copy no newer than the layer file, so
   # a rebuild that changed nothing has nothing to say.  Without it every second
-  # build accuses you of editing the tree.
+  # build reports a divergence nothing caused.
   assert_empty "$shale_err" 'the second build stderr'
   sandbox_mkdir "$HOME/.dotfiles/personal/base"
   sandbox_leaf "$sandbox_dir" .vimrc
@@ -2148,14 +2148,101 @@ test_build_warns_when_the_built_tree_was_edited() {
   assert_contains "$shale_err" \
     "shale: $HOME/.dotfiles/current/.zshrc was newer than $HOME/.dotfiles/local/.zshrc" \
     'stderr'
-  assert_contains "$shale_err" 'shale:   you edited the built tree; the layer wins' 'stderr'
   assert_contains "$shale_err" \
-    "shale:   your version is kept at $HOME/.dotfiles/current.old/.zshrc" 'stderr'
+    'shale:   either something wrote or moved a file into the built tree, or a different layer now provides this path and its copy is older' \
+    'stderr'
+  assert_contains "$shale_err" \
+    "shale:   the layer copy wins; what was there is kept at $HOME/.dotfiles/current.old/.zshrc until the next build, to copy into a layer if it was your edit" \
+    'stderr'
   # One edited file is one warning, naming the layer whose copy replaced it.
   assert_not_contains "$shale_err" "$HOME/.dotfiles/personal/base/.zshrc" 'stderr'
   assert_eq 'local/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the rebuilt file'
   assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
   assert_missing "$HOME/.dotfiles/current.old/junk"
+}
+
+# The same state, reached with nothing edited anywhere.  Removing an override is
+# an everyday act, and the copy that wins the path in its place can be older than
+# the built copy it replaces - two clone roots pulled minutes apart is enough.
+# Removing a layer from shale.conf and reordering precedence arrive at it too.
+# Shale cannot tell any of them from the case above, so what the message must not
+# do is name one of them: a remedy that says to put the kept copy back into a
+# layer, unconditionally, undoes the removal the user just made.
+#
+# Every decisive mtime is set with touch -t rather than by write order, because
+# -nt compares whole seconds on the oldest bash this has to run under.
+test_build_does_not_blame_an_edit_when_the_winning_layer_changes() {
+  local older newer message
+  message='shale:   either something wrote or moved a file into the built tree, or a different layer now provides this path and its copy is older'
+  conf 'personal personal/base' 'work work/base'
+  mklayer personal/base .zshrc
+  mklayer work/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  older=$sandbox_path
+  touch -t 200001010000 "$older" || fail 'could not date the personal layer file'
+  sandbox_mkdir "$HOME/.dotfiles/work/base"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  newer=$sandbox_path
+  touch -t 202601010000 "$newer" || fail 'could not date the work layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the first build stderr'
+  assert_eq 'work/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built file'
+
+  # The override is deleted, so personal provides the path again and its copy is
+  # the older of the two.
+  rm -f "$newer" || fail 'could not remove the overriding layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/current/.zshrc was newer than $HOME/.dotfiles/personal/base/.zshrc" \
+    'the stderr after the override was removed'
+  assert_contains "$shale_err" "$message" 'the stderr after the override was removed'
+  assert_not_contains "$shale_err" 'you edited the built tree' \
+    'the stderr after the override was removed'
+  # current.old holds the override, not an edit, which is why the remedy is
+  # conditional: this file is the one the user has just decided not to have.
+  assert_eq 'work/base/.zshrc' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the rebuilt file'
+
+  # Back to the override winning, and this build is the everyday one: the layer
+  # copy is newer than the built copy, which is the direction build never speaks
+  # about.  Without it the arms below would start from the wrong built copy.
+  mklayer work/base .zshrc
+  touch -t 202601010000 "$newer" || fail 'could not date the work layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the stderr after the override came back'
+
+  # The layer is dropped from the config rather than from the disk.
+  conf 'personal personal/base'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/current/.zshrc was newer than $HOME/.dotfiles/personal/base/.zshrc" \
+    'the stderr after the layer was dropped from the config'
+  assert_contains "$shale_err" "$message" \
+    'the stderr after the layer was dropped from the config'
+  assert_not_contains "$shale_err" 'you edited the built tree' \
+    'the stderr after the layer was dropped from the config'
+
+  conf 'personal personal/base' 'work work/base'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the stderr after the layer came back'
+
+  # Neither layer changed at all: only which of them is last.
+  conf 'work work/base' 'personal personal/base'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/current/.zshrc was newer than $HOME/.dotfiles/personal/base/.zshrc" \
+    'the stderr after precedence was reordered'
+  assert_contains "$shale_err" "$message" 'the stderr after precedence was reordered'
+  assert_not_contains "$shale_err" 'you edited the built tree' \
+    'the stderr after precedence was reordered'
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the rebuilt file'
 }
 
 # The half of that path an mtime comparison cannot name.  stow --adopt moves the
@@ -6411,12 +6498,12 @@ test_doctor_notes_a_built_tree_its_layers_have_moved_past() {
 }
 
 # The other direction, which is not this note's.  A built copy newer than its
-# layer is something build reports itself, per file, with wording that names what
-# happened and a remedy - so saying it here as well would be an accurate message
-# duplicated in words that are wrong for it, this note offering two readings of
-# which neither is 'you edited the built tree'.  The silence is only worth
-# asserting next to the message that does cover it, which is why build runs here.
-test_doctor_says_nothing_about_a_built_tree_build_reports_as_edited() {
+# layer is something build reports itself, per file, naming the current.old it
+# keeps - so saying it here as well would duplicate that in words that are wrong
+# for it, this note's two readings not being that direction's two.  The silence
+# is only worth asserting next to the message that does cover it, which is why
+# build runs here.
+test_doctor_says_nothing_about_a_built_tree_newer_than_its_layer() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
   sandbox_mkdir "$HOME/.dotfiles/personal/base"
@@ -6436,7 +6523,8 @@ test_doctor_says_nothing_about_a_built_tree_build_reports_as_edited() {
   assert_contains "$shale_err" \
     "shale: $HOME/.dotfiles/current/.zshrc was newer than $HOME/.dotfiles/personal/base/.zshrc" \
     'the build stderr'
-  assert_contains "$shale_err" 'shale:   you edited the built tree; the layer wins' \
+  assert_contains "$shale_err" \
+    'shale:   either something wrote or moved a file into the built tree, or a different layer now provides this path and its copy is older' \
     'the build stderr'
   assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
 }

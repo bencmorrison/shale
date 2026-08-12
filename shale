@@ -706,11 +706,19 @@ wins_this_path() {
   return 0
 }
 
-# Something wrote to the built tree through its $HOME symlink instead of to the
-# layer, which is this design's one silent data-loss path: ~/.zshrc is a link
-# into current/ and an editor writes straight through it.  cp -p is what keeps
-# a legitimate layer update from tripping this.  Recorded, not printed: the
-# message names current.old, which an aborted build never creates.
+# A built copy newer than the layer copy that is about to replace it, which has
+# two readings and no way to tell them apart.  One is this design's one silent
+# data-loss path: ~/.zshrc is a link into current/, so an editor writes straight
+# through it and a stow --adopt of a file newer than the layer copy moves one in
+# with its own mtime, cp -p being what keeps a legitimate layer update from
+# arriving in this state.  The other is which layer wins the path having changed
+# - drop an override, drop a layer, reorder shale.conf - after which the copy
+# that lands can simply be the older file, with nothing having been edited or
+# moved anywhere.  So the message states both and picks neither, as doctor's
+# note does for the other direction.
+#
+# Recorded, not printed: the message names current.old, which an aborted build
+# never creates.
 #
 # Recorded only for the layer that wins the path, which is what makes the layer
 # named in the message the one whose copy actually lands.
@@ -1157,9 +1165,9 @@ winning_layer() {
 # at is a conflict, which build reports and this must not read a timestamp from.
 #
 # One direction only.  A built copy *newer* than its layer is build's to report,
-# per file and with a remedy, and it never went silent; saying it here as well
-# would duplicate an accurate message in words that are wrong for it, this note
-# stating two readings neither of which is 'you edited the built tree'.
+# per file and naming the current.old that build keeps, and it never went
+# silent; saying it here as well would duplicate that in words that are wrong
+# for it, the two readings of this direction not being the two of that one.
 scan_built_tree() {
   local rel=$1 cap=$2 inherited=$3 here e base srel winner blocked
   here=$CUR${rel:+/$rel}
@@ -1906,8 +1914,8 @@ cmd_build() {
     i=0
     while [ "$i" -lt "$n" ]; do
       warn "$CUR/${DIVERGED_PATHS[$i]} was newer than ${DIVERGED_LAYERS[$i]}" \
-        'you edited the built tree; the layer wins' \
-        "your version is kept at $OLD/${DIVERGED_PATHS[$i]}"
+        'either something wrote or moved a file into the built tree, or a different layer now provides this path and its copy is older' \
+        "the layer copy wins; what was there is kept at $OLD/${DIVERGED_PATHS[$i]} until the next build, to copy into a layer if it was your edit"
       i=$((i + 1))
     done
   fi

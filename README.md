@@ -157,7 +157,9 @@ shale:   if no other shale is running, this lock is stale: remove it with: rmdir
 and building again — and it should never be edited or versioned. Edit the layer, not the result. A
 build that finds a regular file in `current` differing in age from the layer's copy keeps the tree it
 replaced at `~/.dotfiles/current.old`, so what was there is recoverable until the next build, which
-removes it. Newer means something edited the built tree, and the build says so per file. Older means
+removes it. Newer means either that something wrote or moved a file into the built tree — which is
+what `stow --adopt` does with a file newer than the layer's copy — or that a different layer now
+provides the path with an older copy; the build says so per file, stating both. Older means
 either that something moved a file into it, which is what `stow --adopt` does, or that a layer has
 moved on and there has been no build since; the build is silent on that direction, and `shale doctor`
 names the files instead, up to ten of them with a count above that. A symlink is never itself
