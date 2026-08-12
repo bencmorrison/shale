@@ -111,7 +111,7 @@ above. The four commands in it are the whole surface: there are no others, and n
 |---|---|
 | `shale build` | Clones any missing clone root that has a url, then composes the layers into `~/.dotfiles/current` |
 | `shale apply` | Builds, then stows `current` over `$HOME`, replacing the last apply's links |
-| `shale doctor` | Checks the prerequisites, the config, the layers and `$HOME`, and reports what it finds |
+| `shale doctor` | Checks the prerequisites, the config, the layers, the built tree and `$HOME`, and reports what it finds |
 | `shale which PATH` | Names every layer providing `PATH`, winner first, and when `build` would refuse the set |
 
 After editing a file a layer already has, `build` is the whole loop: `~/.zshrc` is a link into
@@ -121,9 +121,11 @@ pointing at it until stow makes the link, and one deleted from every layer leave
 until stow prunes it. Apply when unsure: it builds first, so it is never less than a build.
 [docs/layers.md](docs/layers.md) has the boundary case by case.
 
-Every build after an edit also reports the file as one the built tree held an older copy of, and
-names `stow --adopt` while doing so; that is the built tree having been out of date, not an
-accusation, and [docs/layers.md](docs/layers.md) says why shale cannot tell the two apart.
+Builds are quiet. A build that finds `current` holding a copy older than the layer file replacing it
+keeps the previous tree at `~/.dotfiles/current.old` and says nothing, because an edited layer leaves
+exactly that state and a message there would be a message on every edit. `shale doctor` is what
+reports it, as a note rather than a problem, and only before the build that overwrites it — see
+[docs/layers.md](docs/layers.md).
 
 Shale chooses between three exit codes, and no others:
 
@@ -153,12 +155,14 @@ shale:   if no other shale is running, this lock is stale: remove it with: rmdir
 
 `~/.dotfiles/current` is generated output. It is disposable — a bad build is fixed by fixing a layer
 and building again — and it should never be edited or versioned. Edit the layer, not the result. A
-build that finds a regular file in `current` differing in age from the layer's copy says so and keeps
-the tree it replaced at `~/.dotfiles/current.old`, so what was there is recoverable until the next
-build, which removes it. Newer means something edited the built tree; older means either that
-something moved a file into it, which is what `stow --adopt` does, or that a layer has moved on and
-this is the first build since. A symlink is never itself compared: a build copies the link rather
-than what it points at, so an age comparison there would be about a file the build never touches. A
+build that finds a regular file in `current` differing in age from the layer's copy keeps the tree it
+replaced at `~/.dotfiles/current.old`, so what was there is recoverable until the next build, which
+removes it. Newer means something edited the built tree, and the build says so per file. Older means
+either that something moved a file into it, which is what `stow --adopt` does, or that a layer has
+moved on and there has been no build since; the build is silent on that direction, and `shale doctor`
+names the files instead, up to ten of them with a count above that. A symlink is never itself
+compared: a build copies the link rather than what it points at, so an age comparison there would be
+about a file the build never touches. A
 build composes into `~/.dotfiles/current.new` and renames that into place, so a `current.new` left
 lying about is a run that died mid-build and is safe to delete.
 

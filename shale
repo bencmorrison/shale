@@ -724,9 +724,13 @@ diverged() {
 # The other half of that data-loss path, and the half no timestamp can name: a
 # file moved into the built tree keeps its own mtime, so one older than the layer
 # copy about to overwrite it is either an adopted file or a copy the layers have
-# moved past.  Counted rather than listed, because a pull that changed fifty
-# files must not print a hundred and fifty lines about it, and counted only for
-# the layer that wins the path, so the count is a count of files.
+# moved past.  Counted and never reported here: an edited layer leaves every path
+# it provides in exactly this state, so build - the everyday loop - would say it
+# on every edit.  doctor's audit_built_tree is where that is reported, and the
+# count is only what makes this build keep current.old, so the file an adopt
+# moved in is still recoverable for the one build after it.
+#
+# Counted only for the layer that wins the path, so it is a count of files.
 older_than_layer() {
   local srel=$1
   wins_this_path "$srel" || return 0
@@ -1042,6 +1046,264 @@ EOF
     done
   done <"$file"
   [ "${#STOWRC_OPTIONS[@]}" -gt 0 ]
+}
+
+# Records the directory $1 that this check could not enter, once each and up to
+# $2 of them, setting UNREACHABLE_MORE when it stops keeping them.  Either half
+# of the comparison can be behind one, and either way the walk has seen less than
+# it appears to, so both go in one list.
+#
+# Deduplicated against the list, which is the whole of it: one unsearchable layer
+# directory is met once per directory of the built tree below it, and a list of
+# the same path fifty times is not a report.  Above the cap the dedup stops
+# working, which is why the line that replaces the names says only 'and more'.
+unreachable() {
+  local dir=$1 cap=$2 i
+  i=0
+  while [ "$i" -lt "${#UNREACHABLE_PATHS[@]}" ]; do
+    [ "${UNREACHABLE_PATHS[$i]}" != "$dir" ] || return 0
+    i=$((i + 1))
+  done
+  if [ "${#UNREACHABLE_PATHS[@]}" -ge "$cap" ]; then
+    UNREACHABLE_MORE=1
+    return 0
+  fi
+  UNREACHABLE_PATHS+=("$dir")
+}
+
+# The highest-precedence layer whose copy of anything in the built-tree directory
+# $1 is behind a directory that cannot be searched, in BLOCKED_LAYER as an index
+# into LAYER_PATHS, or -1 when every layer can be reached.  $3 is the answer for
+# the directory holding $1, which this one is never lower than: an unsearchable
+# directory stays unsearchable for everything below it.  Records each such
+# directory, up to $2 of them.
+#
+# Once per directory rather than once per file: one unsearchable directory
+# obscures every path below it equally, and asking per file would put a walk of
+# the layer path into the inner loop of the whole tree.
+#
+# Once per *directory* is not enough on its own, either.  Walking from $DOTFILES
+# at every one of them re-tests the ancestors the parent already tested, which is
+# quadratic in depth - a shape #64 exists because of - so only the deepest
+# directory is tested here and the rest is inherited.  That is the same answer:
+# where the parent chain was clear the directory itself is all that was left
+# untested, and where it was not, this layer is blocked already and the directory
+# naming it is in the list.  The top of the walk has no parent to inherit from,
+# and is the one call that tests $DOTFILES and the layer path above it; the
+# trailing '/' is there because obscured_ancestor never tests the last component,
+# and the layer root itself has to be one of the tested ones.
+blocked_layers() {
+  local rel=$1 cap=$2 inherited=$3 i dir
+  BLOCKED_LAYER=$inherited
+  i=0
+  while [ "$i" -lt "${#LAYER_PATHS[@]}" ]; do
+    if [ -z "$rel" ]; then
+      dir=
+      ! obscured_ancestor "$DOTFILES" "${LAYER_PATHS[$i]}/" || dir=$OBSCURED
+    else
+      dir=$DOTFILES/${LAYER_PATHS[$i]}/$rel
+      # -d is false for a directory below one that cannot be searched, which is
+      # the case this arm need say nothing about: that ancestor blocked this
+      # layer when it was met, and is already in the list.
+      { [ -d "$dir" ] && [ ! -x "$dir" ]; } || dir=
+    fi
+    if [ -n "$dir" ]; then
+      [ "$i" -le "$BLOCKED_LAYER" ] || BLOCKED_LAYER=$i
+      unreachable "$dir" "$cap"
+    fi
+    i=$((i + 1))
+  done
+}
+
+# The copy of the path $1 - relative to the built tree - that a build would
+# compose last, in WINNER; non-zero when no configured layer provides it or when
+# no answer can be trusted.  Highest precedence first, which is the reverse of
+# the config order and the same rule cmd_which answers with.
+#
+# $2 is blocked_layers' index for the directory holding $1.  A layer at or below
+# it cannot be told from a layer that simply has not got this path, and it may be
+# the one that wins, so the search stops there rather than naming a lower layer
+# as the winner - the same refusal cmd_which makes, for the same reason.  Layers
+# above it are unaffected: one that provides the path wins whatever is below.
+winning_layer() {
+  local rel=$1 blocked=$2 i path
+  WINNER=
+  i=${#LAYER_PATHS[@]}
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    [ "$i" -gt "$blocked" ] || return 1
+    path=$DOTFILES/${LAYER_PATHS[$i]}/$rel
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      WINNER=$path
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The built tree under $1, relative to $CUR and '' for the whole of it, walked
+# for files older than the layer copy that provides them.  Counts them into
+# MISMATCH_COUNT, keeps the first $2 in MISMATCH_PATHS and folds each into
+# ANCESTOR.  $3 is blocked_layers' answer for the directory holding $1, and -1
+# at the top of the walk.
+#
+# The comparison is build's, so that what doctor reports is what the next build
+# will act on: mtime rather than content, because content cannot separate the two
+# readings either - a built copy holding the previous layer content matches no
+# layer now, exactly as an adopted file does not.  Neither side is compared when
+# that side is a symlink, for the reason at compose_dir: a build copies the link
+# rather than what it points at, so an age comparison there is about two files
+# nothing touches.  A directory in a layer at a path the built tree holds a file
+# at is a conflict, which build reports and this must not read a timestamp from.
+#
+# One direction only.  A built copy *newer* than its layer is build's to report,
+# per file and with a remedy, and it never went silent; saying it here as well
+# would duplicate an accurate message in words that are wrong for it, this note
+# stating two readings neither of which is 'you edited the built tree'.
+scan_built_tree() {
+  local rel=$1 cap=$2 inherited=$3 here e base srel winner blocked
+  here=$CUR${rel:+/$rel}
+  # A directory that cannot be listed answers every glob with nothing, exactly as
+  # an empty one does, so without this the subtree drops out of the check and the
+  # report reads as a complete answer.
+  if [ ! -r "$here" ] || [ ! -x "$here" ]; then
+    unreachable "$here" "$cap"
+    return 0
+  fi
+  blocked_layers "$rel" "$cap" "$inherited"
+  blocked=$BLOCKED_LAYER
+  # Neither dotglob nor nullglob is set in doctor, so both patterns are spelled
+  # out and an unmatched one arrives as itself.  '.' and '..' are dropped by
+  # name, whatever the glob options say about them.
+  for e in "$here"/* "$here"/.*; do
+    base=${e##*/}
+    case "$base" in
+      . | ..) continue ;;
+      '*' | '.*')
+        { [ -e "$e" ] || [ -L "$e" ]; } || continue
+        ;;
+    esac
+    # At every depth, as in the composer: a build never copies a .git, so a note
+    # promising that the next build will replace this one would be false, and so
+    # would the current.old it promises with it.
+    [ "$base" = .git ] && continue
+    srel=${rel:+$rel/}$base
+    # A symlink to a directory is a leaf here as it is in the composer, and
+    # descending one would walk out of the built tree.
+    if [ -d "$e" ] && [ ! -L "$e" ]; then
+      scan_built_tree "$srel" "$cap" "$blocked"
+      continue
+    fi
+    { [ -f "$e" ] && [ ! -L "$e" ]; } || continue
+    # A path no layer provides at all is a different thing entirely - a built
+    # tree holding a file every layer dropped - and nothing here reports it.
+    winning_layer "$srel" "$blocked" || continue
+    winner=$WINNER
+    { [ ! -L "$winner" ] && [ ! -d "$winner" ]; } || continue
+    if [ "$winner" -nt "$e" ]; then
+      MISMATCH_COUNT=$((MISMATCH_COUNT + 1))
+      # Only the first $cap are kept: growing an array to one entry per file a
+      # pull touched is the way to make this walk quadratic.
+      [ "$MISMATCH_COUNT" -gt "$cap" ] || MISMATCH_PATHS+=("$e")
+      common_ancestor "$e"
+    fi
+  done
+}
+
+# The report #66 put in build, moved here because build is the loop a user runs
+# all day and doctor is not: an edited layer leaves every path it provides older
+# than its layer copy, which is the same condition an adopted file leaves, so in
+# build the message that exists to save a five-year-old .zshrc fired whenever
+# nothing was wrong.
+#
+# A note and never a finding.  A built tree the layers have moved past is the
+# ordinary state between editing a layer and rebuilding, and making that exit 1
+# would move the fatigue rather than remove it.
+#
+# It states both readings and picks neither, because nothing shale can read
+# separates them without remembering what the last build wrote.  Both are
+# readings of one direction: build reports the other one itself.
+audit_built_tree() {
+  local cap n i rest lines files matches moved replaces where directories
+  [ -d "$CUR" ] || return 0
+  # Every line below says what the next build will do with what it found, and
+  # against a symlink here no build does anything: it refuses the tree outright.
+  # That this walk would follow the link is the smaller half; promising an
+  # outcome for a build that will not run is the half that would be false.
+  [ ! -L "$CUR" ] || return 0
+  [ "${#LAYER_PATHS[@]}" -gt 0 ] || return 0
+
+  MISMATCH_COUNT=0
+  MISMATCH_PATHS=()
+  UNREACHABLE_PATHS=()
+  UNREACHABLE_MORE=0
+  ANCESTOR=
+  # audit_broken_links' cap, for its reasons: enough of them to act on, few
+  # enough to stay inside a short terminal.
+  cap=10
+  scan_built_tree '' "$cap" -1
+
+  # Ahead of the note below, which it qualifies, and printed whether or not there
+  # is one: silence from a walk that did not reach everything reads as a complete
+  # answer, which is the failure this exists to stop.
+  if [ "${#UNREACHABLE_PATHS[@]}" -gt 0 ]; then
+    lines=("shale could not read everything this check compares, so what it says about the built tree at $CUR is not the whole answer:")
+    i=0
+    while [ "$i" -lt "${#UNREACHABLE_PATHS[@]}" ]; do
+      denied_verb "${UNREACHABLE_PATHS[$i]}"
+      lines[${#lines[@]}]="$DENIED_VERB ${UNREACHABLE_PATHS[$i]}"
+      i=$((i + 1))
+    done
+    directories='those directories'
+    [ "${#UNREACHABLE_PATHS[@]}" -gt 1 ] || directories='that directory'
+    [ "$UNREACHABLE_MORE" -eq 0 ] ||
+      lines[${#lines[@]}]='and more, not named here'
+    lines[${#lines[@]}]="check the permissions on $directories"
+    note ${lines[@]+"${lines[@]}"}
+  fi
+
+  n=$MISMATCH_COUNT
+  [ "$n" -gt 0 ] || return 0
+
+  files='files'
+  matches='do not match the layer copies that provide them'
+  moved='moved them into'
+  replaces='replaces them with the layer copies'
+  if [ "$n" -eq 1 ]; then
+    files='file'
+    matches='does not match the layer copy that provides it'
+    moved='moved it into'
+    replaces='replaces it with the layer copy'
+  fi
+
+  # Named only above the cap, and only when it says something the count line has
+  # not: below it every path is printed anyway.  The trailing slash on both sides
+  # so that the two spellings compare rather than the strings as they arrived.
+  where=()
+  if [ "$n" -gt "$cap" ]; then
+    rest=$ANCESTOR
+    case "$rest" in
+      */) ;;
+      *) rest=$rest/ ;;
+    esac
+    [ "$rest" = "$CUR/" ] || where=("all of them are under $ANCESTOR")
+  fi
+
+  lines=("$n $files in $CUR $matches"
+    "either something $moved the built tree, which is what stow --adopt does, or a layer changed and there has been no build since"
+    ${where[@]+"${where[@]}"}
+    "the next build $replaces, keeping what is there now at $OLD"
+    "the build after that removes $OLD, so a file moved into the built tree is recoverable for one build and no longer")
+  i=0
+  while [ "$i" -lt "${#MISMATCH_PATHS[@]}" ]; do
+    lines[${#lines[@]}]=${MISMATCH_PATHS[$i]}
+    i=$((i + 1))
+  done
+  if [ "$n" -gt "$cap" ]; then
+    rest=$((n - cap))
+    lines[${#lines[@]}]="and $rest more, not named here"
+  fi
+  note ${lines[@]+"${lines[@]}"}
 }
 
 # Every link under $HOME that points into the built tree at a path the built
@@ -1473,7 +1735,7 @@ check_layers() {
 }
 
 cmd_build() {
-  local i dir n had_current qcur qold files was them copies
+  local i dir n had_current qcur qold
 
   parse_config || exit 1
 
@@ -1639,6 +1901,8 @@ cmd_build() {
   if [ "$n" -eq 0 ] && [ "$OLDER_COUNT" -eq 0 ]; then
     rm -rf "$OLD" || warn "could not remove $OLD"
   else
+    # The older direction keeps current.old and says nothing; only this one is
+    # reported here.  See older_than_layer.
     i=0
     while [ "$i" -lt "$n" ]; do
       warn "$CUR/${DIVERGED_PATHS[$i]} was newer than ${DIVERGED_LAYERS[$i]}" \
@@ -1646,24 +1910,6 @@ cmd_build() {
         "your version is kept at $OLD/${DIVERGED_PATHS[$i]}"
       i=$((i + 1))
     done
-    if [ "$OLDER_COUNT" -gt 0 ]; then
-      files='files'
-      was='were'
-      them='them'
-      copies='the layer copies that replaced them'
-      if [ "$OLDER_COUNT" -eq 1 ]; then
-        files='file'
-        was='was'
-        them='it'
-        copies='the layer copy that replaced it'
-      fi
-      # One group however many files, and it states both readings rather than
-      # naming one: nothing shale can read tells a file moved into the built
-      # tree from a built tree the layers have moved past.
-      warn "$OLDER_COUNT $files in $CUR $was older than $copies" \
-        "either something moved $them into the built tree, which is what stow --adopt does, or a layer changed and this is the first build since" \
-        "what was in $CUR before this build is kept at $OLD"
-    fi
   fi
 
   if [ -n "$DEFERRED" ]; then
@@ -1941,6 +2187,9 @@ cmd_doctor() {
       note ${lines[@]+"${lines[@]}"}
     fi
   done
+
+  # The two walks, in size order: the built tree, then the whole of $HOME.
+  audit_built_tree
 
   # Last, because it is the only check that walks the whole of $HOME and the only
   # one that means anything only once everything above it is sound.

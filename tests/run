@@ -2161,9 +2161,14 @@ test_build_warns_when_the_built_tree_was_edited() {
 # The half of that path an mtime comparison cannot name.  stow --adopt moves the
 # user's own file into the built tree keeping its mtime, so a five-year-old
 # .zshrc lands there *older* than the layer copy about to overwrite it and the
-# newer-direction check above never fires.  The message may not say the tree was
-# edited: an older copy is equally a build the layers have moved past.
-test_build_warns_when_the_built_tree_is_older_than_its_layer() {
+# newer-direction check above never fires.
+#
+# The build says nothing about it, and must not: an edited layer leaves every
+# path it provides in this same state, so a build that reported it reported the
+# everyday loop.  What the build still does is keep current.old, which is the
+# whole of the recovery, and doctor is where the file is named - so the silence
+# here is only as good as the two assertions that follow it.
+test_build_keeps_an_older_built_copy_silently_and_doctor_names_it() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
   run_shale build
@@ -2176,51 +2181,62 @@ test_build_warns_when_the_built_tree_is_older_than_its_layer() {
   # Dated into the past because that is what an adopted file arrives with.
   printf 'FIVE YEARS OF ZSH\n' >|"$sandbox_path" || fail 'could not adopt into the built tree'
   touch -t 200001010000 "$sandbox_path" || fail 'could not date the adopted file'
+  # Before the build, which is the only window in which anything can be done
+  # about it cheaply, and the reason the report went here rather than nowhere.
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_contains "$shale_out" \
+    "shale: 1 file in $HOME/.dotfiles/current does not match the layer copy that provides it" \
+    'doctor stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.dotfiles/current/.zshrc" 'doctor stdout'
   run_shale build
   assert_status 0 "$shale_status"
-  assert_contains "$shale_err" \
-    "shale: 1 file in $HOME/.dotfiles/current was older than the layer copy that replaced it" \
-    'stderr'
-  assert_contains "$shale_err" 'which is what stow --adopt does' 'stderr'
-  assert_contains "$shale_err" \
-    "shale:   what was in $HOME/.dotfiles/current before this build is kept at $HOME/.dotfiles/current.old" \
-    'stderr'
-  assert_not_contains "$shale_err" 'you edited' 'stderr'
+  assert_empty "$shale_err" 'the build stderr'
   assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the rebuilt file'
   assert_eq 'FIVE YEARS OF ZSH' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
+  # The honest limit of the split: after the build the built copy is the layer's
+  # again, so doctor can no longer see it and current.old is the only copy left.
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor after the build'
+  # Both spellings of the count line, here and at every other assertion that the
+  # note is absent: the singular and the plural share no whole phrase, so a check
+  # written for one lets the other past - which is not hypothetical, a mutation
+  # of blocked_layers produced the plural and went unnoticed by the singular.
+  assert_not_contains "$shale_out" 'does not match the layer copy' \
+    'doctor stdout after the build'
+  assert_not_contains "$shale_out" 'do not match the layer copies' \
+    'doctor stdout after the build'
 }
 
-# One group however many files: a pull that changed fifty of them must not print
-# a hundred and fifty lines.  The count is a count of files, so .zshrc coming
-# from two layers still counts once, and the two untouched files count not at
-# all.  Retention is one build deep - the rebuild leaves every copy the age of
-# the layer file it came from, so the next build has nothing left to re-detect.
-test_build_summarises_older_files_in_one_group_and_forgets_them_next_build() {
-  local name groups
+# Retention covers every older file, not the first of them, and it is one build
+# deep: the rebuild leaves every copy the age of the layer file it came from, so
+# the next build has nothing left to re-detect and reaps current.old.
+test_build_keeps_every_older_file_and_forgets_them_next_build() {
+  local name
   conf 'base personal/base' 'local local'
   mklayer personal/base .zshrc
   mklayer local .zshrc
   mklayer personal/base .vimrc
   mklayer personal/base .inputrc
-  mklayer personal/base .netrc
-  mklayer personal/base .gitconfig
   run_shale build
   assert_status 0 "$shale_status"
   assert_empty "$shale_err" 'the first build stderr'
   for name in .zshrc .vimrc .inputrc; do
     sandbox_mkdir "$HOME/.dotfiles/current"
     sandbox_leaf "$sandbox_dir" "$name"
+    # '>|': the build above put these here.  Content as well as a date, so what
+    # current.old holds says which copy was kept rather than only that one was.
+    printf 'MOVED IN %s\n' "$name" >|"$sandbox_path" || fail "could not replace $name"
     touch -t 200001010000 "$sandbox_path" || fail "could not date $name"
   done
   run_shale build
   assert_status 0 "$shale_status"
-  groups=$(printf '%s\n' "$shale_err" | grep -c 'were older than')
-  assert_eq 1 "$groups" 'summary lines'
-  assert_contains "$shale_err" \
-    "shale: 3 files in $HOME/.dotfiles/current were older than the layer copies that replaced them" \
-    'stderr'
-  assert_not_contains "$shale_err" 'you edited' 'stderr'
-  assert_exists "$HOME/.dotfiles/current.old/.zshrc" 'the previous tree'
+  assert_empty "$shale_err" 'the build stderr'
+  for name in .zshrc .vimrc .inputrc; do
+    assert_eq "MOVED IN $name" "$(cat "$HOME/.dotfiles/current.old/$name")" \
+      "the kept copy of $name"
+  done
+  assert_eq 'local/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the rebuilt file'
   run_shale build
   assert_status 0 "$shale_status"
   assert_empty "$shale_err" 'the next build stderr'
@@ -4276,16 +4292,13 @@ test_apply_a_content_change_is_seen_through_the_existing_link() {
   mklayer personal/base .zshrc 'second'
   run_shale apply
   assert_status 0 "$shale_status"
-  # The price of the adopted-file guard, paid here: an edited layer leaves the
-  # tree it replaces older than itself, which is indistinguishable from a file
-  # moved into that tree, so the first build after an edit says so.  It is a
-  # line on stderr and a retained current.old, not a failure.
-  assert_contains "$shale_err" \
-    "shale: 1 file in $HOME/.dotfiles/current was older than the layer copy that replaced it" \
-    'the second apply stderr'
-  # Nothing else on stderr: the tree was not edited, and a diverged record
-  # firing alongside the summary would otherwise pass unnoticed here.
-  assert_not_contains "$shale_err" 'you edited' 'the second apply stderr'
+  # The everyday loop, and it says nothing at all: an edited layer leaves the
+  # tree it replaces older than itself, which is the same state a file moved
+  # into that tree leaves, and reporting it here would report every edit.
+  assert_empty "$shale_err" 'the second apply stderr'
+  # The retention is not silent as well as the message: an adopted file at this
+  # path would still be in current.old, which is what the silence costs nothing.
+  assert_eq 'first' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
   assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
   assert_eq 'second' "$(cat "$HOME/.zshrc")" 'the linked file'
 }
@@ -6318,6 +6331,567 @@ test_doctor_says_when_the_built_tree_is_not_a_directory() {
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
 }
 
+# The report #66 put in build, moved here.  This is the shape it exists for: a
+# five-year-old .zshrc moved into the built tree keeps its own mtime, so it lands
+# there older than the layer copy that will replace it, and the next build
+# overwrites it - with current.old the only copy left afterwards.  Doctor is
+# ahead of that build, which is the window in which anything can be done.
+#
+# The whole wording, once, so the two readings and the recovery are pinned
+# somewhere; the cases below assert the parts they are about.
+test_doctor_notes_a_file_moved_into_the_built_tree() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  # '>|': the build above put this file here.  Dated into the past because that
+  # is what a file stow --adopt moved out of $HOME arrives with.
+  printf 'FIVE YEARS OF ZSH\n' >|"$sandbox_path" || fail 'could not adopt into the built tree'
+  touch -t 200001010000 "$sandbox_path" || fail 'could not date the adopted file'
+  run_shale doctor
+  # A note, not a finding: a built tree the layers have moved past is the
+  # ordinary state between an edit and a rebuild, and exiting 1 on it would move
+  # the alarm fatigue rather than remove it.
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 1 file in $HOME/.dotfiles/current does not match the layer copy that provides it" \
+    'stdout'
+  assert_contains "$shale_out" \
+    'shale:   either something moved it into the built tree, which is what stow --adopt does, or a layer changed and there has been no build since' \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   the next build replaces it with the layer copy, keeping what is there now at $HOME/.dotfiles/current.old" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   the build after that removes $HOME/.dotfiles/current.old, so a file moved into the built tree is recoverable for one build and no longer" \
+    'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.dotfiles/current/.zshrc" 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# The other reading of the same line, and the commoner one by far: edit a layer
+# file and the built copy is older than it until the next build.  Nothing shale
+# can read separates this from the case above, which is why one note states both
+# and why it is here rather than in the build a user runs all day.
+test_doctor_notes_a_built_tree_its_layers_have_moved_past() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc 'first'
+  # Both dates are set rather than left to the clock: bash 3.2's -nt compares
+  # whole seconds, and the built copy carries whatever mtime the layer file had
+  # when the build copied it, so the edit has to be strictly newer than this.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  mklayer personal/base .zshrc 'second'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  touch -t 202601010000 "$sandbox_path" || fail 'could not date the layer file'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 1 file in $HOME/.dotfiles/current does not match the layer copy that provides it" \
+    'stdout'
+  assert_contains "$shale_out" 'which is what stow --adopt does' 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.dotfiles/current/.zshrc" 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  # The build that follows is the everyday loop and says nothing, and the note
+  # goes with the rebuild rather than repeating for ever.
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the build stderr'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor after the build'
+  assert_not_contains "$shale_out" 'does not match the layer copy' 'stdout after the build'
+  assert_not_contains "$shale_out" 'do not match the layer copies' 'stdout after the build'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout after the build'
+}
+
+# The other direction, which is not this note's.  A built copy newer than its
+# layer is something build reports itself, per file, with wording that names what
+# happened and a remedy - so saying it here as well would be an accurate message
+# duplicated in words that are wrong for it, this note offering two readings of
+# which neither is 'you edited the built tree'.  The silence is only worth
+# asserting next to the message that does cover it, which is why build runs here.
+test_doctor_says_nothing_about_a_built_tree_build_reports_as_edited() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  # '>|': the build above put this file here, and editing it is the point.
+  printf 'HAND EDITED\n' >|"$sandbox_path" || fail 'could not edit the built tree'
+  touch -t 202601010000 "$sandbox_path" || fail 'could not date the edited file'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/current/.zshrc was newer than $HOME/.dotfiles/personal/base/.zshrc" \
+    'the build stderr'
+  assert_contains "$shale_err" 'shale:   you edited the built tree; the layer wins' \
+    'the build stderr'
+  assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
+}
+
+# A tree that matches its layers is the state every build leaves, cp -RPp having
+# carried each layer file's mtime across, so the note must be absent from the
+# clean report rather than merely short.
+test_doctor_says_nothing_about_a_built_tree_that_matches_its_layers() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  run_shale build
+  assert_status 0 "$shale_status"
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# Only the layer that would win the path is compared, because that is the copy
+# the next build lands: a shadowed layer whose file is newer is not something a
+# build will do anything about, and reporting it would fire for ever.  The dates
+# are what make the first half say that - base is newer than the built copy, so
+# comparing against base rather than against the winner does fire.
+test_doctor_compares_the_built_tree_against_the_winning_layer() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 202606010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  touch -t 202601010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq 'local/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built file'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+  # And the winner moving ahead of the built copy is what does fire.
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  touch -t 202603010000 "$sandbox_path" || fail 'could not date the layer file'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 1 file in $HOME/.dotfiles/current does not match the layer copy that provides it" \
+    'stdout'
+}
+
+# A path the built tree holds and no layer provides is a different thing - a tree
+# the layers dropped a file from - and there is no copy to compare it against.
+# current/.stow-local-ignore is the permanent case: shale writes it itself, so
+# every doctor run would name it if the note were not scoped to what a layer
+# provides.  Both are here whatever their timestamps, which is what this pins:
+# the comparison alone is not what keeps them out, since a '-nt' whose *left*
+# operand is not there is false anyway - and the left operand is the layer copy.
+# The other way round is true rather than false, which is what made this guard
+# load-bearing while the newer direction was still reported.  What is being held
+# is that the scope stays deliberate rather than becoming an accident of which
+# side of the comparison the missing path happens to be on.
+test_doctor_says_nothing_about_a_built_tree_path_no_layer_provides() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .vimrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_exists "$HOME/.dotfiles/current/.stow-local-ignore" 'the ignore list'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .vimrc
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" .vimrc
+  touch -t 200001010000 "$sandbox_path" || fail 'could not date the built copy'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# The rule #73 set for build's own comparison, and the same reasoning: a build
+# copies a link rather than what it points at, so an age comparison on one is
+# about two files nothing touches - and for a link whose target a higher layer
+# shadows, the two sides resolve to different files and would differ for ever.
+# All three shapes, because the skip has to be on the entry and not on the path.
+test_doctor_compares_no_symlink_in_the_built_tree() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer personal/base kindchange
+  mklayer local .zshrc
+  mklayer local layerlink
+  sandbox_write "$HOME/outside" thing 'OUTSIDE'
+  sandbox_mkdir "$HOME/outside"
+  touch -t 202601010000 "$sandbox_dir/thing" || fail 'could not date the outside file'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 202601010000 "$sandbox_dir/.zshrc" "$sandbox_dir/kindchange" ||
+    fail 'could not date the layer files'
+  # A link whose target the layer above shadows: current/zlink resolves through
+  # current/.zshrc to local's copy and base/zlink to base's own.
+  sandbox_leaf "$sandbox_dir" zlink new
+  ln -s .zshrc "$sandbox_path" || fail 'could not create the layer link'
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  touch -t 202001010000 "$sandbox_dir/.zshrc" "$sandbox_dir/layerlink" ||
+    fail 'could not date the layer files'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the build stderr'
+  # Every date is set so that each of the three shapes would fire if its side
+  # were compared: base/zlink resolves to 2026 against a built link resolving to
+  # 2020, local/layerlink to 2026 against a built copy of 2020, and base's plain
+  # kindchange is 2026 against a built link resolving to 2020.
+  #
+  # The layer entry is a link and the built copy a plain file.  It points out of
+  # the tree so that replacing it moves nothing else: a target inside a layer
+  # would be a path of its own for this walk to compare.
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  sandbox_leaf "$sandbox_dir" layerlink
+  rm -f "$sandbox_path" || fail 'could not clear the layer file'
+  ln -s "$HOME/outside/thing" "$sandbox_path" ||
+    fail 'could not replace the layer file with a link'
+  # And the built copy is a link where the layer entry is a plain file.
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" kindchange
+  rm -f "$sandbox_path" || fail 'could not clear the built copy'
+  ln -s .zshrc "$sandbox_path" || fail 'could not replace the built copy with a link'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# The volume the bound is for: a git pull that changed a couple of hundred files
+# leaves every one of them in this state, and a line each is a report nobody
+# reads.  Twelve in two sibling directories, which is the smallest tree that
+# crosses the cap of ten and has an ancestor that is neither directory.
+test_doctor_bounds_the_built_tree_note_at_ten_paths() {
+  local named i line
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  i=0
+  while [ "$i" -lt 6 ]; do
+    mklayer personal/base ".config/nvim/pack/start/f$i"
+    mklayer personal/base ".config/nvim/pack/opt/f$i"
+    i=$((i + 1))
+  done
+  # Both sides are dated, before the build and after it: the built copy carries
+  # whatever the layer file had when it was copied, and only a layer file that is
+  # strictly newer than that in whole seconds - all bash 3.2's -nt compares - is
+  # the direction this note is about.
+  i=0
+  while [ "$i" -lt 6 ]; do
+    sandbox_mkdir "$HOME/.dotfiles/personal/base/.config/nvim/pack/start"
+    sandbox_leaf "$sandbox_dir" "f$i"
+    touch -t 200001010000 "$sandbox_path" || fail "could not date start/f$i"
+    sandbox_mkdir "$HOME/.dotfiles/personal/base/.config/nvim/pack/opt"
+    sandbox_leaf "$sandbox_dir" "f$i"
+    touch -t 200001010000 "$sandbox_path" || fail "could not date opt/f$i"
+    i=$((i + 1))
+  done
+  run_shale build
+  assert_status 0 "$shale_status"
+  i=0
+  while [ "$i" -lt 6 ]; do
+    sandbox_mkdir "$HOME/.dotfiles/personal/base/.config/nvim/pack/start"
+    sandbox_leaf "$sandbox_dir" "f$i"
+    touch -t 202601010000 "$sandbox_path" || fail "could not date start/f$i"
+    sandbox_mkdir "$HOME/.dotfiles/personal/base/.config/nvim/pack/opt"
+    sandbox_leaf "$sandbox_dir" "f$i"
+    touch -t 202601010000 "$sandbox_path" || fail "could not date opt/f$i"
+    i=$((i + 1))
+  done
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 12 files in $HOME/.dotfiles/current do not match the layer copies that provide them" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   all of them are under $HOME/.dotfiles/current/.config/nvim/pack" 'stdout'
+  assert_contains "$shale_out" 'shale:   and 2 more, not named here' 'stdout'
+  # Ten named, whichever ten they are.  A case pattern rather than grep: the
+  # sandbox path is a literal here and a regular expression to grep.
+  named=0
+  while IFS= read -r line; do
+    case "$line" in
+      "shale:   $HOME/.dotfiles/current/.config/nvim/pack/"*) named=$((named + 1)) ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq 10 "$named" 'the number of paths named'
+  # The bound changes what is printed and never the exit status, which this note
+  # does not touch at any count.
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The common ancestor is worth a line only when it says something the count line
+# has not: below the cap every path is printed anyway, and the built tree itself
+# is the directory that line already names.
+test_doctor_the_built_tree_note_names_no_ancestor_below_the_cap() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config/nvim"
+  touch -t 200001010000 "$sandbox_dir/init.lua" "$sandbox_dir/spell.add" ||
+    fail 'could not date the layer files'
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config/nvim"
+  touch -t 202601010000 "$sandbox_dir/init.lua" "$sandbox_dir/spell.add" ||
+    fail 'could not date the layer files'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 2 files in $HOME/.dotfiles/current do not match the layer copies that provide them" \
+    'stdout'
+  assert_not_contains "$shale_out" 'all of them are under' 'stdout'
+  assert_not_contains "$shale_out" 'not named here' 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   $HOME/.dotfiles/current/.config/nvim/init.lua" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   $HOME/.dotfiles/current/.config/nvim/spell.add" 'stdout'
+}
+
+# The one ancestor above the cap that is not worth a line, because the line above
+# it has already named the built tree.  Eleven dotfiles at the top of it, which
+# is also the shape that says the walk sees them at all: '*' matches none of them
+# on either bash, and current/.stow-local-ignore sits among them unreported.
+test_doctor_many_built_tree_paths_at_the_top_do_not_name_it_twice() {
+  local i
+  conf 'base personal/base'
+  i=0
+  while [ "$i" -lt 11 ]; do
+    mklayer personal/base ".f$i"
+    i=$((i + 1))
+  done
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  i=0
+  while [ "$i" -lt 11 ]; do
+    sandbox_leaf "$sandbox_dir" ".f$i"
+    touch -t 200001010000 "$sandbox_path" || fail "could not date .f$i"
+    i=$((i + 1))
+  done
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  i=0
+  while [ "$i" -lt 11 ]; do
+    sandbox_leaf "$sandbox_dir" ".f$i"
+    touch -t 202601010000 "$sandbox_path" || fail "could not date .f$i"
+    i=$((i + 1))
+  done
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 11 files in $HOME/.dotfiles/current do not match the layer copies that provide them" \
+    'stdout'
+  assert_not_contains "$shale_out" 'all of them are under' 'stdout'
+  assert_contains "$shale_out" 'shale:   and 1 more, not named here' 'stdout'
+  # shale writes this one itself, so no layer provides it and it is not among the
+  # eleven however its timestamp falls.
+  assert_not_contains "$shale_out" '.stow-local-ignore' 'stdout'
+}
+
+# A build skips a .git at every depth, so nothing under one is ever composed and
+# no build will replace it or keep it in current.old.  Naming it would be a note
+# whose every line is false, and the last of them - a current.old the next build
+# would create - is false in the direction that loses a file.
+test_doctor_says_nothing_about_a_git_directory_in_the_built_tree() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  run_shale build
+  assert_status 0 "$shale_status"
+  # In the layer as well as the built tree: the layer copy is what a comparison
+  # would find, and it has to be there for the case to be about the skip.
+  mklayer personal/base .git/config 'GIT'
+  mklayer personal/base .config/nvim/.git/config 'NESTED GIT'
+  sandbox_mkdir "$HOME/.dotfiles/current/.git"
+  sandbox_write "$HOME/.dotfiles/current/.git" config 'STALE GIT'
+  touch -t 200001010000 "$sandbox_path" || fail 'could not date the built copy'
+  sandbox_mkdir "$HOME/.dotfiles/current/.config/nvim/.git"
+  sandbox_write "$HOME/.dotfiles/current/.config/nvim/.git" config 'STALE NESTED GIT'
+  touch -t 200001010000 "$sandbox_path" || fail 'could not date the built copy'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+  # And the build the note would have promised: it composes neither, so the
+  # promise would have been false in both halves.
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the build stderr'
+  assert_missing "$HOME/.dotfiles/current/.git" 'the built tree'
+  assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
+}
+
+# Every line of the note says what the next build will do with what was found,
+# and against a symlink at current no build does anything: it refuses the tree
+# and exits 1.  That this walk would follow the link is the smaller half; the
+# promise about a build that will not run is the half that would be false.
+test_doctor_says_nothing_about_a_built_tree_reached_through_a_symlink() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles"
+  mv "$sandbox_dir/current" "$sandbox_dir/elsewhere" ||
+    fail 'could not move the built tree aside'
+  sandbox_leaf "$sandbox_dir" current new
+  ln -s elsewhere "$sandbox_path" || fail 'could not link the built tree'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  touch -t 202601010000 "$sandbox_path" || fail 'could not date the layer file'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'does not match the layer copy' 'stdout'
+  assert_not_contains "$shale_out" 'do not match the layer copies' 'stdout'
+  assert_not_contains "$shale_out" 'the next build' 'stdout'
+  # The build that note would have described, and what it actually does.
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: $HOME/.dotfiles/current is a symlink" 'the build stderr'
+}
+
+# A directory this walk cannot enter drops out of it exactly as an empty one
+# does, so without a word about it the report reads as a complete answer when it
+# is not - the same claim audit_broken_links makes when chkstow's walk was short.
+# Both bits, because the verb is the mode's: 0300 lists nothing and 0600 stats
+# nothing below it.
+test_doctor_says_when_it_could_not_read_all_of_the_built_tree() {
+  local doctor_out doctor_status
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base noread/a
+  mklayer personal/base nosearch/b
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  touch -t 202601010000 "$sandbox_path" || fail 'could not date the layer file'
+  chmod 0300 "$HOME/.dotfiles/current/noread" || fail 'could not set mode 0300'
+  chmod 0600 "$HOME/.dotfiles/current/nosearch" || fail 'could not set mode 0600'
+  run_shale doctor
+  doctor_out=$shale_out
+  doctor_status=$shale_status
+  chmod 0755 "$HOME/.dotfiles/current/noread" || fail 'could not restore the mode'
+  chmod 0755 "$HOME/.dotfiles/current/nosearch" || fail 'could not restore the mode'
+  assert_status 0 "$doctor_status"
+  assert_contains "$doctor_out" \
+    "shale: shale could not read everything this check compares, so what it says about the built tree at $HOME/.dotfiles/current is not the whole answer:" \
+    'stdout'
+  assert_contains "$doctor_out" \
+    "shale:   cannot read $HOME/.dotfiles/current/noread" 'stdout'
+  assert_contains "$doctor_out" \
+    "shale:   cannot search $HOME/.dotfiles/current/nosearch" 'stdout'
+  assert_contains "$doctor_out" \
+    'shale:   check the permissions on those directories' 'stdout'
+  # Uncounted, like every other note here: an unreadable directory is not a
+  # finding, it is a limit on what this one can say.
+  assert_contains "$doctor_out" 'shale: no problems found' 'stdout'
+  # And it qualifies the note under it rather than replacing it: the file it
+  # could reach is still named.
+  assert_contains "$doctor_out" \
+    "shale: 1 file in $HOME/.dotfiles/current does not match the layer copy that provides it" \
+    'stdout'
+  assert_contains "$doctor_out" "shale:   $HOME/.dotfiles/current/.zshrc" 'stdout'
+}
+
+# The other side of the comparison, and the one that gets a wrong answer rather
+# than a short one: a layer directory that cannot be searched makes every test
+# for a file inside it answer 'no', which is what a layer that has not got the
+# path answers.  Taking that at face value would name a lower layer as the winner
+# and report the built tree against the wrong copy, so the path is not compared
+# at all - the refusal cmd_which makes on the same tree - and the directory is
+# named once however many files are under it.
+test_doctor_does_not_blame_a_lower_layer_for_one_it_cannot_search() {
+  local doctor_out doctor_status
+  skip_if_root
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  mklayer local .config/nvim/init.lua
+  mklayer local .config/nvim/spell.add
+  # base's copies are newer than local's, so a walk that fell back to base would
+  # report both files rather than saying it could not tell.
+  sandbox_mkdir "$HOME/.dotfiles/local/.config/nvim"
+  touch -t 202001010000 "$sandbox_dir/init.lua" "$sandbox_dir/spell.add" ||
+    fail 'could not date the layer files'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config/nvim"
+  touch -t 202601010000 "$sandbox_dir/init.lua" "$sandbox_dir/spell.add" ||
+    fail 'could not date the layer files'
+  run_shale build
+  assert_status 0 "$shale_status"
+  chmod 0600 "$HOME/.dotfiles/local/.config" || fail 'could not set mode 0600'
+  run_shale doctor
+  doctor_out=$shale_out
+  doctor_status=$shale_status
+  chmod 0755 "$HOME/.dotfiles/local/.config" || fail 'could not restore the mode'
+  assert_status 0 "$doctor_status"
+  assert_not_contains "$doctor_out" 'does not match the layer copy' 'stdout'
+  assert_not_contains "$doctor_out" 'do not match the layer copies' 'stdout'
+  assert_contains "$doctor_out" \
+    "shale: shale could not read everything this check compares, so what it says about the built tree at $HOME/.dotfiles/current is not the whole answer:" \
+    'stdout'
+  # Once, not once per file under it, and singular because it is one directory.
+  assert_contains "$doctor_out" \
+    "shale:   cannot search $HOME/.dotfiles/local/.config" 'stdout'
+  assert_contains "$doctor_out" \
+    'shale:   check the permissions on that directory' 'stdout'
+  assert_contains "$doctor_out" 'shale: no problems found' 'stdout'
+}
+
+# Alongside something that is a finding, which is the only way to see that this
+# note added nothing to the count.  It is also where the note sits in the report:
+# above the link audit, which is the walk of the whole of $HOME and stays last.
+test_doctor_the_built_tree_note_is_not_counted_as_a_problem() {
+  local line seen
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the leftover link'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  touch -t 202601010000 "$sandbox_path" || fail 'could not date the layer file'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: 1 file in $HOME/.dotfiles/current does not match the layer copy that provides it" \
+    'stdout'
+  # One, not two: the orphaned link is the problem and the note is not one.
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  seen=
+  while IFS= read -r line; do
+    case "$line" in
+      'shale: 1 file in '*' does not match the layer copy that provides it')
+        seen="$seen mismatch"
+        ;;
+      *'which the built tree no longer provides') seen="$seen orphan" ;;
+      'shale: 1 problem found') seen="$seen summary" ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq ' mismatch orphan summary' "$seen" 'the order of the report'
+}
+
 # The remedy doctor leads with, carried out exactly as written, on the stow this
 # suite is running against: the paths are the ones doctor printed and the delete
 # is the whole of it.  It leads because it works on every version, which the
@@ -7434,6 +8008,8 @@ test_meta_noclobber_overrides_are_allow_listed() {
     'HAND EDITED'
     # The same, for the file an adopt would have put there in its place.
     'FIVE YEARS OF ZSH'
+    # And for the several of them one build has to keep at once.
+    'MOVED IN '
   )
   found=0
   report=()

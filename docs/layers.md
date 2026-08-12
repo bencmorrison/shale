@@ -280,16 +280,29 @@ goes unreported.
 
 A file that arrives in the built tree from somewhere else keeps its own timestamp rather than
 gaining a new one, so it can be *older* than the layer copy that replaces it — which is what
-`stow --adopt` does, and it is the shape a lost file usually has. A build reports those together:
+`stow --adopt` does, and it is the shape a lost file usually has. A build says nothing about that
+direction, because an edited layer leaves every path it provides in exactly the same state and the
+message would be on the loop you run all day. What the build does is keep `current.old`, and
+`shale doctor` is where the files are named:
 
 ```
-shale: 2 files in /home/you/.dotfiles/current were older than the layer copies that replaced them
-shale:   either something moved them into the built tree, which is what stow --adopt does, or a layer changed and this is the first build since
-shale:   what was in /home/you/.dotfiles/current before this build is kept at /home/you/.dotfiles/current.old
+shale: 2 files in /home/you/.dotfiles/current do not match the layer copies that provide them
+shale:   either something moved them into the built tree, which is what stow --adopt does, or a layer changed and there has been no build since
+shale:   the next build replaces them with the layer copies, keeping what is there now at /home/you/.dotfiles/current.old
+shale:   the build after that removes /home/you/.dotfiles/current.old, so a file moved into the built tree is recoverable for one build and no longer
+shale:   /home/you/.dotfiles/current/.zshrc
+shale:   /home/you/.dotfiles/current/.vimrc
 ```
 
-Shale cannot tell that from a built tree its layers have moved past, and does not guess. Look in
-`current.old` if you were not expecting it.
+Shale cannot tell an adopted file from a built tree its layers have moved past, and does not guess:
+the note states both readings and it is a note, not a problem — `doctor` still exits 0 on it. Above
+ten files it leads with the count and the directory they are under and names ten of them, so a
+`git pull` that changed two hundred is a dozen lines rather than two hundred.
+
+`doctor` sees this only in the window between the file arriving and the next build. Afterwards the
+built copy is the layer's again and there is nothing left to notice, so recovery is `current.old`
+and one build deep. If you use `stow --adopt` against `current/`, run `shale doctor` before you
+build.
 
 ## The everyday loop: build, and when to apply
 
@@ -297,11 +310,11 @@ Edit a file a layer already has, and `shale build` is the whole loop. `~/.zshrc`
 `current/`, so rebuilding the tree it points at makes the edit live at that instant — there is
 nothing for stow to do, because the link is already right.
 
-That build also reports the file you just edited as one the built tree held an older copy of, and
-says `stow --adopt` in the same breath. It is not accusing you of anything: the built copy carries
-the layer's timestamp from the build before, your edit made the layer's copy newer, and shale cannot
-tell that apart from a file something moved into the tree. Expect it after every edit, and read it
-as *the built tree was out of date*, which it was.
+That build says nothing. It keeps `current.old` — the built copy your edit replaced was older than
+the layer copy, which is the state a file moved into the tree also leaves, and shale keeps the
+previous tree either way — but it prints no message about it, because a message there is a message
+on every edit. `shale doctor` is where a built tree its layers have moved past is reported, and
+after a build there is nothing left for it to report.
 
 `shale apply` is what you need when a **path** appears or disappears, since making and unmaking links
 is stow's job and nothing else does it:
@@ -334,8 +347,7 @@ git -C ~/.dotfiles/work pull
 shale apply
 ```
 
-The first build after anything changes a layer — a pull, or your own edit a moment ago — reports
-the files in `current` that were older than their new layer copies, and keeps `current.old`. It is
-expected there and nothing to act on. A build with nothing changed since the last one is the quiet
-one; in an edit loop that is not the next build, it is the one you run twice in a row. There is no
-`shale sync`.
+The first build after anything changes a layer — a pull, or your own edit a moment ago — keeps
+`current.old` without saying so, and the build after it removes it. Every build is quiet; what a
+`shale doctor` in between the pull and the build reports is the built tree not yet matching the
+layers, which is what that pull just did. There is no `shale sync`.
