@@ -840,7 +840,11 @@ blocking_finding() {
   finding "$@"
 }
 
+# Counted, though a note never changes the exit status: the summary says how
+# many were printed, so that a report ending 'no problems found' cannot be read
+# as a report that said nothing.
 note() {
+  NOTES=$((NOTES + 1))
   report "$@"
 }
 
@@ -2276,6 +2280,7 @@ cmd_doctor() {
   local pending
 
   FINDINGS=0
+  NOTES=0
   BUILD_BLOCKED=0
   pending=0
 
@@ -2446,17 +2451,21 @@ cmd_doctor() {
     i=$((i + 1))
   done
 
-  # Directories only, and nothing whose name begins with '.': a '.git' or a
-  # '.stowrc' beside the config is not a stray layer.
+  # Everything in ~/.dotfiles that shale does not account for, a file as much as
+  # a directory: an editor left a 'shale.conf.bak' beside the config and nothing
+  # said so.  Nothing whose name begins with '.' - the glob does not match one,
+  # so the '.git', the '.stowrc' and shale's own '.lock' beside the config are
+  # out of it by construction rather than by name.
   if [ -d "$DOTFILES" ] && { [ ! -r "$DOTFILES" ] || [ ! -x "$DOTFILES" ]; }; then
     denied_verb "$DOTFILES"
     finding "$DENIED_VERB $DOTFILES: permission denied" \
-      'shale cannot tell which of the directories in it are layers and which are strays' \
+      'shale cannot tell which of the entries in it are layers and which are strays' \
       'check the permissions on that directory'
   elif [ -d "$DOTFILES" ]; then
     for entry in "$DOTFILES"/*; do
-      # Also the arm the unmatched glob lands in.
-      [ -d "$entry" ] || continue
+      # Also the arm the unmatched glob lands in, a dangling symlink being the
+      # one entry that is here and answers no to -e.
+      { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
       leaf=${entry##*/}
       # Dropped by name at every glob, whatever the options say about them.
       case "$leaf" in
@@ -2475,8 +2484,25 @@ cmd_doctor() {
         i=$((i + 1))
       done
       [ "$known" -eq 0 ] || continue
-      note "$entry is not a configured layer" \
-        "it may be a leftover stow package, a stray clone, or a layer you removed from the config"
+      # Three shapes.  The first line is true of anything that is here, and each
+      # second line guesses at what the reader is looking at - so a shape that
+      # nothing on either list can be gets the first line alone rather than a
+      # guess that sends them hunting a backup file that does not exist.  A
+      # dangling symlink, a fifo and a socket are all of that third shape, and
+      # a symlink to a directory reads as the directory it is one of.
+      if [ -d "$entry" ]; then
+        note "$entry is not a configured layer" \
+          "it may be a leftover stow package, a stray clone, or a layer you removed from the config"
+      elif [ -f "$entry" ] && [ ! -L "$entry" ]; then
+        # The third possibility is the shape docs/migrating.md walks people
+        # into: a $DOTFILES that is itself their git repository keeps its
+        # README and its LICENSE at the top, and neither of the first two names
+        # anything either of those is.
+        note "$entry is not a layer, and no build reads it" \
+          "it may be an editor's backup of ${CONF##*/}, a file that belongs inside a layer, or one that belongs to the repository at $DOTFILES"
+      else
+        note "$entry is not a layer, and no build reads it"
+      fi
     done
   fi
 
@@ -2526,8 +2552,20 @@ cmd_doctor() {
   # one that means anything only once everything above it is sound.
   audit_broken_links
 
+  # 'no problems found' is the verdict on the findings and stays exactly that,
+  # here and in the docs that quote it - the notes are not problems and this is
+  # not a reclassification.  What it may not do is end a report that said
+  # something with a line saying nothing was said: the notes above it include
+  # the one about a file that is one build from unrecoverable, and a reader
+  # scanning for the verdict stops at this line.
   if [ "$FINDINGS" -eq 0 ]; then
-    report 'no problems found'
+    if [ "$NOTES" -eq 0 ]; then
+      report 'no problems found'
+    elif [ "$NOTES" -eq 1 ]; then
+      report 'no problems found, but read the note above'
+    else
+      report "no problems found, but read the $NOTES notes above"
+    fi
     exit 0
   fi
   if [ "$FINDINGS" -eq 1 ]; then
@@ -2582,7 +2620,15 @@ cmd_which() {
   n=${#WHICH_NAMES[@]}
   if [ "$n" -eq 0 ]; then
     emit "no layer provides '$rel'"
-    if [ -e "$CUR/$rel" ] || [ -L "$CUR/$rel" ]; then
+    # The one path a build puts in the built tree that no layer provides, so on
+    # a tree built a moment ago the stale note below is false about it and the
+    # build it prescribes writes it again and answers the same.  Top level and
+    # nowhere else, the test scan_built_tree skips it by: shale writes that one
+    # path, and a '.stow-local-ignore' inside a layer's directory is an ordinary
+    # file that an ordinary build copies.
+    if [ "$rel" = .stow-local-ignore ]; then
+      emit "note: shale writes $CUR/.stow-local-ignore itself, and no build accepts a layer providing one"
+    elif [ -e "$CUR/$rel" ] || [ -L "$CUR/$rel" ]; then
       emit "note: present in current/ but no layer provides it — current/ is stale, run 'shale build'"
     fi
     exit 1
@@ -2635,6 +2681,15 @@ cmd_which() {
 
   if [ "$upper" -ge 0 ]; then
     emit "note: 'build' would fail here — $rel is a ${WHICH_KINDS[$lower]} in '${WHICH_NAMES[$lower]}' and a ${WHICH_KINDS[$upper]} in '${WHICH_NAMES[$upper]}'"
+  fi
+  # Second, and after the pair above rather than instead of it: build reaches
+  # the conflict first and dies there, so the note in build's order is the one
+  # that describes the next run.  Whatever kind the providers are and whichever
+  # of them wins, no build gets past this one - and the table above answers
+  # 'which layer wins' truthfully while the answer someone needs is that no
+  # layer does.
+  if [ "$rel" = .stow-local-ignore ]; then
+    emit "note: 'build' would fail here — shale writes $CUR/.stow-local-ignore itself, and no build accepts a layer providing one"
   fi
 }
 
