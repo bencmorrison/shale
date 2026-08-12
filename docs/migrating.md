@@ -15,9 +15,11 @@ this over a connection you are not relying on the dotfiles to make.
 One thing to know before you start, rather than after: do not use `stow --adopt`. Your first apply
 will refuse a pile of conflicts, `--adopt` is what a search turns up for clearing them, and here it
 moves your file out of `$HOME` and into `~/.dotfiles/current`, which is generated output that the
-next `shale build` overwrites. That build says so and keeps the whole previous tree at `current.old`,
-so an adopted file survives one build and no more — the build after it reaps `current.old`. Copy the
-file into a layer instead. The refusals themselves are covered below, each with what to do about it.
+next `shale build` overwrites. That build says nothing about it — it keeps the whole previous tree
+at `current.old`, so an adopted file survives one build and no more, and the build after that
+removes `current.old`. The command that tells you is `shale doctor`, and only while the file is
+still there: run it before you build, or copy the file into a layer instead and there is nothing to
+recover. The refusals themselves are covered below, each with what to do about it.
 
 ## Coming from plain files
 
@@ -124,10 +126,10 @@ work queue. Take it in this order.
    The alias survived because it was copied into `~/.dotfiles/local/.zshrc` by hand; `EDITOR` differs
    because that difference was the point of adopting the layer.
 
-   The build you run here reports one file in `current` older than the layer copy that replaced it,
-   and its first clause names `--adopt` again. It is describing the file you just wrote, which is
-   newer than the built tree it is about to replace, and it says so of every layer edit — see *The
-   everyday loop* in [layers.md](layers.md). Nothing has adopted anything.
+   The build you run here says nothing. A `shale doctor` between the edit and the build would have
+   named the file, because the built tree no longer matches the layer that provides it — that is
+   the state every layer edit leaves, and it clears the moment you build. See *The everyday loop* in
+   [layers.md](layers.md).
 
 4. **Move the originals out of `$HOME`.** They are what stow named, and they only have to stop being
    files at those paths. Keep them until you have lived with the result for a week:
@@ -275,19 +277,30 @@ and then move it aside anyway.
 
 Do not reach for `stow --adopt` to clear any of these, for the reason given at the top. It moves the
 file from `$HOME` into the package — which here means into `~/.dotfiles/current`, generated output —
-and the next `shale build` composes over it. That build reports it:
+and the next `shale build` composes over it, silently. `shale doctor`, run before that build, is
+what names it:
 
 ```
-shale: 1 file in /home/you/.dotfiles/current was older than the layer copy that replaced it
-shale:   either something moved it into the built tree, which is what stow --adopt does, or a layer changed and this is the first build since
-shale:   what was in /home/you/.dotfiles/current before this build is kept at /home/you/.dotfiles/current.old
+shale: 1 file in /home/you/.dotfiles/current does not match the layer copy that provides it
+shale:   either something moved it into the built tree, which is what stow --adopt does, or a layer changed and there has been no build since
+shale:   the next build replaces it with the layer copy, keeping what is there now at /home/you/.dotfiles/current.old
+shale:   the build after that removes /home/you/.dotfiles/current.old, so a file moved into the built tree is recoverable for one build and no longer
+shale:   /home/you/.dotfiles/current/.zshrc
 ```
 
 Both readings, because shale cannot tell them apart: an adopted file keeps its own timestamp, and so
-does a `current` the layers have moved past since it was built. You will see the same message the
-first time you build after pulling a layer, and it is nothing to act on there. Either way the
-previous tree is at `current.old` and your file is in it, until the next clean build reaps it. Copy
-the file into a layer instead and there is nothing to recover.
+does a `current` the layers have moved past since it was built. What shale compares is those
+timestamps and nothing else, so it is blind when the two are equal at the resolution the shell
+compares them at — whole seconds on the bash macOS ships, finer on a newer one. An adopted file
+whose timestamp matches the layer copy that closely is composed over by the next build with no note,
+and with no `current.old` kept either, because nothing looked different. It is unlikely and it is
+not detectable — one more reason to copy the file into a layer rather than adopt it. You will see the
+same note from a `doctor` run any time after pulling a layer and before building, and it is nothing
+to act on there —
+which is why it is a note and `doctor` still exits 0. Either way the previous tree is at
+`current.old` and your file is in it, until the next clean build removes it. After that build
+`doctor` cannot see it any more, because the built copy matches the layer again. Copy the file into
+a layer instead and there is nothing to recover.
 
 ## Links left behind after layers change
 
