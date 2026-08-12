@@ -329,6 +329,27 @@ EOF
     done
     [ "$dup" -eq 0 ] || continue
 
+    # A path containing a space arrives here as PATH and URL, and the two fields
+    # are the two a legitimate line has: 'layer' is as valid a relative url as it
+    # is a directory name, so no test of the strings alone can tell 'my layer'
+    # from a layer at 'my' cloned from 'layer', and one that guessed would refuse
+    # working configs.  A directory sitting under the two fields joined is the
+    # one thing that can: it is the layer the line names read as written, and no
+    # url a build clones from spells one.
+    if [ -n "$url" ] && [ ! -e "$DOTFILES/$path" ] && [ ! -L "$DOTFILES/$path" ] &&
+      [ -d "$DOTFILES/$path $url" ]; then
+      # Quoted, because the single space this whole diagnosis turns on is
+      # invisible at the end of a long absolute path.  '-d' above followed a
+      # symlink to get here, as the layer checks do at a layer path, so the
+      # message says something rather than a directory.
+      shell_quote "$DOTFILES/$path $url"
+      config_error \
+        "$CONF:$lineno: nothing at $DOTFILES/$path, but there is something at $QUOTED" \
+        "fields are separated by whitespace, so this line reads as the path '$path' with the url '$url'" \
+        "a layer path cannot contain whitespace and shale has no quoting: rename it"
+      continue
+    fi
+
     if [ -n "$url" ]; then
       found=-1
       i=0
