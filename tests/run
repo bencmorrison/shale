@@ -5200,11 +5200,74 @@ test_doctor_an_unrecognised_directory_is_noted_without_failing() {
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
 }
 
+# The same check over files, where the instance is an editor's backup of the
+# config: it is not a layer, no build reads it, and until now nothing said so.
+# Its own wording, because none of the three hazards a stray directory is
+# likely to be is a thing a stray file is ever one of.
+test_doctor_an_unrecognised_file_is_noted_without_failing() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_write "$HOME/.dotfiles" shale.conf.bak 'base personal/base'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/shale.conf.bak is not a layer, and no build reads it" 'stdout'
+  assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The remedy above names three possibilities, and the third is there for the
+# shape hand-stowing leaves: a ~/.dotfiles that is itself a git repository keeps
+# a README and a LICENSE at its top, so covering files at all means noting two
+# on every run of every setup that migrated that way.  Neither is an editor's
+# backup and neither belongs inside a layer.
+test_doctor_the_file_note_covers_a_dotfiles_that_is_a_repository() {
+  local leaf
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/.git"
+  for leaf in README.md LICENSE; do
+    sandbox_write "$HOME/.dotfiles" "$leaf" 'a file of the repository, not of a layer'
+    run_shale doctor
+    assert_status 0 "$shale_status" "$leaf"
+    assert_contains "$shale_out" \
+      "shale: $HOME/.dotfiles/$leaf is not a layer, and no build reads it" "$leaf"
+    assert_contains "$shale_out" \
+      "shale:   it may be an editor's backup of shale.conf, a file that belongs inside a layer, or one that belongs to the repository at $HOME/.dotfiles" \
+      "$leaf"
+  done
+}
+
+# A second line that guesses wrong is the thing this issue is about, and the
+# guess above is a guess about files.  A dangling symlink is neither an editor's
+# backup nor a file that belongs in a layer nor one of a repository's, and a
+# fifo and a socket reach this same arm by the same two tests failing.  The
+# first line is true of all of them, so that is all they get.
+test_doctor_a_stray_that_is_not_a_regular_file_gets_no_second_line() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # Built, so that the note counted in the summary below is this one and not the
+  # unbuilt tree's.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_target "$HOME/.dotfiles" dangling
+  ln -s "$HOME/nowhere/at/all" "$sandbox_path" || fail 'could not plant the dangling link'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/dangling is not a layer, and no build reads it" 'stdout'
+  assert_not_contains "$shale_out" 'editor' 'stdout'
+  assert_not_contains "$shale_out" 'belongs inside a layer' 'stdout'
+  assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+}
+
 # Everything the scan must stay quiet about: a clone root, a layer that is its
-# own root, the build output under all three of its names, the config file, and
-# any other regular file.  A doctor that noted these would cry wolf on every
-# clean setup, and the file arm is what stops it noting shale.conf's neighbours.
-test_doctor_notes_only_unrecognised_directories() {
+# own root, the build output under all three of its names, and the config file
+# itself.  A doctor that noted these would cry wolf on every clean setup, and it
+# now has a word for a file, so the config is the one it would say it about
+# every time.
+test_doctor_notes_nothing_it_accounts_for() {
   local name
   conf 'base personal/base' 'local local'
   mklayer personal/base .zshrc
@@ -5212,26 +5275,72 @@ test_doctor_notes_only_unrecognised_directories() {
   for name in current current.new current.old; do
     sandbox_mkdir "$HOME/.dotfiles/$name"
   done
-  sandbox_write "$HOME/.dotfiles" notes.txt 'a file someone left here'
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# The summary is the line a reader scanning for the verdict stops at, and it
+# used to say nothing was reported under notes that had just reported a file one
+# build from unrecoverable.  Still a note, still exit 0 - only the summary
+# changes, and 'no problems found' stays in it because that is still the verdict
+# on the findings.
+test_doctor_the_summary_says_how_many_notes_it_printed() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # Built, because an unbuilt tree is a note of its own and the count is of all
+  # of them: this case is about the count, not about which notes there are.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_mkdir "$HOME/.dotfiles/common"
+  run_shale doctor
+  assert_status 0 "$shale_status" 'one note'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/common is not a configured layer" 'one note'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'one note'
+  sandbox_write "$HOME/.dotfiles" shale.conf.bak 'base personal/base'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'two notes'
+  assert_contains "$shale_out" \
+    'shale: no problems found, but read the 2 notes above' 'two notes'
+  assert_not_contains "$shale_out" 'read the note above' 'two notes'
+}
+
+# A note under a finding changes nothing: the count is of findings, the summary
+# is the count, and the exit status follows it.
+test_doctor_notes_do_not_change_the_count_or_the_status() {
+  conf 'base personal/base' 'gone gone'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/common"
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/common is not a configured layer" 'the note'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'the summary'
+  assert_not_contains "$shale_out" 'notes above' 'the summary'
 }
 
 # The scan's glob, handed the two entries every directory has and nothing else
 # it could mistake for a layer.  '.' is $HOME/.dotfiles itself and '..' is
 # $HOME: either one reaching the note tells the reader that their home
 # directory is a stray stow package, which is advice that ends in an unstow.
-test_doctor_dot_entries_are_not_unrecognised_directories() {
+#
+# A dot file as well as a dot directory, and both wordings asserted absent.
+# Nothing else holds the half of this the scan gets for free: the glob matches
+# no dot name, so shale's own '.lock' is out of the scan by construction rather
+# than by any test the loop makes - and a dotglob set anywhere above this would
+# note the lock as a stray file on every clean run with no case going red.
+test_doctor_dot_entries_are_never_strays() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  # A dot-named directory beside the config, so the scan has a dotfile to pass
-  # over as well as the two entries it can never be asked about by name.
   sandbox_mkdir "$HOME/.dotfiles/.git"
+  # Not '.stowrc' and not '.lock': doctor has a line of its own for each of
+  # those, and this case is about the ones it should say nothing at all about.
+  sandbox_write "$HOME/.dotfiles" .gitignore 'current/'
   run_shale doctor
   assert_status 0 "$shale_status"
   assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
+  assert_not_contains "$shale_out" 'is not a layer' 'stdout'
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
 }
 
@@ -8477,6 +8586,87 @@ test_which_a_path_only_in_current_notes_a_stale_tree() {
   assert_contains "$shale_err" \
     "shale: note: present in current/ but no layer provides it — current/ is stale, run 'shale build'" \
     'stderr'
+}
+
+# Every build writes this one path and no layer provides it, so the note above
+# would call a tree built a moment ago stale and send the reader to a build that
+# answers exactly the same.  The answer does not depend on the built tree at
+# all: what is said is what shale does, so it is said before the first build too.
+test_which_the_file_shale_writes_is_never_a_stale_tree() {
+  local note
+  note="shale: note: shale writes $HOME/.dotfiles/current/.stow-local-ignore itself, and no build accepts a layer providing one"
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  assert_missing "$HOME/.dotfiles/current" 'the built tree'
+  run_shale which .stow-local-ignore
+  assert_status 1 "$shale_status" 'before the first build'
+  assert_empty "$shale_out" 'stdout before the first build'
+  assert_eq "shale: no layer provides '.stow-local-ignore'
+$note" "$shale_err" 'stderr before the first build'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_exists "$HOME/.dotfiles/current/.stow-local-ignore" 'the ignore list'
+  run_shale which .stow-local-ignore
+  assert_status 1 "$shale_status" 'after the build'
+  assert_empty "$shale_out" 'stdout after the build'
+  assert_eq "shale: no layer provides '.stow-local-ignore'
+$note" "$shale_err" 'stderr after the build'
+  assert_not_contains "$shale_err" 'current/ is stale' 'stderr after the build'
+}
+
+# The exception is the path shale writes, which is the top of the built tree and
+# nowhere else: stow reads a package's ignore list from the top of the package,
+# so one inside a directory is a file like any other and a build copies it.  The
+# stale note is the right answer for that one, and taking the name rather than
+# the path out of it would have lost it silently.
+test_which_a_stow_local_ignore_below_the_top_is_an_ordinary_file() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/.stow-local-ignore
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_exists "$HOME/.dotfiles/current/.config/.stow-local-ignore" 'the composed copy'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  sandbox_leaf "$sandbox_dir" .stow-local-ignore
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale which .config/.stow-local-ignore
+  assert_status 1 "$shale_status"
+  assert_empty "$shale_out" 'stdout'
+  assert_eq "shale: no layer provides '.config/.stow-local-ignore'
+shale: note: present in current/ but no layer provides it — current/ is stale, run 'shale build'" \
+    "$shale_err" 'stderr'
+}
+
+# The other half of the same untruth: with a layer providing it, which printed a
+# winner and nothing else, while every build refuses that tree outright.  The
+# note is 'build' would fail here', which which already says for the pair of
+# layers that disagree about a path's kind, and doctor has said it as a finding
+# since #81.  Said whatever kind the providers are, because build's refusal does
+# not read the kind either - a directory at that path stops it just as a file
+# does - and said for the winner and the shadowed alike, there being no build in
+# which either of them lands.
+test_which_a_layer_providing_the_file_shale_writes_says_build_would_fail() {
+  local note
+  note="shale: note: 'build' would fail here — shale writes $HOME/.dotfiles/current/.stow-local-ignore itself, and no build accepts a layer providing one"
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .stow-local-ignore
+  run_shale which .stow-local-ignore
+  assert_status 0 "$shale_status" 'one provider'
+  assert_eq "winner    base   $HOME/.dotfiles/personal/base/.stow-local-ignore" \
+    "$shale_out" 'one provider'
+  assert_eq "$note" "$shale_err" 'one provider'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build the note promised would fail'
+  # A directory at that path, which is a kind the table calls 'merged' and build
+  # refuses just the same.
+  sandbox_mkdir "$HOME/.dotfiles/local/.stow-local-ignore"
+  sandbox_leaf "$HOME/.dotfiles/personal/base" .stow-local-ignore
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale which .stow-local-ignore
+  assert_status 0 "$shale_status" 'a directory provider'
+  assert_eq "merged    local  $HOME/.dotfiles/local/.stow-local-ignore/" \
+    "$shale_out" 'a directory provider'
+  assert_eq "$note" "$shale_err" 'a directory provider'
 }
 
 test_which_works_before_the_first_build() {
