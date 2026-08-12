@@ -2203,8 +2203,8 @@ test_build_dot_entries_are_never_composed() {
 }
 
 # Skipped at every depth, because a layer is a working repo.  .gitignore is not
-# skipped: it is a file you want in your home directory, and the whole point of
-# the ignore list build writes.
+# skipped: the copy is unfiltered, and what does or does not reach $HOME from it
+# is stow's ignore list rather than anything build decides.
 test_build_git_directories_stay_out_of_current() {
   conf 'base personal/base'
   mklayer personal/base .git/config 'GIT'
@@ -3025,15 +3025,57 @@ test_build_refuses_a_layer_shipping_a_stow_local_ignore() {
   assert_missing "$HOME/.dotfiles/current.new"
 }
 
-# Exactly these three, because a package-local list replaces stow's built-in one
-# wholesale: without the file a layer's .gitignore silently never reaches $HOME,
-# and with the wrong contents a layer-root README does.
+# A nine-line shale header and then GNU Stow 2.4.1's default-ignore-list
+# verbatim, asserted whole because a package-local list replaces stow's built-in
+# one wholesale rather than adding to it: a line dropped from here is a file
+# plain stow skips that an apply then links, with everything exiting 0.  The
+# last three are the ones shale used to write on their own.  \.gitmodules is in
+# 2.4.1's built-in list and not in 2.3.1's, so this file is also what makes both
+# versions land the same tree.
+#
+# The header replaces upstream's own first line, which says comments and blank
+# lines are allowed and so invites editing a file every build overwrites.  Keep
+# it nine lines and 'diff <(tail -n +10 file) <(tail -n +2 default-ignore-list)'
+# stays clean against upstream, which is how the body below is checked.
+#
+# The inline comments further down are upstream's.  They are kept rather than
+# stripped because both versions of stow strip a '#' that has whitespace before
+# it themselves; test_apply_skips_what_stows_built_in_list_skips is what pins
+# that, by asserting the two patterns carrying a comment still match.
 test_build_writes_the_stow_local_ignore_list() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
   run_shale build
   assert_status 0 "$shale_status"
-  assert_eq '^/README.*
+  assert_eq '# Written by shale on every build, which overwrites whatever is here:
+# edit a layer, not this file.
+#
+# Below this header is GNU Stow 2.4.1'"'"'s default-ignore-list, verbatim.
+# Stow reads a package'"'"'s own ignore list instead of its built-in one
+# rather than as well, so the whole of it has to be here or an apply
+# links what plain stow skips.  Writing 2.4.1'"'"'s list rather than the
+# installed stow'"'"'s is also what makes stow 2.3.1 apply the same tree:
+# 2.3.1 built in the same list without \.gitmodules.
+
+RCS
+.+,v
+
+CVS
+\.\#.+       # CVS conflict files / emacs lock files
+\.cvsignore
+
+\.svn
+_darcs
+\.hg
+
+\.git
+\.gitignore
+\.gitmodules
+
+.+~          # emacs backup files
+\#.*\#       # emacs autosave files
+
+^/README.*
 ^/LICENSE.*
 ^/COPYING' "$(cat "$HOME/.dotfiles/current/.stow-local-ignore")" 'the ignore list'
 }
@@ -4428,20 +4470,57 @@ test_apply_makes_real_directories_with_per_file_links() {
   assert_missing "$HOME/.dotfiles/current/.config/nvim/shada" 'the built tree'
 }
 
-# stow's built-in ignore list matches .gitignore by basename at any depth, so
-# this link exists only because build replaced that list wholesale with one of
-# its own.  Without it an ordinary global gitignore never reaches $HOME and
-# every command still reports success.
-test_apply_links_a_layers_gitignore_into_home() {
+# The generated list is stow's own built-in one, so an apply leaves out exactly
+# what plain stow leaves out.  Each name below is a different entry of that
+# list, and the two carrying an inline comment upstream - '.+~' and '\#.*\#' -
+# are here because a comment stow did not strip would be part of the pattern and
+# neither file would be skipped.  \.gitmodules is 2.4.1's entry and not 2.3.1's:
+# it is skipped here on both, which is the divergence this file removes.
+#
+# The files still reach the built tree.  Only the linking is filtered, and the
+# filter is stow's rather than shale's - shale copies whatever a layer holds.
+test_apply_skips_what_stows_built_in_list_skips() {
   conf 'base personal/base'
+  mklayer personal/base .zshrc
   mklayer personal/base .gitignore
-  mklayer personal/base .config/git/config
+  mklayer personal/base .zsh/.gitignore
+  mklayer personal/base .gitmodules
+  mklayer personal/base '.zshrc~'
+  mklayer personal/base '#notes#'
   run_shale apply
   assert_status 0 "$shale_status"
-  assert_symlink_to "$HOME/.gitignore" "$HOME/.dotfiles/current/.gitignore"
-  assert_eq 'personal/base/.gitignore' "$(cat "$HOME/.gitignore")" 'the linked file'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_exists "$HOME/.dotfiles/current/.gitignore" 'the built tree'
+  assert_exists "$HOME/.dotfiles/current/.zsh/.gitignore" 'the built tree'
+  assert_missing "$HOME/.gitignore"
+  assert_missing "$HOME/.zsh/.gitignore"
+  assert_missing "$HOME/.gitmodules"
+  assert_missing "$HOME/.zshrc~"
+  assert_missing "$HOME/#notes#"
   # The list itself is stow's own file and is never one of the links.
   assert_missing "$HOME/.stow-local-ignore"
+}
+
+# The near misses of that same list, which matches a whole basename and not a
+# prefix of one: '\.git' is not '.gitconfig' or '.gitkeep', and '\.gitignore' is
+# not the 'ignore' that core.excludesFile defaults to at ~/.config/git/ignore -
+# the spelling an ordinary global gitignore actually has.  A list that started
+# matching any of these would take a real file out of $HOME with apply exiting 0.
+test_apply_links_the_near_misses_of_the_ignore_list() {
+  conf 'base personal/base'
+  mklayer personal/base .gitconfig
+  mklayer personal/base .config/git/ignore
+  mklayer personal/base .config/zsh/rc.d/.gitkeep
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_symlink_to "$HOME/.gitconfig" "$HOME/.dotfiles/current/.gitconfig"
+  assert_eq 'personal/base/.config/git/ignore' "$(cat "$HOME/.config/git/ignore")" 'the linked file'
+  assert_symlink_to "$HOME/.config/git/ignore" "$HOME/.dotfiles/current/.config/git/ignore"
+  assert_symlink_to "$HOME/.config/zsh/rc.d/.gitkeep" \
+    "$HOME/.dotfiles/current/.config/zsh/rc.d/.gitkeep"
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua"
 }
 
 # The other half of that list: the files a layer keeps for its readers stay in

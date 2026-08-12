@@ -369,6 +369,50 @@ longer holds. It also says when `chkstow` could not walk all of `$HOME` — a `.
 marker makes it skip a directory — because a walk that stopped early has nothing to say about what it
 did not reach. Either way the walk is not quick.
 
+## Links left behind by the ignore list itself
+
+A shale old enough to have written a three-line `current/.stow-local-ignore` — `^/README.*`,
+`^/LICENSE.*`, `^/COPYING` and nothing else — linked everything else a layer held, including the
+files GNU Stow's own default list leaves out. Shale now writes that whole default list, so a fresh
+machine never links them. **An upgraded machine keeps the links it already made**, and nothing says
+so at any point.
+
+The apply that upgrades you cannot remove them. `stow -R` unstows before it restows, and its unstow
+phase reads the *new* list, in which those paths are invisible — so it walks straight past them.
+Both stow versions behave this way; the apply exits 0 and prints only its `composed layer` lines.
+`shale doctor` is silent too, and correctly: the links are live rather than dangling, and a layer
+really does provide the path they point at. Nothing here is broken. It is only that two machines
+running the same layers now differ, at exactly the paths the ignore list covers.
+
+This lists them, and nothing else — every symlink in `$HOME` that points into `current/` at a path
+the list now suppresses, including one below a suppressed directory such as `CVS/`:
+
+```sh
+find ~ -type l -exec sh -c '
+for l; do
+  case $(readlink "$l") in *.dotfiles/current/*) ;; *) continue ;; esac
+  r=${l#"$HOME"/}
+  while :; do
+    case ${r##*/} in
+      *~ | "#"*"#" | ".#"* | *,v | .gitignore | .gitmodules | .cvsignore | RCS | CVS | .svn | _darcs | .hg)
+        printf "%s\n" "$l"; break ;;
+    esac
+    case $r in */*) r=${r%/*} ;; *) break ;; esac
+  done
+done' sh {} +
+```
+
+On a machine that only ever ran the current shale it prints nothing. `~/.config/git/ignore`,
+`~/.gitconfig` and a `.gitkeep` are not matched by any of those patterns and never appear.
+
+Delete what it names. `current` is already correct and nothing needs rebuilding or reapplying
+afterwards, exactly as for the dangling links above. A directory that held nothing but such links —
+`~/CVS`, or a `~/.zsh` whose only file was a `.gitignore` — is left behind empty; `rmdir` it if you
+want it gone.
+
+`stow -D` on its own does not help and is not the answer here: its unstow phase reads the same new
+list, so it leaves every one of these in place while removing everything else.
+
 ## Backing out one apply
 
 ```sh
@@ -424,12 +468,14 @@ worked, the paths shale managed are empty, so the only things left for the copy 
 ones shale never managed — which is to say, the ones that are yours alone. Two of those arrive
 without anything failing anywhere. A file you edited in place, so that your editor replaced the link
 instead of writing through it, is one. A path the built tree carries but stow was told never to link
-is the other, which is what `.stow-local-ignore` does to the `README.md`, `LICENSE` and `COPYING` at
-the top of a repository-root layer: your own `~/README.md` has no link there for `cp` to collide
-with, so the repository's lands on top of it. Neither is a conflict to stow or a refusal to `cp`, so
-neither stops the block, and the fourth command then deletes the copy in `~/.dotfiles`. The check at
-the top of this section names both, which is the whole of why it is run before the block rather than
-after it.
+is the other, and `.stow-local-ignore` names a good many: a `README.md`, `LICENSE` or `COPYING` at
+the top of a repository-root layer, and at any depth a `.gitignore`, a `.gitmodules`, an editor
+backup like `.zshrc~`, an emacs autosave like `#notes#` or lock file like `.#init.el`, and the
+furniture of RCS, CVS, Subversion, Darcs and Mercurial. Your own `~/README.md` and `~/.gitignore`
+have no link there for `cp` to collide with, so the layer's land on top of them. Neither is a
+conflict to stow or a refusal to `cp`, so neither stops the block, and the fourth command then
+deletes the copy in `~/.dotfiles`. The check at the top of this section names both, which is the
+whole of why it is run before the block rather than after it.
 
 `.` in `~/.dotfiles/current/.` is what makes the copy the *contents* of the tree rather than a
 `~/current` directory, and it takes the dotfiles with it. `-L` reads through a symlink a layer ships
@@ -455,11 +501,11 @@ is wrong in that state; the only thing left is the fourth command.
 What lands is exactly what the built tree holds, and shale generates one file of its own in there:
 `~/.stow-local-ignore`, the third command. Run `ls -a ~/.dotfiles/current` before the copy and that
 listing is what you are about to get — worth doing, because this copy pays no attention to
-`.stow-local-ignore` and so brings out whatever it was suppressing. Give a layer a subdirectory of
-its repository, as `docs/layers.md` says to, and that is nothing at all. Name a repository root as a
-layer instead and its `README.md` and `LICENSE` have been in the built tree all along, kept out of
-`$HOME` only by that ignore file; the copy puts them in `$HOME`, on top of a `README.md` or
-`LICENSE` of your own if you keep one there.
+`.stow-local-ignore` and so brings out whatever it was suppressing. A layer's own `.gitignore` or
+`.gitmodules` is the usual one, and a `.zshrc~` or `#notes#` it committed by accident is the other.
+Name a repository root as a layer and its `README.md` and `LICENSE` join them, having been in the
+tree all along and kept out of `$HOME` only by that ignore file; the copy puts them in `$HOME`, on
+top of a `README.md` or `LICENSE` of your own if you keep one there.
 
 Modes come across for the bit that matters: an executable stays executable, and a `~/.netrc` at 600
 arrives at 600. Two smaller things `cp` does here without `-p`, which are why `-p` is deliberately

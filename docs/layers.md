@@ -1,9 +1,11 @@
 # Authoring a layer
 
 A layer is a directory tree that mirrors your home directory. Everything in it is copied, path for
-path, into `~/.dotfiles/current`, and everything in `current` is linked into `$HOME`. A file at
-`personal/base/.config/nvim/init.lua` becomes `~/.config/nvim/init.lua`. There is nothing else to
-learn about the mapping.
+path, into `~/.dotfiles/current`, and almost everything in `current` is linked into `$HOME`. A file
+at `personal/base/.config/nvim/init.lua` becomes `~/.config/nvim/init.lua`. The exception is the
+handful of names stow never links — version-control furniture, editor backups and emacs autosaves —
+which *Where a layer lives* below sets out; apart from those there is nothing else to learn about
+the mapping.
 
 Shale copies files. It never merges them, never templates them and never reads what is inside one.
 Fragment directories, numeric prefixes and shared helper files are conventions for *your* layers,
@@ -18,12 +20,15 @@ Give a layer a subdirectory of its repository rather than the repository root:
 base    personal/base     git@github.com:you/dotfiles.git
 ```
 
-Shale skips `.git` at every depth, and the built tree carries a `.stow-local-ignore` that keeps a
-top-level `README*`, `LICENSE*` and `COPYING` out of `$HOME`. Nothing else is filtered — a
-`.gitignore` at the top of the layer becomes `~/.gitignore`, and a `README.md` further down becomes
-a real link too. Name the repository root as the layer and `~/.github/`, `~/Makefile` and
-`~/CONTRIBUTING.md` join them. The subdirectory is what keeps the repository's own furniture out of
-the image.
+Shale skips `.git` at every depth, and the built tree carries a `.stow-local-ignore` holding GNU
+Stow's own default ignore list, which keeps a top-level `README*`, `LICENSE*` and `COPYING` out of
+`$HOME`, and at any depth a `.gitignore`, a `.gitmodules`, an editor backup like `.zshrc~`, an emacs
+autosave like `#notes#` or lock file like `.#init.el`, and the furniture of RCS, CVS, Subversion,
+Darcs and Mercurial. Nothing else is filtered — `.gitconfig`,
+`.gitkeep` and `~/.config/git/ignore` are matched by none of it, and a `README.md` below the top of
+the layer becomes a real link. Name the repository root as the layer and `~/.github/`, `~/Makefile`
+and `~/CONTRIBUTING.md` join them. The subdirectory is what keeps the repository's own furniture out
+of the image.
 
 Several layers can come from one repository — `personal/base` and `personal/wsl` are two
 directories in one clone at `~/.dotfiles/personal`, so the url is given once, on the first of them.
@@ -70,7 +75,7 @@ $ diff -u /home/you/.dotfiles/personal/base/.gitconfig /home/you/.dotfiles/local
 -	st = status
 -	lg = log --oneline
 -[core]
--	excludesfile = ~/.gitignore
+-	excludesfile = ~/.config/git/ignore
 -[include]
 -	path = ~/.config/git/conf.d/50-work.conf
 +[user]

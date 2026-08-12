@@ -2114,10 +2114,53 @@ cmd_build() {
     die "$CUR not rebuilt"
   fi
 
-  # A package-local ignore list replaces stow's built-in one wholesale, so these
-  # three root-anchored patterns are all of it - and the built-in list is what
-  # would otherwise keep a layer's .gitignore out of $HOME with apply exiting 0.
-  printf '%s\n' '^/README.*' '^/LICENSE.*' '^/COPYING' \
+  # A package-local ignore list replaces stow's built-in one wholesale rather
+  # than adding to it, so whatever is missing here is linked into $HOME with
+  # apply exiting 0.  Everything below the nine-line header is GNU Stow 2.4.1's
+  # default-ignore-list verbatim, so that nothing plain stow skips stops being
+  # skipped; its last three entries are the ^/README.*, ^/LICENSE.* and
+  # ^/COPYING shale once wrote on their own.  Upstream's inline comments are
+  # kept because both 2.3.1 and 2.4.1 strip a '#' that has whitespace before
+  # it, leaving the pattern alone.  Upstream's own first line, which says
+  # comments and blank lines are allowed, is the one thing not reproduced: it
+  # invites editing a file every build overwrites, and the header says so
+  # instead.
+  #
+  # On 2.4.1 the file changes no outcome, and that is not a reason to delete
+  # it: 2.3.1's built-in list has no \.gitmodules, so writing 2.4.1's list is
+  # the whole of what makes an apply land the same tree on both.
+  printf '%s\n' \
+    "# Written by shale on every build, which overwrites whatever is here:" \
+    "# edit a layer, not this file." \
+    '#' \
+    "# Below this header is GNU Stow 2.4.1's default-ignore-list, verbatim." \
+    "# Stow reads a package's own ignore list instead of its built-in one" \
+    "# rather than as well, so the whole of it has to be here or an apply" \
+    "# links what plain stow skips.  Writing 2.4.1's list rather than the" \
+    "# installed stow's is also what makes stow 2.3.1 apply the same tree:" \
+    '# 2.3.1 built in the same list without \.gitmodules.' \
+    '' \
+    'RCS' \
+    '.+,v' \
+    '' \
+    'CVS' \
+    '\.\#.+       # CVS conflict files / emacs lock files' \
+    '\.cvsignore' \
+    '' \
+    '\.svn' \
+    '_darcs' \
+    '\.hg' \
+    '' \
+    '\.git' \
+    '\.gitignore' \
+    '\.gitmodules' \
+    '' \
+    '.+~          # emacs backup files' \
+    '\#.*\#       # emacs autosave files' \
+    '' \
+    '^/README.*' \
+    '^/LICENSE.*' \
+    '^/COPYING' \
     >"$NEW/.stow-local-ignore" ||
     die "could not write $NEW/.stow-local-ignore"
 
