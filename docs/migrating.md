@@ -17,9 +17,10 @@ will refuse a pile of conflicts, `--adopt` is what a search turns up for clearin
 moves your file out of `$HOME` and into `~/.dotfiles/current`, which is generated output that the
 next `shale build` overwrites. That build says nothing about it — it keeps the whole previous tree
 at `current.old`, so an adopted file survives one build and no more, and the build after that
-removes `current.old`. The command that tells you is `shale doctor`, and only while the file is
-still there: run it before you build, or copy the file into a layer instead and there is nothing to
-recover. The refusals themselves are covered below, each with what to do about it.
+removes `current.old`. The command that tells you is `shale doctor`: run it before you build and it
+names the file, run it after and it names `current.old` as a tree the next build removes. Or copy
+the file into a layer instead, and there is nothing to recover. The refusals themselves are covered
+below, each with what to do about it.
 
 ## Coming from plain files
 
@@ -317,8 +318,9 @@ same note from a `doctor` run any time after pulling a layer and before building
 to act on there —
 which is why it is a note and `doctor` still exits 0. Either way the previous tree is at
 `current.old` and your file is in it, until the next clean build removes it. After that build
-`doctor` cannot see it any more, because the built copy matches the layer again. Copy the file into
-a layer instead and there is nothing to recover.
+`doctor` cannot see the mismatch any more, because the built copy matches the layer again — what it
+still says is that `current.old` is there, what it holds and that the next build removes it, which is
+the last warning you get. Copy the file into a layer instead and there is nothing to recover.
 
 ## Links left behind after layers change
 
@@ -326,12 +328,14 @@ When a file leaves a layer, the next `shale apply` prunes its link. When an enti
 every layer, the links inside it are left dangling and the apply still exits 0: stow's unstow phase
 only visits directories the package still has.
 
-`shale doctor` finds them:
+Nothing says so at the moment it happens — that apply prints its `composed layer` line per layer and
+nothing else, and exits 0 — so run `shale doctor` after a change that takes a whole directory out of
+every layer. It is what finds them:
 
 ```
 shale: /home/you/.config/foo/a.conf points at /home/you/.dotfiles/current/.config/foo/a.conf, which the built tree no longer provides
-shale: stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links
-shale:   remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying
+shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying
+shale:   stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links
 shale:   stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:
 shale:     stow -D -p --no-folding -d '/home/you/.dotfiles' -t '/home/you' current && shale apply
 shale:   earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory

@@ -132,7 +132,8 @@ until stow prunes it. Apply when unsure: it builds first, so it is never less th
 Builds are quiet. A build that finds `current` holding a copy older than the layer file replacing it
 keeps the previous tree at `~/.dotfiles/current.old` and says nothing, because an edited layer leaves
 exactly that state and a message there would be a message on every edit. `shale doctor` is what
-reports it, as a note rather than a problem, and only before the build that overwrites it — see
+reports the mismatch, as a note rather than a problem, and only until the build that overwrites it.
+After that build it reports `current.old` instead, until the build after that removes it — see
 [docs/layers.md](docs/layers.md).
 
 Shale chooses between three exit codes, and no others:
@@ -249,7 +250,8 @@ configured layer directory is there and that nothing in one is a directory it ca
 it cannot open, that no two layers disagree about whether a path
 is a file or a directory, that no layer ships `.stow-local-ignore` — which shale writes itself — or
 shale itself, that `~/.dotfiles/current` is a directory rather than a file or a link to one, that the
-build lock is neither held nor uncreatable, that nothing in `~/.dotfiles` is a stray, and that no
+build lock is neither held nor uncreatable, that nothing in `~/.dotfiles` is a stray, that neither
+`current.new` nor `current.old` has been left beside `current`, and that no
 link in `$HOME` points into the built tree at a path it no longer provides. Where a `.stowrc` exists
 it names the stow options that file sets, because several of them change an apply and three of them
 make it do nothing at all. It changes nothing itself.
@@ -351,8 +353,9 @@ overwrites, and how to carry on from a block that stopped.
 - A shale that is killed outright — `kill -9`, or the machine losing power — leaves its lock
   directory behind, and a `~/.dotfiles/current.new` as well if it died mid-build. Shale never
   reclaims a lock, because nothing it can read tells a live holder from a dead one. `doctor` reports
-  the lock and names the command that clears it; it says nothing about `current.new`, which the next
-  build removes once the lock is gone.
+  the lock and names the command that clears it, and notes `current.new` and any `current.old` beside
+  it, saying what each is. It does not promise the next build will remove them while the lock is
+  still there, because that build will not run: clear the lock and doctor says so instead.
 - Git cannot store an empty directory, so a layer that needs one ships a `.gitkeep`, which will
   appear in `$HOME`.
 
