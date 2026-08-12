@@ -1389,6 +1389,77 @@ test_config_invalid_paths_are_rejected() {
   done
 }
 
+# A path containing a space arrives as three fields, and 'base my layer' is the
+# same three strings as a layer at 'my' cloned from a repository directory
+# called 'layer'.  Nothing in the strings tells those apart.  A directory sitting
+# under the two fields joined does, since no url that clones names one, and it is
+# the only thing shale refuses on - the two cases below hold both halves of that.
+test_config_a_path_with_a_space_is_diagnosed_where_its_directory_exists() {
+  local expected
+  conf 'base my layer'
+  mklayer 'my layer' .zshrc
+  # Quoted in the message, and quoted in the assertion for the same reason: the
+  # space is the whole diagnosis and it is invisible at the end of a long path.
+  expected="shale: $HOME/.dotfiles/shale.conf:1: nothing at $HOME/.dotfiles/my, but there is something at '$HOME/.dotfiles/my layer'"
+  # doctor's config errors go to stdout with the rest of its report.
+  run_shale doctor
+  assert_status 1 "$shale_status" 'doctor exit status'
+  assert_contains "$shale_out" "$expected" 'doctor stdout'
+  assert_contains "$shale_out" "shale:   a layer path cannot contain whitespace" 'doctor stdout'
+  run_shale build
+  assert_status 1 "$shale_status" 'build exit status'
+  assert_contains "$shale_err" "$expected" 'build stderr'
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# A symlink to a directory is a layer directory everywhere else in shale - the
+# layer checks reach it through the same '-d' - so the line still names the
+# layer it was written to name, and the diagnosis still holds.  What the message
+# may not do is call it a directory.
+test_config_a_path_with_a_space_is_diagnosed_where_a_symlink_stands_there() {
+  conf 'base my layer'
+  mklayer elsewhere/real .zshrc
+  sandbox_mkdir "$HOME/.dotfiles"
+  ln -s "$HOME/.dotfiles/elsewhere/real" "$HOME/.dotfiles/my layer" ||
+    fail 'could not link the layer directory'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/shale.conf:1: nothing at $HOME/.dotfiles/my, but there is something at '$HOME/.dotfiles/my layer'" \
+    'stderr'
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# The other half: with nothing at either name the two readings are the same two
+# strings, so shale takes the line at its word rather than refuse a config that
+# clones.  Observed through doctor because doctor reads the url without fetching
+# it - every url here is a shape 'git clone' accepts, and a case that refused any
+# of them would be refusing a working config.
+test_config_a_url_is_taken_at_its_word_where_no_directory_joins_the_fields() {
+  local url
+  for url in \
+    'https://nowhere/dots.git' \
+    'git@nowhere:you/dots.git' \
+    'ssh://git@nowhere/you/dots.git' \
+    'file:///srv/git/dots.git' \
+    "$CASE_DIR/repos/dots" \
+    'repos/dots' \
+    'dots.git' \
+    'layer'; do
+    conf "base personal/base $url"
+    run_shale doctor
+    assert_status 0 "$shale_status" "url '$url' exit status"
+    assert_not_contains "$shale_out$shale_err" 'but there is a directory at' \
+      "url '$url' output"
+  done
+  # The reported config itself, with neither directory made: still a clone.
+  conf 'base my layer'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'unmade directory exit status'
+  assert_not_contains "$shale_out$shale_err" 'but there is a directory at' \
+    'unmade directory output'
+}
+
 test_config_invalid_names_are_rejected() {
   local name
   # 'ba#se' is a name with a '#' in it, not a comment: '#' opens one only where

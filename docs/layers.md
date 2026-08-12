@@ -30,6 +30,14 @@ the layer becomes a real link. Name the repository root as the layer and `~/.git
 and `~/CONTRIBUTING.md` join them. The subdirectory is what keeps the repository's own furniture out
 of the image.
 
+The three fields are separated by whitespace and there is no quoting, so a name, a path and a url
+cannot contain a space or a tab. A directory called `my layer` cannot be a layer; rename it.
+`base    my layer` is not a syntax error, because it is the same three strings as a layer at `my`
+cloned from a repository called `layer` — so shale refuses it only where a directory called
+`my layer` is there to say which was meant. Where it is not, the line is taken at its word and
+`doctor` cannot see it, because no url is fetched until the build — and the build then fails on the
+clone, unless `layer` really is a repository.
+
 Several layers can come from one repository — `personal/base` and `personal/wsl` are two
 directories in one clone at `~/.dotfiles/personal`, so the url is given once, on the first of them.
 A layer needs no repository at all: `~/.dotfiles/local` with no url is this machine's own directory.
