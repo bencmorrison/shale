@@ -1941,6 +1941,106 @@ test_build_file_versus_directory_aborts_naming_both_layers() {
   assert_missing "$HOME/.dotfiles/current.new"
 }
 
+# Three layers with the odd kind lowest, both ways round.  The kind on the
+# second line is the composed tree's, and the layer beside it must be one whose
+# own copy is that kind: the middle layer collided here itself and never landed,
+# so naming it states a kind its own path contradicts.  Three names of one
+# length, so the column padding is the same on every line and these can be
+# compared whole.
+test_build_a_conflict_names_the_layer_whose_copy_the_tree_holds() {
+  conf 'low low' 'mid mid' 'top top'
+  mklayer low f 'LOW FILE'
+  mklayer mid f/inner
+  mklayer top f/inner
+  mklayer low d/inner
+  mklayer mid d 'MID FILE'
+  mklayer top d 'TOP FILE'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale:   layer 'mid' provides a directory   $HOME/.dotfiles/mid/f" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'top' provides a directory   $HOME/.dotfiles/top/f" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'low' provides a file        $HOME/.dotfiles/low/f" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'mid' provides a file        $HOME/.dotfiles/mid/d" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'top' provides a file        $HOME/.dotfiles/top/d" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'low' provides a directory   $HOME/.dotfiles/low/d" 'stderr'
+  # The claims that are false of the tree on disk: mid/f is a directory and
+  # mid/d is a file.
+  assert_not_contains "$shale_err" "layer 'mid' provides a file        $HOME/.dotfiles/mid/f" \
+    'stderr'
+  assert_not_contains "$shale_err" \
+    "layer 'mid' provides a directory   $HOME/.dotfiles/mid/d" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: 4 conflicts; $HOME/.dotfiles/current not rebuilt" 'stderr'
+}
+
+# Nearest, not lowest: 'low' and 'mid' both provide a file, so the copy the tree
+# holds is mid's and low is shadowed out of the report entirely - build has
+# nothing to say about a layer whose copy no conflict is against.  doctor's line
+# is asserted beside it because the pair is doctor's pair, and one command
+# saying mid while the other says low is the contradiction #81 closed.
+test_build_a_conflict_names_the_nearest_layer_that_agrees_with_the_tree() {
+  conf 'low low' 'mid mid' 'top top' 'end end'
+  mklayer low f 'LOW FILE'
+  mklayer mid f 'MID FILE'
+  mklayer top f/inner
+  mklayer end f/inner
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: 'build' would fail at f — it is a file in layer 'mid' and a directory in layer 'top'" \
+    'doctor stdout'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" \
+    "shale:   layer 'top' provides a directory   $HOME/.dotfiles/top/f" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'end' provides a directory   $HOME/.dotfiles/end/f" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'mid' provides a file        $HOME/.dotfiles/mid/f" 'stderr'
+  # top/f is a directory, and low/f is a file no conflict is against.
+  assert_not_contains "$shale_err" "layer 'top' provides a file" 'stderr'
+  assert_not_contains "$shale_err" "layer 'low'" 'stderr'
+}
+
+# Counting rather than naming: every layer that disagrees with the composed
+# tree is a conflict record of its own, and the path composes as soon as no
+# layer providing it holds the other kind.  Nothing here discriminates a naming
+# bug and it is not meant to - once the middle layer goes this is a two-layer
+# tree, the one shape that was never named wrongly.  The case above holds the
+# naming.
+test_build_one_conflict_per_disagreeing_layer_and_none_once_the_odd_kind_goes() {
+  conf 'low low' 'mid mid' 'top top'
+  mklayer low f 'LOW FILE'
+  mklayer mid f/inner
+  mklayer top f/inner
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: 2 conflicts; $HOME/.dotfiles/current not rebuilt" 'stderr'
+  sandbox_mkdir "$HOME/.dotfiles/mid"
+  rm -rf "$sandbox_dir/f" || fail 'could not remove the middle layer directory'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build without the middle layer'
+  # One record now, and the two-layer wording with it.
+  assert_contains "$shale_err" \
+    "shale: 1 conflict; $HOME/.dotfiles/current not rebuilt" 'the second stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'top' provides a directory   $HOME/.dotfiles/top/f" 'the second stderr'
+  assert_contains "$shale_err" \
+    "shale:   layer 'low' provides a file        $HOME/.dotfiles/low/f" 'the second stderr'
+  sandbox_mkdir "$HOME/.dotfiles/low"
+  rm -f "$sandbox_dir/f" || fail 'could not remove the bottom layer file'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build without the bottom layer'
+  assert_eq 'top/f/inner' "$(cat "$HOME/.dotfiles/current/f/inner")" 'the composed file'
+}
+
 # The destination is a symlink to a directory, so a -d test that does not also
 # ask -L says "directory, carry on" and the higher layer's files are written
 # through the link into whatever the lower layer pointed at.
