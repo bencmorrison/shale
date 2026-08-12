@@ -302,7 +302,7 @@ creates rather than copies — and a layer providing one fails the build, naming
 Never shale itself: applying a layer that ships it would replace the script with a link into
 `current/`. `shale doctor` reports that, judged against the path the running shale was invoked by.
 Run the installed copy — `~/.local/bin/shale doctor` — and the finding names the layer. Run the
-layer's own copy directly and you get `no problems found`, because no layer shadows *that* path.
+layer's own copy directly and there is no such finding, because no layer shadows *that* path.
 
 Watch for `~/.stowrc` and `~/.dotfiles/.stowrc`. Their `--ignore` patterns are *appended* to the
 ones stow is already using rather than overriding them, so a stray `--ignore=zshrc` leaves
@@ -366,10 +366,10 @@ a `current` that is not a directory — the two lines about the next build are r
 are still named; what changes is that nothing promises you a `current.old` that a refused build
 never creates.
 
-`doctor` sees this only in the window between the file arriving and the next build. Afterwards the
-built copy is the layer's again and there is nothing left to notice, so recovery is `current.old`
-and one build deep. If you use `stow --adopt` against `current/`, run `shale doctor` before you
-build.
+`doctor` names the files only in the window between one arriving and the next build. Afterwards the
+built copy is the layer's again and the mismatch is gone; what `doctor` says then is that
+`current.old` is there and that the next build removes it, so recovery is `current.old` and one
+build deep. If you use `stow --adopt` against `current/`, run `shale doctor` before you build.
 
 ## The everyday loop: build, and when to apply
 
@@ -377,11 +377,13 @@ Edit a file a layer already has, and `shale build` is the whole loop. `~/.zshrc`
 `current/`, so rebuilding the tree it points at makes the edit live at that instant — there is
 nothing for stow to do, because the link is already right.
 
-That build says nothing. It keeps `current.old` — the built copy your edit replaced was older than
+That build says nothing about the file you edited, beyond the `composed layer` line it prints for
+each layer. It keeps `current.old` — the built copy your edit replaced was older than
 the layer copy, which is the state a file moved into the tree also leaves, and shale keeps the
 previous tree either way — but it prints no message about it, because a message there is a message
 on every edit. `shale doctor` is where a built tree its layers have moved past is reported, and
-after a build there is nothing left for it to report.
+after a build the mismatch is gone; what doctor names then is `current.old` itself — what it holds,
+and that the next build removes it.
 
 `shale apply` is what you need when a **path** appears or disappears, since making and unmaking links
 is stow's job and nothing else does it:

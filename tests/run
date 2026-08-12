@@ -5272,12 +5272,20 @@ test_doctor_notes_nothing_it_accounts_for() {
   conf 'base personal/base' 'local local'
   mklayer personal/base .zshrc
   mklayer local .zshrc
-  for name in current current.new current.old; do
-    sandbox_mkdir "$HOME/.dotfiles/$name"
-  done
+  sandbox_mkdir "$HOME/.dotfiles/current"
   run_shale doctor
   assert_status 0 "$shale_status"
   assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+  # The other two names are a leftover tree apiece, and the check that owns them
+  # says what each is.  What none of the three is, ever, is a stray beside the
+  # config: this scan skips all of them by name.
+  for name in current.new current.old; do
+    sandbox_mkdir "$HOME/.dotfiles/$name"
+  done
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the leftover trees'
+  assert_not_contains "$shale_out" 'is not a configured layer' 'the leftover trees'
+  assert_not_contains "$shale_out" 'no build reads it' 'the leftover trees'
 }
 
 # The summary is the line a reader scanning for the verdict stops at, and it
@@ -5942,8 +5950,14 @@ test_doctor_a_link_into_the_built_tree_it_no_longer_provides_is_a_finding() {
     'stdout'
   # The delete leads, because it is the half that works on every version of stow;
   # the sweep under it names the version it needs, and says what happens below it.
+  # It leads the note as well as the remedy, so it is the unindented line: every
+  # other line of this block is detail under it, and an unindented one among the
+  # findings reads as one more of them against a summary that has counted them.
   assert_contains "$shale_out" \
-    'shale:   remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
+    'shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
+    'stdout'
+  assert_contains "$shale_out" \
+    'shale:   stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links' \
     'stdout'
   assert_contains "$shale_out" \
     'shale:   stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' \
@@ -6005,7 +6019,7 @@ test_doctor_reports_the_links_a_directory_that_left_every_layer_kept() {
           *) seen="$seen finding" ;;
         esac
         ;;
-      'shale:   remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying')
+      'shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying')
         seen="$seen remedy"
         ;;
       'shale: 3 problems found') seen="$seen summary" ;;
@@ -6053,7 +6067,9 @@ report_shape() {
         report_seen="$report_seen count"
         ;;
       'shale:   all of them are under '*) report_seen="$report_seen where" ;;
-      'shale:   remove '*) report_seen="$report_seen remedy" ;;
+      # Unindented below the cap, where it leads its note, and indented above
+      # it, where the count does.
+      'shale: remove '* | 'shale:   remove '*) report_seen="$report_seen remedy" ;;
       'shale: and '*' more, not named here') report_seen="$report_seen rest" ;;
       'shale: '*' problems found') report_seen="$report_seen summary" ;;
     esac
@@ -6134,7 +6150,7 @@ test_doctor_broken_links_up_to_the_cap_are_all_named_with_the_remedy_under_them(
   run_shale doctor
   assert_status 1 "$shale_status"
   assert_contains "$shale_out" \
-    'shale:   remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' 'stdout'
+    'shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' 'stdout'
   assert_not_contains "$shale_out" 'point into the built tree at paths it no longer provides' 'stdout'
   assert_not_contains "$shale_out" 'not named here' 'stdout'
   assert_contains "$shale_out" 'shale: 10 problems found' 'stdout'
@@ -6511,6 +6527,208 @@ test_doctor_says_when_there_is_no_built_tree_to_check_links_against() {
   assert_contains "$shale_out" 'shale:   build one with: shale build' 'stdout'
   # Uncounted: an unbuilt tree is a state 'shale build' makes, not a defect.
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# ------------------------------------------------- doctor's leftover-tree cases
+#
+# The two names a build works under, both of which only a build that did not
+# finish leaves behind - and current.old also every build that replaced a file
+# not matching its layer copy.  Notes, not findings: neither stops a build, and
+# the next build removes both, which is also why nothing else in the report
+# mentions them - the stray scan skips both names because shale owns them.
+
+test_doctor_notes_a_leftover_scratch_tree() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  # What a compose killed part-way through leaves: the name, holding some of
+  # the tree.
+  sandbox_write "$HOME/.dotfiles/current.new" .zshrc 'half of a composed tree'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.new is left over from a build that did not finish" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   shale composes a build there and renames it onto $HOME/.dotfiles/current, and nothing reads it after that" \
+    'stdout'
+  assert_contains "$shale_out" 'shale:   the next build removes it' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+  assert_empty "$shale_err" 'stderr'
+  # And the build that reaps it says nothing about it, which is what makes this
+  # a note about a state rather than a report of a problem.
+  run_shale build
+  assert_status 0 "$shale_status" 'the reaping build'
+  assert_missing "$HOME/.dotfiles/current.new" 'after the build'
+  assert_not_contains "$shale_out" 'current.new' 'the reaping build stdout'
+  assert_empty "$shale_err" 'the reaping build stderr'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the build'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report after the build'
+}
+
+# The tree a build keeps deliberately, which until now sat in ~/.dotfiles with
+# nothing saying what it was: the build that kept it named the one file, and one
+# build later that message is scrollback and the copy is gone.
+test_doctor_notes_the_tree_the_last_build_kept() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status" 'the first build'
+  assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  # '>|': the build above put this file here, and editing it is the point.
+  printf 'HAND EDITED\n' >|"$sandbox_path" || fail 'could not edit the built tree'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that keeps the tree'
+  assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   a build keeps it where it replaced a file that did not match the layer copy providing it' \
+    'stdout'
+  assert_contains "$shale_out" 'shale:   the next build removes it' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   copy anything in it you want to keep into a layer first' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# The state a kill between the two renames leaves, which is the one where saying
+# nothing costs something: current.old is the tree $HOME is linked against and
+# may be the only copy of anything adopted into it, and the note above it has
+# just offered a build that deletes it.  The note has to sit under that offer.
+#
+# The composed tree still standing at current.new is what says a build was
+# interrupted rather than that a hand removed current, and it is the only thing
+# that does; the case below is the same shape without it.
+test_doctor_names_the_tree_left_at_current_old_when_current_is_gone() {
+  local line seen
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  sandbox_mkdir "$HOME/.dotfiles"
+  sandbox_leaf "$sandbox_dir" current.old new
+  mv "$HOME/.dotfiles/current" "$sandbox_path" || fail 'could not move the tree aside'
+  sandbox_write "$HOME/.dotfiles/current.new" .zshrc 'the tree that was not installed'
+  assert_missing "$HOME/.dotfiles/current" 'the built tree'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   there is nothing at $HOME/.dotfiles/current" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   a build was interrupted between moving it there and moving the tree it had composed into place, which is still at $HOME/.dotfiles/current.new" \
+    'stdout'
+  assert_contains "$shale_out" \
+    'shale:   it may hold the only copy of anything that was moved into the built tree rather than composed from a layer' \
+    'stdout'
+  assert_contains "$shale_out" 'shale:   the next build removes it' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   copy anything in it you want to keep into a layer first' 'stdout'
+  # The scratch tree is named as well, and the two are different states with
+  # different words: only one of them holds anything worth keeping.
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.new is left over from a build that did not finish" 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the 3 notes above' 'stdout'
+  # Under the build it qualifies, not above it.
+  seen=
+  while IFS= read -r line; do
+    case "$line" in
+      'shale:   build one with: shale build') seen="$seen build" ;;
+      'shale: '*'/current.old is where a build leaves the tree it replaced')
+        seen="$seen kept"
+        ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq ' build kept' "$seen" 'the order of the report'
+  # And the danger the note names, carried out: the build the line above offers
+  # is the one that removes the only copy.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_missing "$HOME/.dotfiles/current.old" 'after the build'
+  assert_exists "$HOME/.dotfiles/current/.zshrc" 'the rebuilt tree'
+}
+
+# The same tree at current.old with nothing at current and no current.new, which
+# no interrupted build can produce: a kill between the two renames leaves the
+# tree it composed standing at current.new, so this shape is a hand that removed
+# current.  The remedy is the same one; the cause is not shale's to guess.
+test_doctor_names_no_interrupted_build_where_there_cannot_have_been_one() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_mkdir "$HOME/.dotfiles"
+  sandbox_leaf "$sandbox_dir" current.old new
+  mv "$HOME/.dotfiles/current" "$sandbox_path" || fail 'could not move the tree aside'
+  assert_missing "$HOME/.dotfiles/current" 'the built tree'
+  assert_missing "$HOME/.dotfiles/current.new" 'the scratch tree'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   there is nothing at $HOME/.dotfiles/current" 'stdout'
+  assert_not_contains "$shale_out" 'a build was interrupted' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   it may hold the only copy of anything that was moved into the built tree rather than composed from a layer' \
+    'stdout'
+  assert_contains "$shale_out" 'shale:   the next build removes it' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the 2 notes above' 'stdout'
+}
+
+# Nothing has looked inside either tree, so nothing may say what is in one.  An
+# empty current.old is the state a build that composed no file at all leaves,
+# and 'copy anything in it you want to keep' is the whole of what a report that
+# did not walk it can offer.
+test_doctor_claims_no_contents_for_a_tree_it_has_not_walked() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_mkdir "$HOME/.dotfiles/current.old"
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
+  assert_not_contains "$shale_out" 'holds what' 'stdout'
+  assert_not_contains "$shale_out" 'it is the only copy' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+}
+
+# Every line doctor prints that says what the next build does is gated on there
+# being one, and these two are printed after every other check has had its say
+# about whether there is.
+test_doctor_promises_no_reaping_from_a_build_that_will_not_run() {
+  conf 'base personal/base' 'work work'
+  mklayer personal/base .zshrc
+  mklayer work .vimrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_write "$HOME/.dotfiles/current.new" .zshrc 'half of a composed tree'
+  # The collision every build from now on exits 1 on.
+  mklayer personal/base both/inner
+  mklayer work both
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.new is left over from a build that did not finish" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   no build will run until the problems above are fixed, so it stays where it is' 'stdout'
+  assert_not_contains "$shale_out" 'the next build removes it' 'stdout'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build the line refuses to promise'
 }
 
 # The plausible layering mistake, and the one 'shale which' already answers on
@@ -7747,7 +7965,7 @@ test_doctor_removing_the_links_it_names_clears_the_findings() {
   assert_status 1 "$shale_status"
   assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
   assert_contains "$shale_out" \
-    'shale:   remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
+    'shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
     'stdout'
   removed=0
   while IFS= read -r line; do

@@ -1746,14 +1746,19 @@ EOF
   qdots=$QUOTED
   shell_quote "$HOME"
   qhome=$QUOTED
-  remedy=('stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links')
+  # The remedy leads and the reason for it follows, indented under it.  Below
+  # the cap this note is printed under the findings, and report leaves its first
+  # line unindented: a sentence there about what stow prunes reads as one more
+  # finding, against a summary that has just counted them.  An imperative reads
+  # as the answer to them, which is what this block is.
   if [ "$n" -le "$cap" ]; then
-    remedy+=('remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying')
+    remedy=('remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying')
   else
     # The findings are below the remedy in this shape, and most of them are not
     # printed at all, so there is nothing 'named above' to point at.
-    remedy+=('remove them; the built tree is correct, and nothing needs rebuilding or reapplying')
+    remedy=('remove them; the built tree is correct, and nothing needs rebuilding or reapplying')
   fi
+  remedy+=('stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links')
   remedy+=('stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' \
     "  stow -D -p --no-folding -d $qdots -t $qhome current && shale apply" \
     'earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory')
@@ -2277,7 +2282,7 @@ cmd_apply() {
 # before it found, and only the finding count decides the exit status.
 cmd_doctor() {
   local tool i name path root dir entry leaf known remedy qlock lines layers
-  local pending
+  local pending removed
 
   FINDINGS=0
   NOTES=0
@@ -2551,6 +2556,63 @@ cmd_doctor() {
   # Last, because it is the only check that walks the whole of $HOME and the only
   # one that means anything only once everything above it is sound.
   audit_broken_links
+
+  # Build's two working names, after both walks: 'the next build' is a line to
+  # print only once every check above has settled BUILD_BLOCKED, and where there
+  # is no tree at $CUR this is what qualifies the build the check above has just
+  # offered.  Two existence tests and no walk - what is inside either of them is
+  # not doctor's to say.  Notes rather than findings: neither stops a build, and
+  # the next build reaps both, which is also why they are otherwise invisible -
+  # the stray check above skips both names, shale owning them.
+  removed='the next build removes it'
+  if [ "$BUILD_BLOCKED" -gt 0 ]; then
+    removed='no build will run until the problems above are fixed, so it stays where it is'
+  fi
+  if [ -e "$NEW" ] || [ -L "$NEW" ]; then
+    if [ -d "$NEW" ] && [ ! -L "$NEW" ]; then
+      note "$NEW is left over from a build that did not finish" \
+        "shale composes a build there and renames it onto $CUR, and nothing reads it after that" \
+        "$removed"
+    else
+      # Not a tree shale composed, so nothing is claimed about what it holds.
+      note "$NEW is at the path shale composes every build into" \
+        'shale clears that path before it composes' \
+        "$removed"
+    fi
+  fi
+  if [ -e "$OLD" ] || [ -L "$OLD" ]; then
+    if [ ! -d "$OLD" ] || [ -L "$OLD" ]; then
+      note "$OLD is at the path a build moves $CUR aside to" \
+        'shale clears that path before it swaps' \
+        "$removed"
+    elif [ -d "$CUR" ] && [ ! -L "$CUR" ]; then
+      # What the path is for, never what is in it: nothing here has looked, and
+      # a build that kept it because one file differed leaves a whole tree, while
+      # an empty one told that it holds the last copy of something is a lie in
+      # the direction that costs a reader time.
+      note "$OLD is where a build leaves the tree it replaced" \
+        'a build keeps it where it replaced a file that did not match the layer copy providing it' \
+        "$removed" \
+        'copy anything in it you want to keep into a layer first'
+    else
+      # The shape a kill between the two renames leaves, and the one a hand that
+      # removed $CUR leaves too.  Only what is on disk is stated: the composed
+      # tree still standing at $NEW is what distinguishes the interrupted build
+      # from the removal, and without it no cause is named.  $CUR is spoken for
+      # only where there is nothing at it at all - every other shape it can be
+      # in is a finding above, in the words build refuses it with.
+      lines=("$OLD is where a build leaves the tree it replaced")
+      { [ -e "$CUR" ] || [ -L "$CUR" ]; } ||
+        lines[${#lines[@]}]="there is nothing at $CUR"
+      if [ -e "$NEW" ] || [ -L "$NEW" ]; then
+        lines[${#lines[@]}]="a build was interrupted between moving it there and moving the tree it had composed into place, which is still at $NEW"
+      fi
+      lines[${#lines[@]}]='it may hold the only copy of anything that was moved into the built tree rather than composed from a layer'
+      lines[${#lines[@]}]=$removed
+      lines[${#lines[@]}]='copy anything in it you want to keep into a layer first'
+      note ${lines[@]+"${lines[@]}"}
+    fi
+  fi
 
   # 'no problems found' is the verdict on the findings and stays exactly that,
   # here and in the docs that quote it - the notes are not problems and this is
