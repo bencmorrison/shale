@@ -776,7 +776,23 @@ compose_dir() {
         conflict "$srel" file "$e"
         continue
       fi
-      if [ -f "$CUR/$srel" ]; then
+      # -nt follows symlinks, and cp -RPp copies the link rather than what it
+      # points at, so on a link either test compares two files that are not the
+      # ones being copied - a link the layer above shadows resolves to a
+      # different file on each side and warns on every build for ever, in
+      # whichever direction the two targets' mtimes fall.  Comparing the links
+      # themselves would need lstat mtimes, which no shell primitive gives, so
+      # the reading here is that neither side is compared when that side is
+      # itself a link: what is given up is noticing a hand-edited link in the
+      # built tree.
+      #
+      # Both sides, and both must be tested.  -f already excludes a dangling
+      # link at $CUR/$srel and a $CUR/$srel that is a link to a directory, but
+      # it says nothing about $e: a lower layer's plain file can be sitting in
+      # the built tree at a path where a higher layer now ships a link, and a
+      # dangling $e makes -nt true outright, since the second operand does not
+      # exist.
+      if [ -f "$CUR/$srel" ] && [ ! -L "$CUR/$srel" ] && [ ! -L "$e" ]; then
         if [ "$CUR/$srel" -nt "$e" ]; then
           diverged "$srel" "$e"
         elif [ "$e" -nt "$CUR/$srel" ]; then

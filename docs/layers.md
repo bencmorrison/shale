@@ -272,6 +272,12 @@ shale:   your version is kept at /home/you/.dotfiles/current.old/.zshrc
 Copy your version back into the layer from `current.old`. The next build reaps `current.old`, so do
 it before then. Never version `current/`, and never point a layer symlink into it.
 
+A symlink is never itself compared, in either direction. What a build copies for one is the link, not
+the file at the end of it, so a timestamp comparison there would be about two files the build never
+touches — and for a link whose target a higher layer shadows, the two sides resolve to two different
+files and every build for ever reports a file nobody edited. So a hand-edited symlink in `current/`
+goes unreported.
+
 A file that arrives in the built tree from somewhere else keeps its own timestamp rather than
 gaining a new one, so it can be *older* than the layer copy that replaces it — which is what
 `stow --adopt` does, and it is the shape a lost file usually has. A build reports those together:
