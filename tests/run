@@ -1487,6 +1487,54 @@ test_config_invalid_names_are_rejected() {
   done
 }
 
+# A name and a path component are checked against a set, and that set used to be
+# written as the ranges '[A-Za-z0-9_]', which hold what the locale's collation
+# puts between their ends rather than ASCII.  Two failures came of it, and the
+# characters below are chosen to catch both: one from each side of U+00FF, which
+# is as far as bash 5.0's globasciiranges holds a range to ASCII - above it bash
+# 5 collates, as 3.2 - the floor, and the bash macOS ships - does throughout.
+#
+# So 'é' was inside those ranges on 3.2 and outside them on 5.2, and a
+# shale.conf naming such a layer parsed on one supported platform and was
+# refused on the other; while 'ẞ', 'Ａ' and '٣' were inside them on both, and
+# such a name was accepted everywhere by an allow-list meant to hold ASCII.
+# Spelling the set out one character at a time is what settles both, and this
+# case is the only thing that holds it: restoring the ranges leaves every other
+# case green.
+#
+# The pair is what makes this red on both CI jobs rather than only the macOS
+# one, which is why it is a pair: the 'é' half passes on bash 5 whatever shale
+# does.  The locale is set explicitly rather than inherited, since under
+# LC_ALL=C every one of these is refused however the matching works.
+test_config_refuses_a_non_ascii_name_and_path_on_every_bash() {
+  local c
+  # Built from explicit bytes rather than typed, so the case controls what it
+  # asks for whatever an editor between here and the repository would do with
+  # it: e-acute (U+00E9), capital sharp s (U+1E9E), fullwidth A (U+FF21) and
+  # arabic-indic three (U+0663), each measured inside the old ranges under
+  # en_US.UTF-8 on 3.2.57, and the last three on 5.2.21 as well.  A machine
+  # without en_US.UTF-8 runs this under C, where the old ranges refused them
+  # too, so it tests less there rather than failing - as at
+  # test_build_refuses_a_non_ascii_set_on_every_bash, and for the same reason.
+  for c in $'\303\251' $'\341\272\236' $'\357\274\241' $'\331\243'; do
+    conf "l${c}yer personal/base"
+    LC_ALL=en_US.UTF-8 run_shale build
+    assert_status 1 "$shale_status" "name 'l${c}yer' exit status"
+    assert_contains "$shale_err" \
+      "shale: $HOME/.dotfiles/shale.conf:1: invalid layer name 'l${c}yer'" \
+      "name 'l${c}yer' stderr"
+    assert_missing "$HOME/.dotfiles/current" "name 'l${c}yer' build output"
+
+    conf "base personal/l${c}yer"
+    LC_ALL=en_US.UTF-8 run_shale build
+    assert_status 1 "$shale_status" "path 'personal/l${c}yer' exit status"
+    assert_contains "$shale_err" \
+      "shale: $HOME/.dotfiles/shale.conf:1: invalid layer path 'personal/l${c}yer'" \
+      "path 'personal/l${c}yer' stderr"
+    assert_missing "$HOME/.dotfiles/current" "path 'personal/l${c}yer' build output"
+  done
+}
+
 test_config_duplicate_names_and_paths_are_rejected() {
   conf 'base personal/base' 'base other' 'wsl personal/base'
   run_shale build

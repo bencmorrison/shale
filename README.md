@@ -76,7 +76,10 @@ name    path              url
 clone root — because several layers commonly come from one repository. Give the url once per clone
 root and leave it off the other lines that share it. Blank lines and `#` comments are ignored. The
 three fields are separated by whitespace and there is no quoting, so none of them can contain a
-space; [docs/layers.md](docs/layers.md) says what shale can and cannot tell you when one does.
+space; [docs/layers.md](docs/layers.md) says what shale can and cannot tell you when one does. A
+`name`, and each component of a `path`, is ASCII: it starts with an ASCII letter, a digit or `_`,
+and may go on with those, `.` and `-`. A directory with an accent in its name cannot be a layer —
+rename it. A `url` is not restricted.
 
 ```
 base    personal/base     git@github.com:you/dotfiles.git

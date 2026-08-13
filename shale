@@ -162,15 +162,39 @@ config_error() {
 # quoted expansion is a literal in a case pattern on every bash there is.
 CR=$'\r'
 
-# A layer name and every component of a layer path share one grammar.
+# A layer name and every component of a layer path share one grammar: the
+# characters below, and a first character that is not '.' or '-'.
+#
+# Written out rather than as the ranges '[A-Za-z0-9]', because what a range
+# holds is the locale's collation order and not ASCII - the same reason stated
+# at translate_segment, reached here from the other side.  bash 5.0's
+# globasciiranges, on by default, holds a range to ASCII only as far as U+00FF;
+# above that it collates, as 3.2 - the floor, and the bash macOS ships - does
+# throughout.  Measured on 3.2.57 and 5.2.21 under en_US.UTF-8, and both halves
+# matter: 'é' was inside '[A-Za-z]' on 3.2 and outside it on 5.2, so a layer
+# path 'léyer' parsed on the macOS floor and was refused on Linux; and 'ẞ'
+# (U+1E9E), 'ı' (U+0131), 'Ａ' (U+FF21) and '٣' (U+0663) were inside it on both,
+# so those were names the allow-list was letting through everywhere.
+#
+# A list of single characters is the same set in every locale, which is what
+# makes the answer the same everywhere without a byte locale to enter - and
+# these run inside valid_path's loop, where entering one per component would
+# nest with any caller that had already entered.
+COMPONENT_FIRST='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'
+# '-' stays last because that is where an unquoted set needs it.  Quoted, as it
+# is used below, every character of the expansion is a literal and no range
+# forms at all: measured on 3.2.57 and 5.2.21, '["a-c"]' matches 'a', 'c' and
+# '-' and not 'b'.  The order is kept so that inlining these unquoted later
+# would still be correct.
+COMPONENT_CHARS=$COMPONENT_FIRST'.-'
 valid_component() {
   case "${1-}" in
     '') return 1 ;;
-    [A-Za-z0-9_]*) ;;
+    ["$COMPONENT_FIRST"]*) ;;
     *) return 1 ;;
   esac
   case "$1" in
-    *[!A-Za-z0-9._-]*) return 1 ;;
+    *[!"$COMPONENT_CHARS"]*) return 1 ;;
   esac
   return 0
 }
@@ -295,14 +319,17 @@ EOF
     fi
 
     ok=1
+    # 'ASCII' is worth the word: a name refused for holding an accented letter
+    # reads as a name made of letters, and nothing else here would say why.
     if ! valid_component "$name"; then
       config_error "$CONF:$lineno: invalid layer name '$name'" \
-        "a name starts with a letter, digit or '_' and may also contain '.' and '-'"
+        "a name starts with an ASCII letter, digit or '_' and may also contain '.' and '-'"
       ok=0
     fi
     if ! valid_path "$path"; then
       config_error "$CONF:$lineno: invalid layer path '$path'" \
-        "a path is one or more names joined by '/', relative to $DOTFILES"
+        "a path is one or more names joined by '/', relative to $DOTFILES" \
+        "a name starts with an ASCII letter, digit or '_' and may also contain '.' and '-'"
       ok=0
     fi
     [ "$ok" -eq 1 ] || continue
@@ -486,11 +513,14 @@ range_is_safe() {
 # case in which a '*' has a '/' it could cross.
 #
 # Runs under the byte locale its caller sets, and needs to: the set inside a
-# '[...]' is checked with a range, and bash 5.0 and later restrict a range to
-# ASCII by default where bash 3.2 - the floor - orders it by the locale's
-# collation.  Measured: 'é', 'ß' and '½' are inside '[A-Za-z0-9_...]' on 3.2.57
-# and outside it on 5.2, so without the locale a pattern refused on Linux is
-# accepted on the macOS floor and emits a two-byte perl class there.
+# '[...]' is checked with a range, and what a range holds is the locale's
+# collation order rather than ASCII.  bash 5.0's globasciiranges, on by default,
+# holds a range to ASCII only as far as U+00FF; above that it collates, as bash
+# 3.2 - the floor - does throughout.  Measured under en_US.UTF-8: 'é', 'ß' and
+# '½' are inside '[A-Za-z0-9_...]' on 3.2.57 and outside it on 5.2, and 'ẞ'
+# (U+1E9E), 'Ａ' (U+FF21) and '٣' (U+0663) are inside it on both.  So without the
+# locale a pattern refused on Linux is accepted on the macOS floor, or accepted
+# on both, and emits a multi-byte perl class where it is accepted.
 #
 # This is the whole of the safety argument, so it is stated here rather than
 # spread over the callers.  Stow joins every pattern in the file into one
