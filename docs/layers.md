@@ -30,6 +30,11 @@ the layer becomes a real link. Name the repository root as the layer and `~/.git
 and `~/CONTRIBUTING.md` join them. The subdirectory is what keeps the repository's own furniture out
 of the image.
 
+That list needs no configuring and applies to every setup, so a file it covers reaches `current/`
+and stops there with every command exiting 0. When something you shipped does not turn up in
+`$HOME`, `shale which` on it names the list that is blocking it — see [When a pattern arrives
+late](#when-a-pattern-arrives-late).
+
 The three fields are separated by whitespace and there is no quoting, so a name, a path and a url
 cannot contain a space or a tab. A directory called `my layer` cannot be a layer; rename it.
 `base    my layer` is not a syntax error, because it is the same three strings as a layer at `my`
@@ -449,6 +454,21 @@ shale:   shale writes that pattern into /home/you/.dotfiles/current/.stow-local-
 `which` answers before the first build, because it matches the globs itself rather than reading the
 file a build writes.
 
+It reads stow's own default list the same way, and says which list it is, because the remedy is not
+the same — there is no line to edit, and every build rewrites the file:
+
+```
+$ shale which 'notes~'
+winner    base  /home/you/.dotfiles/personal/base/notes~
+shale: note: 'notes~' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: .+~
+shale:   shale writes that list into /home/you/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it
+```
+
+`doctor` says nothing about that list. A layer holding a `.gitignore` is not a problem, and the
+answer is only wanted about the one path you went looking for.
+
 **Adding a pattern does not unlink what is already linked.** Stow skips an ignored path rather than
 unstowing it, so the link an earlier apply made stays exactly where it was, and the apply that comes
 after the pattern exits 0 without mentioning it. `shale doctor` names every such link:
@@ -456,7 +476,7 @@ after the pattern exits 0 without mentioning it. `shale doctor` names every such
 ```
 shale: /home/you/.DS_Store is a link into the built tree at a path the ignore list covers
 shale: remove the link named above
-shale:   it was made by an apply that ran before the pattern covering it existed
+shale:   it was made by an apply that ran before that path was on the list stow reads
 shale:   stow skips an ignored path rather than unstowing it, so no build or apply removes it
 shale:   the built tree is correct and needs no rebuilding
 ```

@@ -438,7 +438,9 @@ IGNORE_NAME=.shale-ignore
 # literal in a case pattern on every bash there is, as it is for CR above.
 TAB=$'\t'
 
-# One literal newline, for the trailing-newline arm in path_is_ignored.
+# One literal newline, for the trailing-newline arm in path_is_ignored and for
+# the trim and the two newline refusals that stand for it in
+# path_is_stow_ignored.
 NL=$'\n'
 
 # Every pattern read, in the order the files were read: the glob as it was
@@ -464,7 +466,8 @@ ignore_error() {
 }
 
 # The saved LC_ALL while a byte-wise stretch is running.  One value, so these
-# must not nest; the two callers - the reader and the matcher - do not.
+# must not nest; the three callers - the reader and the two matchers - do not,
+# and the callers that want both matchers run them one after the other.
 BYTE_LC_HAD=0
 BYTE_LC_SAVED=
 enter_byte_locale() {
@@ -947,6 +950,154 @@ path_is_ignored() {
   done
   leave_byte_locale
   [ "${#IGNORED_BY[@]}" -gt 0 ]
+}
+
+# ------------------------------------------------------ stow's own ignore list
+
+# GNU Stow's default-ignore-list is what cmd_build writes into
+# current/.stow-local-ignore, and stow reads a package's own list instead of its
+# built-in one rather than as well - so those entries decide what an apply links
+# exactly as an ignore file's patterns do, on a setup nobody has configured at
+# all.  They are perl regexps and this is a glob matcher, deliberately: no
+# regexp shale did not write reaches a matcher.  Hence a table.
+#
+# Two columns per row: upstream's regexp, then the glob that answers the same
+# question, with a leading '/' where the regexp is anchored at the top of the
+# tree - the spelling an ignore file's own patterns use for that.  '.+' is one
+# character or more and '.*' is none or more, which is the whole of why '?*'
+# stands where '*' does not.  Every glob is one path component, which is what
+# lets the anchored rows below be answered from the first component alone.
+#
+# This is a second copy of the list cmd_build writes, and drift between them is
+# a wrong answer of exactly the kind reporting this exists to remove: a row
+# missing here is a file stow declines to link with which saying nothing.
+# test_which_stows_default_list_table_covers_the_list_build_writes is what holds
+# the two together, in both directions.
+#
+# stow's own '^/\.stow-local-ignore$' is not a row.  It is not in the file -
+# stow adds it to whatever the file holds - and which answers for that path in
+# words of its own already, no layer being allowed to provide one.
+STOW_IGNORE_LIST=(
+  'RCS' 'RCS'
+  '.+,v' '?*,v'
+  'CVS' 'CVS'
+  '\.\#.+' '.#?*'
+  '\.cvsignore' '.cvsignore'
+  '\.svn' '.svn'
+  '_darcs' '_darcs'
+  '\.hg' '.hg'
+  '\.git' '.git'
+  '\.gitignore' '.gitignore'
+  '\.gitmodules' '.gitmodules'
+  '.+~' '?*~'
+  '\#.*\#' '#*#'
+  '^/README.*' '/README*'
+  '^/LICENSE.*' '/LICENSE*'
+  '^/COPYING' '/COPYING'
+)
+
+# The rows of that table matching a path, as indexes of its regexp column.
+STOW_IGNORED_BY=()
+
+# Fills STOW_IGNORED_BY for $1, and is non-zero unless it filled it.  Separate
+# from path_is_ignored rather than folded into it because the report tells the
+# two apart: an ignore file's pattern names a file and a line to edit, and one
+# of these has neither.
+#
+# Byte locale for path_is_ignored's reasons, and never nested inside it: the two
+# share one saved LC_ALL, and the one caller that wants both answers runs them
+# one after the other.
+#
+# Three things upstream's regexps do that the globs beside them do not, all
+# three measured against stow 2.3.1 and 2.4.1.  All three are a newline in a
+# name, which is legal on every filesystem shale runs on, and all three come
+# from the same place: upstream wrote these patterns with a plain '.', and
+# perl's '.' never matches a newline where the shell's '?' and '*' do.  A
+# translated ignore pattern has none of this - translate_segment emits '(?s:.)',
+# which does match one.
+#
+# Stow anchors every entry with '$', which perl matches immediately before a
+# final newline as well as at the end, so '.+~' covers 'notes~\n' - a name the
+# shell's '?*~' does not match.  One trailing newline comes off the component
+# before it is matched, and only one, because that is the whole of what '$'
+# allows.  This is path_is_ignored's trailing-newline arm, spelled as a trim
+# rather than as a second pattern.
+#
+# A newline inside a name is linked by stow and would be called ignored here:
+# 'a\nb~' is linked by both versions.  A row whose glob holds a wildcard is
+# therefore refused outright for a component that still holds a newline once
+# that trailing one is off.  The rows with no wildcard are literals, which
+# cannot diverge that way.
+#
+# A newline in an *ancestor* component takes every segment row with it, literals
+# included, and this is the one that is not about the pattern at all.  Stow does
+# not take the basename it tests as the last component: it is
+# '(my $basename = $target) =~ s!.+/!!', and '.+' cannot cross a newline - so
+# where a newline stands anywhere before the last '/', the substitution removes
+# some other run of characters and what is left still holds a newline in a
+# position no anchored pattern can match.  'a\nb/notes~' and 'a\nb/RCS' are both
+# linked by both versions.  So nothing below a component holding a newline can
+# match a segment row, whatever that component is, and the descent stops there.
+# The anchored rows are unaffected: they go through stow's path regexp against
+# the whole of '/$target', not through that basename.
+path_is_stow_ignored() {
+  local rel=$1 i glob anchored wild rest raw seg matched try
+  STOW_IGNORED_BY=()
+  enter_byte_locale
+  i=0
+  while [ "$i" -lt "${#STOW_IGNORE_LIST[@]}" ]; do
+    glob=${STOW_IGNORE_LIST[$((i + 1))]}
+    anchored=0
+    case "$glob" in
+      /*)
+        anchored=1
+        glob=${glob#/}
+        ;;
+    esac
+    wild=0
+    case "$glob" in
+      *'*'* | *'?'*) wild=1 ;;
+    esac
+    matched=0
+    rest=$rel
+    while :; do
+      raw=${rest%%/*}
+      seg=${raw%"$NL"}
+      try=1
+      if [ "$wild" -eq 1 ]; then
+        case "$seg" in
+          *"$NL"*) try=0 ;;
+        esac
+      fi
+      if [ "$try" -eq 1 ]; then
+        # Unquoted on purpose: the pattern is a glob, and this is the one place
+        # it is matched.
+        # shellcheck disable=SC2254
+        case "$seg" in
+          $glob) matched=1 ;;
+        esac
+      fi
+      [ "$matched" -eq 0 ] || break
+      # An anchored row names the top of the tree and covers everything under
+      # it, so the first component is the whole of what decides.  Checked on
+      # both versions: a directory called COPYING takes its subtree with it.
+      [ "$anchored" -eq 0 ] || break
+      # Untrimmed on purpose: a directory called 'a\n' breaks the basename stow
+      # tests below it exactly as one called 'a\nb' does, and the trim above is
+      # about the pattern's end rather than about this.
+      case "$raw" in
+        *"$NL"*) break ;;
+      esac
+      case "$rest" in
+        */*) rest=${rest#*/} ;;
+        *) break ;;
+      esac
+    done
+    [ "$matched" -eq 0 ] || STOW_IGNORED_BY+=("$i")
+    i=$((i + 2))
+  done
+  leave_byte_locale
+  [ "${#STOW_IGNORED_BY[@]}" -gt 0 ]
 }
 
 # ----------------------------------------------------------- the scratch trees
@@ -1750,7 +1901,10 @@ home_conflict() {
   # ~/.gitignore of the reader's own beside a layer that has one - and a name
   # here that is not in the list is a refusal doctor goes quiet about.  Inline
   # rather than a predicate of its own because this runs once per composed path
-  # and a bash function call is not free at that count.
+  # and a bash function call is not free at that count - so this is a third
+  # spelling of the same list, beside the file cmd_build writes and
+  # STOW_IGNORE_LIST.  test_doctor_says_nothing_about_stows_default_list is what
+  # holds this one to the other two, by planting every name it covers in $HOME.
   #
   # Stow compiles the list into two regexps, checked against both 2.3.1 and
   # 2.4.1.  A pattern holding a '/' is matched against the whole path anchored
@@ -2370,9 +2524,10 @@ audit_built_tree() {
 }
 
 # The built tree under $1, relative to $CUR and '' for the whole of it, walked
-# for paths the ignore list covers that $HOME still holds a link to.  $2 is 1
-# when a directory above this one is already covered, which is the answer for
-# everything below it and saves testing every path against every pattern.
+# for paths the ignore list covers that $HOME still holds a link to.  $2 says
+# whether a directory above this one is already covered, and by which of the two
+# lists - which is the answer for everything below it, and saves testing every
+# path against every pattern.
 #
 # Every component is what decides, not the leaf: a pattern naming a directory
 # takes the whole subtree, and the links an earlier apply made are at the files
@@ -2381,8 +2536,17 @@ audit_built_tree() {
 # in docs/migrating.md is written from, and this is the same walk with the
 # patterns in place of that sweep's fixed list.
 #
+# Both lists, because both are in the file stow reads and a link left at a path
+# either of them covers is the same dead file in $HOME.  The list stow ships is
+# reachable without anyone configuring anything: shale once wrote a three-line
+# .stow-local-ignore, and stow 2.3.1's built-in list has no '\.gitmodules', so a
+# ~/.gitmodules linked by an apply older than either is exactly this shape.
+#
+# One source per path and never both: a path an ignore file covers is reported
+# as that, because that is the one with a line to edit.
+#
 # Counted into IGNORED_LINK_COUNT and kept, up to $3 of them, in
-# IGNORED_LINK_PATHS.
+# IGNORED_LINK_PATHS with the source that covered each in IGNORED_LINK_SOURCES.
 scan_ignored_links() {
   local rel=$1 inherited=$2 cap=$3 here e base srel ignored link
   here=$CUR${rel:+/$rel}
@@ -2399,12 +2563,21 @@ scan_ignored_links() {
     esac
     srel=${rel:+$rel/}$base
     ignored=$inherited
-    [ "$ignored" -eq 1 ] || ! path_is_ignored "$srel" || ignored=1
+    if [ "$ignored" -eq 0 ]; then
+      # Guarded on the count rather than left to the loop inside, because the
+      # ordinary config has no ignore line at all and the call still pays for
+      # two locale switches.
+      if [ "${#IGNORE_PATTERNS[@]}" -gt 0 ] && path_is_ignored "$srel"; then
+        ignored=1
+      elif path_is_stow_ignored "$srel"; then
+        ignored=2
+      fi
+    fi
     if [ -d "$e" ] && [ ! -L "$e" ]; then
       scan_ignored_links "$srel" "$ignored" "$cap"
       continue
     fi
-    [ "$ignored" -eq 1 ] || continue
+    [ "$ignored" -ne 0 ] || continue
     # --no-folding gives every file its own link, so the link that has to go is
     # at the leaf however far above it the pattern matched.
     link=$HOME_PREFIX/$srel
@@ -2414,28 +2587,36 @@ scan_ignored_links() {
     # them to remove it would be telling them to remove their own file.
     [ "$link" -ef "$e" ] || continue
     IGNORED_LINK_COUNT=$((IGNORED_LINK_COUNT + 1))
-    [ "$IGNORED_LINK_COUNT" -gt "$cap" ] || IGNORED_LINK_PATHS+=("$link")
+    if [ "$IGNORED_LINK_COUNT" -le "$cap" ]; then
+      IGNORED_LINK_PATHS+=("$link")
+      IGNORED_LINK_SOURCES+=("$ignored")
+    fi
   done
 }
 
-# The links an apply made before the pattern that now covers them existed.  The
-# workflow this is for is the ordinary one: apply, notice ~/.DS_Store, add the
-# pattern, apply again - and the link is still there, because stow skips an
-# ignored path rather than unstowing it.  Both versions walk straight past it,
-# the apply exits 0, and until this check nothing said so.
+# The links an apply made before the list covering them said so.  The workflow
+# this is for is the ordinary one: apply, notice ~/.DS_Store, add the pattern,
+# apply again - and the link is still there, because stow skips an ignored path
+# rather than unstowing it.  Both versions walk straight past it, the apply
+# exits 0, and until this check nothing said so.
+#
+# The same holds without an ignore file anywhere, which is why there is no
+# guard on the pattern count here: the list stow ships is in that file too, and
+# it grew.  ~/.gitmodules linked by an apply that ran under 2.3.1 before shale
+# wrote 2.4.1's list is the case, and it read as a clean report until now.
 #
 # Findings rather than notes: each one is a file in $HOME the reader has asked
-# not to have, and the remedy is one rm.  They stop no build, so BUILD_BLOCKED
-# is left alone.
+# not to have - or that stow was never going to link - and the remedy is one rm.
+# They stop no build, so BUILD_BLOCKED is left alone.
 audit_ignored_links() {
   local cap n i rest msg lines links made removes
-  [ "${#IGNORE_PATTERNS[@]}" -gt 0 ] || return 0
   [ -d "$CUR" ] || return 0
   [ ! -L "$CUR" ] || return 0
   [ -n "${HOME-}" ] || return 0
 
   IGNORED_LINK_COUNT=0
   IGNORED_LINK_PATHS=()
+  IGNORED_LINK_SOURCES=()
   # audit_broken_links' cap, for its reasons: enough to act on, few enough to
   # stay inside a short terminal.
   cap=10
@@ -2444,17 +2625,20 @@ audit_ignored_links() {
   [ "$n" -gt 0 ] || return 0
 
   links='links'
-  made='they were made by an apply that ran before the patterns covering them existed'
+  # Neither source is named here, because each finding above names its own and
+  # the two can be mixed in one report.  What is true of both: the file stow
+  # reads did not cover this path when the apply that made the link ran.
+  made='they were made by applies that ran before those paths were on the list stow reads'
   removes='so no build or apply removes one'
   if [ "$n" -eq 1 ]; then
     links='link'
-    made='it was made by an apply that ran before the pattern covering it existed'
+    made='it was made by an apply that ran before that path was on the list stow reads'
     removes='so no build or apply removes it'
   fi
   if [ "$n" -le "$cap" ]; then
     i=0
     while [ "$i" -lt "${#IGNORED_LINK_PATHS[@]}" ]; do
-      finding "${IGNORED_LINK_PATHS[$i]} is a link into the built tree at a path the ignore list covers"
+      ignored_link_finding "$i"
       i=$((i + 1))
     done
     note "remove the $links named above" \
@@ -2465,13 +2649,13 @@ audit_ignored_links() {
   fi
 
   lines=("$n links under $HOME are into the built tree at paths the ignore list covers"
-    'they were made by an apply that ran before the patterns covering them existed'
+    "$made"
     'stow skips an ignored path rather than unstowing it, so no build or apply removes one'
     'remove them; the built tree is correct and needs no rebuilding')
   note ${lines[@]+"${lines[@]}"}
   i=0
   while [ "$i" -lt "${#IGNORED_LINK_PATHS[@]}" ]; do
-    finding "${IGNORED_LINK_PATHS[$i]} is a link into the built tree at a path the ignore list covers"
+    ignored_link_finding "$i"
     i=$((i + 1))
   done
   rest=$((n - cap))
@@ -2479,6 +2663,19 @@ audit_ignored_links() {
   # Every one of them is a link that has to go, so every one of them is a
   # finding: the cap changes what is printed and never what is wrong.
   FINDINGS=$((FINDINGS + rest))
+}
+
+# One finding for the link kept at index $1, in the words of the list that
+# covers it: a reader sent to an ignore file that does not hold the pattern goes
+# looking for a line nobody wrote, and one told there is nothing to edit when
+# there is would leave the pattern in place.
+ignored_link_finding() {
+  local i=$1
+  if [ "${IGNORED_LINK_SOURCES[$i]}" -eq 2 ]; then
+    finding "${IGNORED_LINK_PATHS[$i]} is a link into the built tree at a path stow's own ignore list covers"
+  else
+    finding "${IGNORED_LINK_PATHS[$i]} is a link into the built tree at a path the ignore list covers"
+  fi
 }
 
 # Non-zero unless the next apply removes the orphaned link $1 by itself, so that
@@ -2961,8 +3158,8 @@ which_describe() {
 }
 
 # The ignore patterns matching $1, one per line and each named where it was
-# written, on stderr with which's other notes.  IGNORED_BY is path_is_ignored's
-# answer for that same path.
+# written, on stderr with which's other notes.  IGNORED_BY and STOW_IGNORED_BY
+# are path_is_ignored's and path_is_stow_ignored's answers for that same path.
 #
 # Which is where this has to be said: a pattern that matches more than it was
 # meant to leaves the file it matched in the built tree and out of $HOME, with
@@ -2977,16 +3174,41 @@ which_describe() {
 # closes; doctor names every one of them, and this names the one asked about.
 report_ignored() {
   local rel=$1 i idx lines that link
-  that='that pattern'
-  [ "${#IGNORED_BY[@]}" -eq 1 ] || that='those patterns'
-  lines=("note: '$rel' is on the ignore list — no apply links it")
-  i=0
-  while [ "$i" -lt "${#IGNORED_BY[@]}" ]; do
-    idx=${IGNORED_BY[$i]}
-    lines[${#lines[@]}]="${IGNORE_FILES[$idx]}:${IGNORE_LINES[$idx]}: ${IGNORE_PATTERNS[$idx]}"
-    i=$((i + 1))
-  done
-  lines[${#lines[@]}]="shale writes $that into $CUR/.stow-local-ignore, which is the list stow reads"
+  # Whose list it is, in the first line, because the remedy turns on it: a
+  # reader told their file is ignored goes looking for the ignore file they
+  # wrote, and for a path stow's own list covers there is no such file.  Where
+  # both cover it the general headline stands and the two blocks below say the
+  # rest.
+  if [ "${#IGNORED_BY[@]}" -gt 0 ]; then
+    lines=("note: '$rel' is on the ignore list — no apply links it")
+    that='that pattern'
+    [ "${#IGNORED_BY[@]}" -eq 1 ] || that='those patterns'
+    i=0
+    while [ "$i" -lt "${#IGNORED_BY[@]}" ]; do
+      idx=${IGNORED_BY[$i]}
+      lines[${#lines[@]}]="${IGNORE_FILES[$idx]}:${IGNORE_LINES[$idx]}: ${IGNORE_PATTERNS[$idx]}"
+      i=$((i + 1))
+    done
+    lines[${#lines[@]}]="shale writes $that into $CUR/.stow-local-ignore, which is the list stow reads"
+  else
+    lines=("note: '$rel' is on stow's own ignore list — no apply links it")
+  fi
+  # The entry as upstream spells it, so that a reader who opens the built list
+  # finds the line this names.  There is nothing to edit there - every build
+  # overwrites the file - so the remedy is the path's name and nothing else.
+  #
+  # 'no line to edit' is scoped to these rows and says so, because a block above
+  # may have just named a file and a line: read top to bottom without the scope
+  # it contradicts the line before it.
+  if [ "${#STOW_IGNORED_BY[@]}" -gt 0 ]; then
+    i=0
+    while [ "$i" -lt "${#STOW_IGNORED_BY[@]}" ]; do
+      lines[${#lines[@]}]="stow's default ignore list: ${STOW_IGNORE_LIST[${STOW_IGNORED_BY[$i]}]}"
+      i=$((i + 1))
+    done
+    lines[${#lines[@]}]="shale writes that list into $CUR/.stow-local-ignore on every build"
+    lines[${#lines[@]}]='that list has no line to edit: nothing but a different name gets this path past it'
+  fi
   if [ -n "${HOME-}" ]; then
     link=$HOME_PREFIX/$rel
     if [ -L "$link" ] && [ "$link" -ef "$CUR/$rel" ]; then
@@ -3164,8 +3386,10 @@ cmd_build() {
   # it: 2.3.1's built-in list has no \.gitmodules, so writing 2.4.1's list is
   # the whole of what makes an apply land the same tree on both.
   #
-  # doctor reads this same list as stow_ignores, to know which paths in $HOME an
-  # apply never touches.  A pattern added here is added there.
+  # Two readers hold a copy of this list and neither can be generated from it:
+  # home_conflict, to know which paths in $HOME an apply never touches, and
+  # STOW_IGNORE_LIST, which which reports from.  A pattern added here is added
+  # to both, and a case fails for each that is missed.
   printf '%s\n' \
     "# Written by shale on every build, which overwrites whatever is here:" \
     "# edit a layer, not this file." \
@@ -3879,8 +4103,12 @@ cmd_which() {
   # branch below prints it: an ignored path is ignored whether or not a layer
   # provides it, and the reader arrives asking about a file that is missing
   # rather than about which layer wins.
+  #
+  # Both lists, and both answers kept: stow reads them out of one file and a
+  # path can be on either or on both, while what to do about it differs.
   ignored=0
   ! path_is_ignored "$rel" || ignored=1
+  ! path_is_stow_ignored "$rel" || ignored=1
 
   # Highest precedence first, which is the order the answer prints in and the
   # reverse of the config's.
@@ -3983,6 +4211,19 @@ cmd_which() {
   # First among the notes: the table above says which layer's copy lands in the
   # built tree, which is true and is not the answer to why the file is not in
   # $HOME.
+  #
+  # Before that one, and unconditionally: the composer drops a '.git' at every
+  # depth, so a path with one in it never reaches the built tree at all.  Every
+  # such path is on stow's list too and the note below says so, but a reader
+  # sent to look at the list would open the built tree and find nothing there to
+  # look at.  Not conditional on the ignore answer either - an ancestor holding
+  # a newline takes the list's rows off this path and leaves the composer's
+  # skip exactly where it was.
+  case "/$rel/" in
+    */.git/*)
+      emit "note: no build composes a .git — shale skips one at every depth, so this path never reaches $CUR"
+      ;;
+  esac
   [ "$ignored" -eq 0 ] || report_ignored "$rel"
 
   if [ "$upper" -ge 0 ]; then
