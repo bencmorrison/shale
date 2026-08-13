@@ -6385,6 +6385,78 @@ test_doctor_an_ignored_path_is_not_an_apply_conflict() {
   assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
 }
 
+# The same for the entries stow ships, and doctor's side of #104: nothing is
+# wrong with a layer holding a .gitignore, so doctor says nothing about one.
+# The reader needs to hear about it only when they go looking for a file that
+# did not arrive, which is the question 'which' answers.
+#
+# Silence with a control, so a doctor gone quiet altogether fails as loudly as
+# one gone noisy: the .zshrc below is planted the same way and is the one
+# finding.  And silence that is checked rather than assumed - every planted file
+# is still its own content after the apply, so stow really did leave all of them
+# where they were.
+#
+# '.git' is not among them.  The composer drops one at every depth, so it never
+# reaches the built tree and this walk never sees it.
+test_doctor_says_nothing_about_stows_default_list() {
+  local names i rel
+  names=('RCS/x' 'file,v' 'CVS/x' '.#lock' '.cvsignore' '.svn/x' '_darcs/x' '.hg/x'
+    '.gitignore' '.gitmodules' 'notes~' '#notes#' 'README.md' 'LICENSE' 'COPYING')
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    mklayer common/base "${names[$i]}"
+    i=$((i + 1))
+  done
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_write "$HOME" .zshrc 'mine, and not a link'
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    rel=${names[$i]}
+    case "$rel" in
+      */*) sandbox_write "$HOME/${rel%/*}" "${rel##*/}" 'mine, and not a link' ;;
+      *) sandbox_write "$HOME" "$rel" 'mine, and not a link' ;;
+    esac
+    i=$((i + 1))
+  done
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor with the control conflict'
+  assert_contains "$shale_out" \
+    "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.zshrc" 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    assert_not_contains "$shale_out" "$HOME/${names[$i]}" "the finding for '${names[$i]}'"
+    i=$((i + 1))
+  done
+  # The control out of the way, and nothing at all is left to report.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.zshrc" || fail 'could not remove the control'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor with the control gone'
+  assert_eq 'shale: no problems found' "$shale_out" 'the second stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply stderr'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    rel=${names[$i]}
+    assert_eq 'mine, and not a link' "$(cat "$HOME/$rel")" "the file stow left alone: '$rel'"
+    i=$((i + 1))
+  done
+  # And after the apply, which is the state the stale-link walk runs over on
+  # every doctor from now on: a layer holding these names, applied, with no link
+  # at any of them, is a clean report.  The walk reporting one of them here
+  # would be a finding on a setup with nothing wrong with it.
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the apply'
+  assert_eq 'shale: no problems found' "$shale_out" 'the third stdout'
+}
+
 # #92's guarantee, against the one input that would break it: a pattern shale
 # refuses stops every build and every apply, so doctor must not report it green.
 # The refusal is a finding, it blocks the build, and no line offering a build
@@ -6450,6 +6522,140 @@ test_doctor_names_links_left_behind_by_a_new_pattern() {
   assert_status 0 "$shale_status" 'the doctor after the removal'
   assert_not_contains "$shale_out" 'the ignore list covers' 'the second stdout'
   assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
+# The same finding for the list stow ships, which needs no ignore file to reach
+# and which is why that walk now runs on every doctor.  Reachable without a
+# hand: shale once wrote a three-line .stow-local-ignore, and stow 2.3.1's
+# built-in list has no '\.gitmodules', so an apply under either linked this path
+# and no apply since has removed it.  Planted here, because no shale in the tree
+# makes one.
+#
+# Named as stow's list rather than as 'the ignore list': there is no file of the
+# reader's holding that pattern, and sending them to look for one sends them
+# after a line nobody wrote.
+test_doctor_names_a_link_left_by_stows_own_list() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mklayer common/base .gitmodules
+  mklayer common/base 'CVS/Entries'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_missing "$HOME/.gitmodules"
+  assert_missing "$HOME/CVS"
+  # No ignore file anywhere, so this is the walk running on a config nobody has
+  # configured.
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor before the links are planted'
+  assert_eq 'shale: no problems found' "$shale_out" 'the first stdout'
+  sandbox_leaf "$HOME" .gitmodules new
+  ln -s "$HOME/.dotfiles/current/.gitmodules" "$sandbox_path" ||
+    fail 'could not plant the link'
+  # Stale through the directory above it, which is the half a check on the leaf
+  # name alone would miss: nothing is called 'Entries' on that list.
+  sandbox_mkdir "$HOME/CVS"
+  sandbox_leaf "$HOME/CVS" Entries new
+  ln -s "$HOME/.dotfiles/current/CVS/Entries" "$sandbox_path" ||
+    fail 'could not plant the nested link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor with the links'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.gitmodules is a link into the built tree at a path stow's own ignore list covers" 'stdout'
+  assert_contains "$shale_out" \
+    "shale: $HOME/CVS/Entries is a link into the built tree at a path stow's own ignore list covers" 'stdout'
+  assert_contains "$shale_out" 'shale: remove the links named above' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   they were made by applies that ran before those paths were on the list stow reads' 'stdout'
+  assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
+  # One rm each, and nothing rebuilt or reapplied.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.gitmodules" || fail 'could not remove the link'
+  sandbox_mkdir "$HOME/CVS"
+  rm -f "$sandbox_dir/Entries" || fail 'could not remove the nested link'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the removal'
+  assert_not_contains "$shale_out" 'ignore list covers' 'the third stdout'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
+# One finding, not two, for a path both lists cover - and in the words of the
+# one with a line to edit, because that is the remedy that stops it coming back.
+test_doctor_a_link_both_lists_cover_is_reported_once() {
+  local hits
+  conf 'base common/base'
+  mkignore common '*modules'
+  mklayer common/base .zshrc
+  mklayer common/base .gitmodules
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_leaf "$HOME" .gitmodules new
+  ln -s "$HOME/.dotfiles/current/.gitmodules" "$sandbox_path" ||
+    fail 'could not plant the link'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.gitmodules is a link into the built tree at a path the ignore list covers" 'stdout'
+  assert_not_contains "$shale_out" "stow's own ignore list covers" 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  hits=$(printf '%s\n' "$shale_out" | grep -c 'is a link into the built tree')
+  assert_eq 1 "$hits" 'findings naming that link'
+}
+
+# A '.git' is never composed, so a link at one is dangling and belongs to the
+# broken-link audit rather than to this walk - which cannot see it, the built
+# tree having no such path.  Asserted because the two audits run over the same
+# $HOME and a path in both would be counted twice.
+test_doctor_a_link_at_a_dot_git_is_only_a_broken_link() {
+  local hits
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mklayer common/base .git/config
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_missing "$HOME/.dotfiles/current/.git" 'the built tree'
+  sandbox_leaf "$HOME" .git new
+  ln -s "$HOME/.dotfiles/current/.git" "$sandbox_path" || fail 'could not plant the link'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.git points at $HOME/.dotfiles/current/.git, which the built tree no longer provides" 'stdout'
+  assert_not_contains "$shale_out" 'ignore list covers' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  hits=$(printf '%s\n' "$shale_out" | grep -c "$HOME/.git ")
+  assert_eq 1 "$hits" 'findings naming that link'
+}
+
+# The ancestor-newline rule, in the walk where getting it wrong tells someone to
+# delete a file that is theirs: stow links 'a\nb/notes~' - measured on 2.3.1 and
+# on 2.4.1 - so the link an apply made there is one it maintains, and calling it
+# stale would send the reader to remove a working link.
+#
+# The control is the same name under an ordinary directory, whose link is
+# planted the same way and is the finding.
+test_doctor_says_nothing_about_a_link_below_a_newline() {
+  local dir
+  dir=$(printf 'a\nb')
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mklayer common/base "$dir/notes~"
+  mklayer common/base 'plain/notes~'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_symlink_to "$HOME/$dir/notes~" "$HOME/.dotfiles/current/$dir/notes~"
+  assert_missing "$HOME/plain/notes~"
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor with the link stow maintains'
+  assert_eq 'shale: no problems found' "$shale_out" 'stdout'
+  # The control, planted at the path stow really does decline.
+  sandbox_mkdir "$HOME/plain"
+  sandbox_leaf "$HOME/plain" 'notes~' new
+  ln -s "$HOME/.dotfiles/current/plain/notes~" "$sandbox_path" ||
+    fail 'could not plant the control link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor with the control'
+  assert_contains "$shale_out" \
+    "shale: $HOME/plain/notes~ is a link into the built tree at a path stow's own ignore list covers" 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
 }
 
 # An ignore file nothing reads is silence otherwise: the patterns in it do
@@ -10534,6 +10740,309 @@ test_which_says_nothing_about_ignoring_an_ordinary_path() {
   run_shale which swap
   assert_status 0 "$shale_status" 'the one-character near miss'
   assert_empty "$shale_err" 'the one-character near miss stderr'
+}
+
+# The list stow ships with, which shale writes into the built tree itself, and
+# the whole of why which reads it: an editor backup in a layer hits it with
+# nobody having configured anything at all.  The file is composed, stow declines
+# to link it, and every command exits 0 - so without this the answer names the
+# winning layer and says nothing about the file not being there.
+#
+# 'stow's own ignore list' in the first line rather than 'the ignore list': the
+# reader's next move is to open the ignore file they wrote, and for this path
+# there is no such file and no line in one.  The remedy named is the only one
+# there is.
+test_which_a_path_on_stows_default_list_names_that_list() {
+  conf 'base common/base'
+  mklayer common/base 'notes~' 'an editor backup'
+  mklayer common/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply stderr'
+  assert_missing "$HOME/notes~"
+  assert_exists "$HOME/.dotfiles/current/notes~" 'the composed copy'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  run_shale which 'notes~'
+  assert_status 0 "$shale_status"
+  assert_eq "winner    base  $HOME/.dotfiles/common/base/notes~" "$shale_out" 'stdout'
+  assert_eq "shale: note: 'notes~' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: .+~
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it" \
+    "$shale_err" 'stderr'
+}
+
+# Every entry of that list, not a sample.  The table which matches with is a
+# second copy of the file cmd_build writes, and an entry missing from it is a
+# file stow declines to link with which saying nothing - which is this issue.
+# Each name below is chosen for the entry beside it, and each is confirmed
+# absent from $HOME through a real stow rather than asserted.
+#
+# '\.git' is the one entry no apply can witness: the composer drops a .git at
+# every depth, so it never reaches the built tree for stow to skip.  It is still
+# asked about, a layer holding one being exactly the case that brings someone
+# here, and its absence from the built tree is asserted instead.
+test_which_every_entry_of_stows_default_list_is_named() {
+  local patterns paths i rel
+  patterns=(RCS '.+,v' CVS '\.\#.+' '\.cvsignore' '\.svn' _darcs '\.hg' '\.git'
+    '\.gitignore' '\.gitmodules' '.+~' '\#.*\#' '^/README.*' '^/LICENSE.*' '^/COPYING')
+  paths=('RCS/x' 'file,v' 'CVS/x' '.#lock' '.cvsignore' '.svn/x' '_darcs/x' '.hg/x'
+    '.git/config' '.gitignore' '.gitmodules' 'notes~' '#notes#' 'README.md' 'LICENSE'
+    'COPYING')
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  i=0
+  while [ "$i" -lt "${#paths[@]}" ]; do
+    mklayer common/base "${paths[$i]}"
+    i=$((i + 1))
+  done
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply stderr'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  i=0
+  while [ "$i" -lt "${#paths[@]}" ]; do
+    rel=${paths[$i]}
+    assert_missing "$HOME/$rel" "linked despite '${patterns[$i]}'"
+    case "$rel" in
+      .git/*) assert_missing "$HOME/.dotfiles/current/$rel" 'the composed copy' ;;
+      *) assert_exists "$HOME/.dotfiles/current/$rel" "the composed copy of '$rel'" ;;
+    esac
+    run_shale which "$rel"
+    assert_status 0 "$shale_status" "which '$rel'"
+    assert_contains "$shale_err" "shale:   stow's default ignore list: ${patterns[$i]}" \
+      "which '$rel' stderr"
+    i=$((i + 1))
+  done
+}
+
+# The near misses of that list, and the silence around it.  Every entry is
+# anchored at both ends of a whole path component, so a prefix of one is not a
+# match and neither is a longer name: '\.git' is not '.gitconfig' or '.gitkeep',
+# and '\.gitignore' is not the 'ignore' that core.excludesFile defaults to.
+# '.+' is one character or more, so '~', ',v' and '.#' are names of their own
+# rather than the tails of patterns.  The three anchored entries name the top of
+# the tree, so a README below it is an ordinary file.
+#
+# A note on any of these would be a wrong answer in the other direction - a file
+# that is in $HOME with which saying nothing links it - so the apply is asserted
+# here as well as the silence.
+test_which_says_nothing_about_the_near_misses_of_stows_default_list() {
+  local names i rel spelling
+  names=('.gitconfig' '.gitkeep' '.config/git/ignore' 'notes' 'a~b' 'CVSX' '.hgrc'
+    'docs/README.md' 'sub/LICENSE' 'sub/COPYING' '~' ',v' '.#' '#' '##x' 'x.cvsignore'
+    '.svnx' '_darcsX' 'RCSX' '.gitx' '.cvsignorex' '.hgx')
+  conf 'base common/base'
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    mklayer common/base "${names[$i]}"
+    i=$((i + 1))
+  done
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply stderr'
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    rel=${names[$i]}
+    assert_symlink_to "$HOME/$rel" "$HOME/.dotfiles/current/$rel" "the link for '$rel'"
+    # A leading './' for the file called '~': bare, that spelling is $HOME
+    # itself and names no path under it.
+    spelling=$rel
+    [ "$rel" != '~' ] || spelling=./$rel
+    run_shale which "$spelling"
+    assert_status 0 "$shale_status" "which '$rel'"
+    assert_empty "$shale_err" "which '$rel' stderr"
+    i=$((i + 1))
+  done
+}
+
+# Both lists at once, because stow reads them out of the one file and a path can
+# be on either or on both.  The first line stays the general one where an ignore
+# file covers the path too - there is a line to edit, and it is named - and the
+# block below it says the rest.
+test_which_stows_default_list_and_an_ignore_file_are_both_named() {
+  conf 'base common/base'
+  mkignore common '*.md'
+  mklayer common/base README.md
+  mklayer common/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_missing "$HOME/README.md"
+  run_shale which README.md
+  assert_status 0 "$shale_status"
+  assert_eq "shale: note: 'README.md' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/common/.shale-ignore:1: *.md
+shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads
+shale:   stow's default ignore list: ^/README.*
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it" \
+    "$shale_err" 'stderr'
+}
+
+# The other half of that answer, for stow's list as for an ignore file's
+# patterns: stow skips an ignored path rather than unstowing it, so a link at
+# one stays where it is.  Reachable without a hand: stow 2.3.1's built-in list
+# has no '\.gitmodules', so an apply run by a shale that did not write this file
+# left a link at exactly this path.  Planted here, no shale in the tree making
+# one.
+test_which_a_path_on_stows_default_list_with_a_live_link_says_both() {
+  conf 'base common/base'
+  mklayer common/base .gitmodules
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_leaf "$HOME" .gitmodules new
+  ln -s "$HOME/.dotfiles/current/.gitmodules" "$sandbox_path" ||
+    fail 'could not plant the link'
+  run_shale which .gitmodules
+  assert_status 0 "$shale_status"
+  assert_eq "shale: note: '.gitmodules' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: \\.gitmodules
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it
+shale:   a link an earlier apply made is still at $HOME/.gitmodules, because stow skips an ignored path rather than unstowing it
+shale:   remove that link by hand: no build or apply removes it" "$shale_err" 'stderr'
+}
+
+# A newline in a name, which these entries answer differently from a translated
+# ignore pattern because upstream wrote them with a plain '.'.
+#
+# Inside a name, perl's '.' never matches one and the shell's '?' and '*' do, so
+# the glob standing in for '.+~' matches a name stow links: 'a\nb~' is linked by
+# 2.3.1 and by 2.4.1, measured.  Called ignored it would be a wrong answer in
+# the other direction - a file that is in $HOME with which saying it cannot be.
+#
+# At the end of a name it goes the other way: stow anchors the list with '$',
+# which perl matches immediately before a final newline, so 'notes~\n' is
+# covered by '.+~' and the shell's '?*~' does not match it.  Both are in one
+# case because one arm closes each and a fix for either alone breaks the other.
+test_which_stows_default_list_reads_a_newline_as_stow_reads_it() {
+  local inside trailing
+  inside=$(printf 'a\nb~')
+  # printf -v rather than a command substitution, which strips exactly the
+  # trailing newline this name is about.
+  printf -v trailing 'notes~\n'
+  conf 'base common/base'
+  mklayer common/base "$inside" 'a newline in the middle of the name'
+  mklayer common/base "$trailing" 'a newline at the end of the name'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply stderr'
+  assert_symlink_to "$HOME/$inside" "$HOME/.dotfiles/current/$inside"
+  assert_missing "$HOME/$trailing"
+  run_shale which "$inside"
+  assert_status 0 "$shale_status" 'which on the name holding one'
+  assert_empty "$shale_err" 'the which stderr'
+  run_shale which "$trailing"
+  assert_status 0 "$shale_status" 'which on the name ending in one'
+  assert_contains "$shale_err" "stow's default ignore list: .+~" 'the trailing which stderr'
+}
+
+# The third way a newline diverges, and the one that is not about the patterns
+# at all: stow does not test the last component of the path. Stow.pm's 'ignore'
+# takes its basename with '(my $basename = $target) =~ s!.+/!!', and '.+' cannot
+# cross a newline - so where one stands anywhere before the last '/', the
+# substitution takes some other run of characters out and what is left still
+# holds a newline in a position no anchored pattern can match. Every segment
+# entry goes with it, the literals included: 'a\nb/notes~' and 'a\nb/RCS' are
+# both linked by 2.3.1 and by 2.4.1, measured against both.
+#
+# Called ignored they would be the wrong answer in the direction that costs -
+# a file that is in $HOME, with which saying no apply links it and, once a link
+# is there, telling the reader to remove it by hand.
+#
+# The control is the same four names under an ordinary directory, so a matcher
+# that stopped looking below the top level altogether fails here as well.
+test_which_stows_default_list_stops_at_a_newline_in_an_ancestor() {
+  local dir names i rel
+  dir=$(printf 'a\nb')
+  names=('notes~' 'RCS' '.gitignore' 'file,v')
+  conf 'base common/base'
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    mklayer common/base "$dir/${names[$i]}"
+    mklayer common/base "plain/${names[$i]}"
+    i=$((i + 1))
+  done
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply stderr'
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    rel=$dir/${names[$i]}
+    assert_symlink_to "$HOME/$rel" "$HOME/.dotfiles/current/$rel" \
+      "the link below the newline for '${names[$i]}'"
+    run_shale which "$rel"
+    assert_status 0 "$shale_status" "which below the newline on '${names[$i]}'"
+    assert_empty "$shale_err" "which below the newline on '${names[$i]}' stderr"
+    rel=plain/${names[$i]}
+    assert_missing "$HOME/$rel" "the control for '${names[$i]}'"
+    run_shale which "$rel"
+    assert_status 0 "$shale_status" "which on the control '${names[$i]}'"
+    assert_contains "$shale_err" "stow's default ignore list:" \
+      "the control stderr for '${names[$i]}'"
+    i=$((i + 1))
+  done
+}
+
+# Why a '.git' does not arrive, which is not the ignore list: the composer drops
+# one at every depth, so the path never reaches the built tree for stow to
+# decline it. Every such path is on stow's list too and that note follows, but a
+# reader sent only to the list would open the built tree and find nothing there
+# to look at.
+test_which_a_dot_git_says_no_build_composes_one() {
+  conf 'base common/base'
+  mklayer common/base .git/config
+  mklayer common/base .config/nvim/.git/HEAD
+  mklayer common/base .gitconfig
+  mklayer common/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_missing "$HOME/.dotfiles/current/.git" 'the built tree'
+  assert_missing "$HOME/.dotfiles/current/.config/nvim/.git" 'the built tree'
+  run_shale which .git/config
+  assert_status 0 "$shale_status"
+  assert_eq "shale: note: no build composes a .git — shale skips one at every depth, so this path never reaches $HOME/.dotfiles/current
+shale: note: '.git/config' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: \\.git
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it" \
+    "$shale_err" 'stderr'
+  # At any depth, which is where the composer drops it.
+  run_shale which .config/nvim/.git/HEAD
+  assert_status 0 "$shale_status" 'the nested one'
+  assert_contains "$shale_err" \
+    'shale: note: no build composes a .git — shale skips one at every depth' 'the nested stderr'
+  # And never on a name that merely begins with it.
+  run_shale which .gitconfig
+  assert_status 0 "$shale_status" 'the near miss'
+  assert_empty "$shale_err" 'the near miss stderr'
+  assert_exists "$HOME/.dotfiles/current/.gitconfig" 'the composed copy'
+}
+
+# The table path_is_stow_ignored matches with is a second copy of the list
+# cmd_build writes, and drift between them is a silent wrong answer whichever
+# way it goes: an entry the table lost is a file stow declines to link with
+# which saying nothing, and an entry the written file lost is a file which calls
+# blocked that an apply then links.
+#
+# The regexp column is compared with the file as stow reads it - comment lines
+# out, and an inline comment off the end, which both versions strip from the
+# whitespace before its '#'.  The table is two single-quoted fields on one line
+# per row and no entry holds a single quote, which is what makes the column
+# extractable without a parser; the second assertion is what keeps that shape.
+test_which_stows_default_list_table_covers_the_list_build_writes() {
+  local written rows table misshapen
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  written=$(sed -e 's/[[:space:]][[:space:]]*#.*$//' -e '/^#/d' -e '/^$/d' \
+    "$HOME/.dotfiles/current/.stow-local-ignore")
+  rows=$(sed -n -e '/^STOW_IGNORE_LIST=($/,/^)$/p' "$SHALE" | sed -e '1d' -e '$d')
+  table=$(printf '%s\n' "$rows" | sed -e "s/^  '//" -e "s/'.*\$//")
+  assert_eq "$written" "$table" 'the table against the list build writes'
+  misshapen=$(printf '%s\n' "$rows" | grep -vc "^  '[^']*' '[^']*'\$")
+  assert_eq 0 "$misshapen" 'table rows that are not a regexp and a glob'
 }
 
 # A layer shipping the file shale reads: the table names the layer holding it

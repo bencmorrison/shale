@@ -234,7 +234,10 @@ out of `$HOME`, and at any depth a `.gitignore`, a `.gitmodules`, an editor back
 emacs autosave or lock file like `#notes#` or `.#lockfile`, and
 the furniture of RCS, CVS, Subversion, Darcs and Mercurial. Stow reads a package's own list *instead
 of* its built-in one rather than as well, so the file has to carry the whole of it; writing 2.4.1's
-is also what makes stow 2.3.1 apply the same tree. The patterns from each clone root's
+is also what makes stow 2.3.1 apply the same tree. That list applies with nothing configured, so a
+file it covers reaches `current/` and stops there with every command exiting 0; `shale which` on the
+path says so, and says the list is stow's own rather than one of yours — there is no line to edit,
+and only a different name gets the path linked. The patterns from each clone root's
 `.shale-ignore` are appended below that list, translated into stow's syntax with the glob they came
 from beside each one. A layer that ships a `.stow-local-ignore` at its own top level fails the build,
 naming the layer; one further down is an ordinary file and is copied like any other.
