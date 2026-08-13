@@ -38,6 +38,12 @@ cloned from a repository called `layer` — so shale refuses it only where a dir
 `doctor` cannot see it, because no url is fetched until the build — and the build then fails on the
 clone, unless `layer` really is a repository.
 
+Names are ASCII. A layer name, and each component of a layer path, starts with an ASCII letter, a
+digit or `_`, and may go on with those, `.` and `-`; a url is not restricted. A directory called
+`léyer` therefore cannot be a layer any more than `my layer` can — rename it. Shale is the same tool
+on macOS and on Linux, and an allow-list is what stops one `shale.conf` from meaning two different
+things on them.
+
 Several layers can come from one repository — `personal/base` and `personal/wsl` are two
 directories in one clone at `~/.dotfiles/personal`, so the url is given once, on the first of them.
 A layer needs no repository at all: `~/.dotfiles/local` with no url is this machine's own directory.
