@@ -92,6 +92,48 @@ nothing else does.
 
 The config is machine-specific and belongs to the machine, not to any layer repo.
 
+## Blocking a file from every apply
+
+`.shale-ignore`, at the top of a clone root, lists the files no apply should link:
+
+```
+~/.dotfiles/
+  shale.conf          this machine's
+  personal/           the clone root
+    .shale-ignore     committed, and shared by every machine that clones it
+    base/  wsl/
+```
+
+```
+# ~/.dotfiles/personal/.shale-ignore
+.DS_Store
+*.swp
+Thumbs.db
+```
+
+Junk like that lands in a layer through ordinary use, and the repository's `.gitignore` does not stop
+it: shale composes from the filesystem, not from git's index, so a `.DS_Store` git never sees is
+copied and linked on every machine that clones the layer. Every build reads one such file per clone
+root, concatenates them, and writes them into `current/.stow-local-ignore` below stow's own list — so
+they are in force on the *first* build, before anything has been applied, which a `~/.stowrc` a layer
+ships cannot be. Shale reads these files and copies none of them; one beside the config or inside a
+layer is read by nothing, and `shale doctor` names it.
+
+The patterns are globs, in the familiar subset of a `.gitignore`'s: `*` and `?` match inside one path
+component, `[abc]` and `[!abc]` match one character, and everything else is literal. A pattern with
+no `/` matches a path component at any depth; one with a `/` anywhere is anchored at the top of the
+tree. A directory that matches takes everything under it. Anything shale cannot translate — a
+backslash, a `**`, a trailing `/`, an unclosed `[` — is refused by name, with the file and line, and
+stops the build rather than reaching stow.
+
+The file is still composed into `current/`; the pattern changes only what stow links. So a pattern
+that matches more than it was meant to leaves a real file unlinked with `shale apply` exiting 0, and
+two commands report that: `shale doctor` names every pattern in force with the file and line it came
+from, and `shale which PATH` says when a path is on the list and which pattern put it there. Adding a
+pattern does not unlink what an earlier apply already linked — stow skips an ignored path rather than
+unstowing it — so `doctor` names those leftover links too, and removing them is the whole of the fix.
+[docs/layers.md](docs/layers.md#blocking-a-file-without-removing-it) has the detail.
+
 Every transcript below was produced from that config, in a home directory at `/home/you` that had
 been applied once already — `doctor` says more before the first build than after one. Where a
 transcript needed a fault to show, the text says what was broken first.
@@ -114,6 +156,8 @@ usage:
 
 PATH is relative to ~/.dotfiles.  URL says how to clone PATH's top-level
 directory; give it once per directory and leave it off the other lines.
+
+A .shale-ignore file at the top of a clone root blocks paths from every apply.
 ```
 
 `shale help`, `shale -h` and `shale --help` print that same text, as does `shale` with no arguments
@@ -187,9 +231,10 @@ out of `$HOME`, and at any depth a `.gitignore`, a `.gitmodules`, an editor back
 emacs autosave or lock file like `#notes#` or `.#lockfile`, and
 the furniture of RCS, CVS, Subversion, Darcs and Mercurial. Stow reads a package's own list *instead
 of* its built-in one rather than as well, so the file has to carry the whole of it; writing 2.4.1's
-is also what makes stow 2.3.1 apply the same tree. A layer that ships a `.stow-local-ignore` at its
-own top level fails the build, naming the layer; one further down is an ordinary file and is copied
-like any other.
+is also what makes stow 2.3.1 apply the same tree. The patterns from each clone root's
+`.shale-ignore` are appended below that list, translated into stow's syntax with the glob they came
+from beside each one. A layer that ships a `.stow-local-ignore` at its own top level fails the build,
+naming the layer; one further down is an ordinary file and is copied like any other.
 
 To update your layers, pull each clone root with git, then apply:
 

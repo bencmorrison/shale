@@ -343,6 +343,121 @@ ones stow is already using rather than overriding them, so a stray `--ignore=zsh
 `~/.zshrc` silently unlinked with `shale apply` exiting 0. `shale doctor` notes a resource file if
 one exists, and names the stow options it sets.
 
+## Blocking a file without removing it
+
+`.DS_Store`, vim swap files like `.init.lua.swp`, `Thumbs.db`: junk that lands in a layer through
+ordinary use, that the repository's `.gitignore` hides from `git status` but not from shale — shale
+composes from the filesystem, not from git's index — and that stow's default list does not cover.
+Block it with a `.shale-ignore` file at the top of the clone root, committed with the layers:
+
+```
+~/.dotfiles/
+  shale.conf          this machine's
+  personal/           the clone root, the git repository
+    .shale-ignore     committed
+    base/  wsl/
+```
+
+```
+# ~/.dotfiles/personal/.shale-ignore
+# Blank lines and lines starting with '#' are ignored.
+.DS_Store
+*.swp
+Thumbs.db
+```
+
+Every build reads one such file per clone root — the top of the first component of each layer path —
+and **concatenates all of them into one list**. There is no per-layer or per-repository scope, and
+there cannot be: stow's ignore list applies to the built tree as a whole, so a file that looked
+scoped and was not would be worse than none. Shale reads these files and composes none of them, at
+any depth, the way it never composes a `.git` — so one never reaches `$HOME` even when a clone root
+is named as a layer itself. A `.shale-ignore` beside the config, or anywhere inside a layer, is read
+by nothing; `shale doctor` names those, because silence there is a file of patterns doing nothing.
+
+### The pattern syntax
+
+Globs, in the familiar subset of a `.gitignore`'s:
+
+| | |
+|---|---|
+| `*` | any run of characters inside one path component |
+| `?` | exactly one character |
+| `[abc]`, `[a-z]` | one character from the set |
+| `[!abc]`, `[^abc]` | one character not in the set |
+| anything else | itself, including a space, a `#` and a `$` |
+
+A pattern with no `/` matches a path component **at any depth**: `.DS_Store` covers every one in the
+tree. A pattern with a `/` anywhere is anchored at the **top of the built tree**, which is where a
+leading `/` would put it — `/notes` and `.config/nvim/swap` name one place each, and the leading
+slash is optional. A directory that matches takes everything under it, so `secrets` removes
+`secrets/key` too, and `/keep/*` removes `keep/deeper/kept` as well as `keep/gone`: stow skips a
+directory whose name matches and never looks inside it.
+
+A `#` starts a comment only at the beginning of a line. Anywhere else it is part of the pattern, and
+a pattern that has to *begin* with one is written as a set: `[#]notes[#]`.
+
+Nothing you write is a regular expression. Shale translates each glob into the regexp stow's ignore
+file wants and escapes every other character on the way, so a `+`, a `(` or a `.` in a filename is
+that character and nothing else. What it will not translate it refuses by name, with the file and
+the line, and the build stops there:
+
+| Refused | Why |
+|---|---|
+| a backslash | there is no escape character; every character but `*`, `?` and `[...]` is already literal |
+| `**` | a pattern with no `/` matches at any depth already, so `**/x` is written `x` |
+| a trailing `/` | stow's list cannot say "directories only"; without the slash it matches the directory and takes its contents |
+| a leading `!` | there is no negation, and stow has none to give it |
+| `[` with no `]`, an empty `[]`, `a//b` | not a pattern shale can read |
+| a set starting `[.`, `[:` or `[=` | perl reads those as syntax it does not implement and complains on stderr on every apply |
+| `[a-Z]`, `[z-a]`, `[[:alpha:]]`, a `/`, a space or a non-ASCII character inside `[...]` | a set holds letters, digits, `_ . , : = @ % ~ + - #` and ranges within one of those three alphabets |
+
+That refusal is the point: stow joins every pattern in the file into one alternation and compiles it
+with perl, in an order perl gives it rather than the file's. A pattern that is not self-contained
+does not fail on its own — an unclosed `(` swallows the `|` after it and takes the next pattern with
+it, a `[a-Z]` makes the whole list fail to compile so that no apply runs at all, and a lone `\` can
+silently disable one of stow's own default entries, differently on each run. All of it was measured
+before this syntax existed.
+
+### When a pattern arrives late
+
+The file is still composed into `current/`; the pattern changes only what stow links. Two commands
+report what the list is doing:
+
+```
+$ shale doctor
+shale: 3 ignore patterns are in force
+shale:   shale writes them into /home/you/.dotfiles/current/.stow-local-ignore, below stow's own list, so no apply links a path they match
+shale:   a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named below
+shale:   /home/you/.dotfiles/personal/.shale-ignore
+shale:   line 3: .DS_Store
+shale:   line 4: *.swp
+shale:   line 5: Thumbs.db
+
+$ shale which .config/nvim/.init.lua.swp
+winner    base  /home/you/.dotfiles/personal/base/.config/nvim/.init.lua.swp
+shale: note: '.config/nvim/.init.lua.swp' is on the ignore list — no apply links it
+shale:   /home/you/.dotfiles/personal/.shale-ignore:4: *.swp
+shale:   shale writes that pattern into /home/you/.dotfiles/current/.stow-local-ignore, which is the list stow reads
+```
+
+`which` answers before the first build, because it matches the globs itself rather than reading the
+file a build writes.
+
+**Adding a pattern does not unlink what is already linked.** Stow skips an ignored path rather than
+unstowing it, so the link an earlier apply made stays exactly where it was, and the apply that comes
+after the pattern exits 0 without mentioning it. `shale doctor` names every such link:
+
+```
+shale: /home/you/.DS_Store is a link into the built tree at a path the ignore list covers
+shale: remove the link named above
+shale:   it was made by an apply that ran before the pattern covering it existed
+shale:   stow skips an ignored path rather than unstowing it, so no build or apply removes it
+shale:   the built tree is correct and needs no rebuilding
+```
+
+Deleting them is the whole of the fix — nothing needs rebuilding or reapplying — and `shale which`
+says the same thing about the one path you asked about, naming the link it found.
+
 ## Never edit `current/`
 
 `~/.dotfiles/current` is generated output and is disposable — a bad build is fixed by fixing a layer

@@ -866,6 +866,19 @@ mklayer() {
   sandbox_write "${target%/*}" "${target##*/}" "$content"
 }
 
+# mkignore ROOT PATTERN... - the ignore file shale reads for the clone root
+# ROOT, which is $HOME/.dotfiles/ROOT/.shale-ignore.  ROOT is the first
+# component of a layer path, and is a layer itself where the path has only one.
+mkignore() {
+  local root=${1-}
+  [ -n "$root" ] || fail 'mkignore: no clone root given'
+  shift
+  # .dotfiles on its own first, so a symlink there is refused before the path
+  # below it is looked at, exactly as mklayer does it.
+  sandbox_mkdir "$HOME/.dotfiles"
+  sandbox_write "$HOME/.dotfiles/$root" .shale-ignore ${1+"$@"}
+}
+
 # stub_path_without TOOL... - a directory holding a link to every tool shale and
 # this harness run except the ones named, in stub_path.  The caller assigns it to
 # PATH whole rather than as a prefix: a prefix leaves the real tool findable
@@ -3152,6 +3165,186 @@ _darcs
 ^/COPYING' "$(cat "$HOME/.dotfiles/current/.stow-local-ignore")" 'the ignore list'
 }
 
+# The ignore files' patterns, under the list above rather than in place of it,
+# and translated: a user writes a glob and stow reads a regexp, and the whole of
+# the safety of this feature is that no character the user wrote reaches perl as
+# a metacharacter.  Every metacharacter in '*.swp' and in 'a+b' is escaped here,
+# which is what the assertion is for; '?' and '[a-p]' are the two that are not
+# literal, and they come out as the regexp for one character.
+#
+# Asserted against the file the same build writes with no ignore file at all, so
+# that the case above stays the one statement of what stow's own list is: the
+# whole of the difference is the block appended here, and a tree with no ignore
+# file has to produce the earlier file byte for byte.
+#
+# The glob each line came from is on the line as a comment, because both stow
+# versions strip a '#' that has whitespace before it and a reader who opens this
+# file should not have to translate it back.
+#
+# An unanchored '*' and '?' are '(?s:.)' rather than '.', because perl's '.'
+# never matches a newline and the shell's '?' does: a layer file whose name
+# holds one diverged, with doctor at 0 and apply at 1.  The form has to hold no
+# '/' as well, or stow files the pattern as a path regexp instead of a segment
+# one and its meaning changes entirely - which is why it is not '[^/]' here and
+# is in an anchored pattern, where a character class already matches a newline.
+test_build_ignore_patterns_are_translated_into_the_stow_local_ignore_list() {
+  local without with
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build with no ignore file'
+  without=$(cat "$HOME/.dotfiles/current/.stow-local-ignore")
+  mkignore common '# junk this repo picks up' '*.swp' '.DS_Store' 'a+b' 'sw?' '*.sw[a-p]' '/notes'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build with an ignore file'
+  with=$(cat "$HOME/.dotfiles/current/.stow-local-ignore")
+  assert_eq "$without
+
+# Below this header are the patterns shale read from the ignore files
+# named here, translated into stow regexps.  Change them there:
+#   $HOME/.dotfiles/common/.shale-ignore
+
+(?s:.)*\\.swp  # from *.swp
+\\.DS_Store  # from .DS_Store
+a\\+b  # from a+b
+sw(?s:.)  # from sw?
+(?s:.)*\\.sw[a-p]  # from *.sw[a-p]
+^/notes  # from /notes" "$with" 'the ignore list'
+}
+
+# One file per clone root, all of them concatenated into the one list stow
+# reads: the list applies to the built tree as a whole, so there is no scope for
+# a per-root one to have, and a file that looked scoped and was not would be
+# worse than none.  In config order, which is the order the roots are named in.
+#
+# The root that is a layer itself is here as well as the root that holds one,
+# because both are legal and only one of them has an ignore file that is also
+# inside a layer.
+test_build_concatenates_the_ignore_file_of_every_clone_root() {
+  conf 'base common/base' 'local local'
+  mklayer common/base .zshrc
+  mklayer local .vimrc
+  mkignore common '.DS_Store'
+  mkignore local 'Thumbs.db'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_eq "#   $HOME/.dotfiles/common/.shale-ignore
+#   $HOME/.dotfiles/local/.shale-ignore
+
+\\.DS_Store  # from .DS_Store
+Thumbs\\.db  # from Thumbs.db" \
+    "$(sed -n '/^#   /,$p' "$HOME/.dotfiles/current/.stow-local-ignore")" 'the ignore list'
+}
+
+# Read by shale and composed by nothing, at every depth, exactly as .git is: a
+# clone root may be named as a layer, which would otherwise put the file shale
+# reads into $HOME, and one deeper is read by nobody and belongs in $HOME even
+# less.
+test_build_never_composes_a_shale_ignore() {
+  conf 'base common/base' 'local local'
+  mklayer common/base .zshrc
+  mklayer common/base .config/nvim/.shale-ignore 'not read by anything'
+  mklayer local .vimrc
+  mkignore common '.DS_Store'
+  mkignore local 'Thumbs.db'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/current/.shale-ignore"
+  assert_missing "$HOME/.dotfiles/current/.config/nvim/.shale-ignore"
+  assert_exists "$HOME/.dotfiles/current/.zshrc" 'the composed tree'
+  assert_exists "$HOME/.dotfiles/current/.vimrc" 'the composed tree'
+}
+
+# A pattern shale will not translate stops the build, naming the file and the
+# line, before anything is composed.  Refusing is the whole design: stow joins
+# every pattern in the file into one alternation and compiles it with perl, so a
+# pattern that is not self-contained does not fail on its own - it can make the
+# whole list uncompilable, which stops every apply, or silently change what the
+# patterns beside it mean.
+#
+# Every refusal in one file, because they are all reported in one run: a build
+# that stopped at the first would need as many runs as the reader had mistakes.
+test_build_refuses_a_pattern_it_cannot_translate() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mkignore common '[a' 'a\b' 'a/**/b' 'notes/' '!keep' '[a-Z]' '[]' 'a//b' '[.]x' '[=y]'
+  run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:1: '[a' has a '[' that is never closed" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:2: 'a\\b' contains a backslash" 'stderr'
+  # The whole pattern, not the component it was found in: 'a/**/b' is what the
+  # reader wrote and what they have to find in the file.
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:3: 'a/**/b' contains '**'" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:4: 'notes/' ends in '/'" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:5: '!keep' begins with '!'" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:6: '[a-Z]' has the range 'a-Z' inside a '[...]'" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:7: '[]' has an empty '[]'" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:8: 'a//b' has an empty path component" 'stderr'
+  # '[.', '[=' and '[:' open perl's collating-element and equivalence-class
+  # syntax, which it does not implement: the set matches correctly and perl
+  # complains on stderr on every stow run, which is shale's own 'stow exited 0
+  # and wrote output' warning for ever.  Measured on 2.3.1 and 2.4.1.
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:9: '[.]x' has a '[...]' whose set begins with '.'" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:10: '[=y]' has a '[...]' whose set begins with '='" 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+# The same refusal, on the one input whose answer used to depend on which bash
+# was running.  A set is checked with a range, and bash 5.0 turned
+# globasciiranges on by default where 3.2 - the floor, and the bash macOS ships
+# - orders a range by the locale's collation: under a UTF-8 locale 'é' is inside
+# '[A-Za-z0-9...]' on 3.2 and outside it on 5.2, so this pattern was refused on
+# one machine and accepted on the other, where it emitted a two-byte perl class
+# that the shell's own matching would never agree with.  parse_ignore_files
+# reading in the byte locale is what settles it, and this case is the only thing
+# that holds that half of it: replacing that call with ':' leaves every other
+# case green.
+#
+# It therefore passes on bash 5 whatever shale does, and earns its place on the
+# macOS job and under a 3.2 run of this suite.  The locale is set explicitly
+# rather than inherited, since under LC_ALL=C both bashes agree already.
+test_build_refuses_a_non_ascii_set_on_every_bash() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mkignore common "[$(printf '\303\251')]x"
+  LC_ALL=en_US.UTF-8 run_shale build
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:1: " 'stderr'
+  assert_contains "$shale_err" "inside a '[...]'" 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+# Read after the clone and before anything is composed, which is what makes a
+# committed file work at all: on a machine that has not fetched the repository
+# yet there is nothing to read until git has run, and the patterns still have to
+# be in force for the build that clone is part of.
+test_build_reads_the_ignore_file_the_clone_brings() {
+  mkrepo dots base/.zshrc base/.DS_Store .shale-ignore
+  sandbox_write "$CASE_DIR/repos/dots" .shale-ignore '.DS_Store'
+  (cd "$CASE_DIR/repos/dots" && git add -A . && git commit -qm 'ignore file') ||
+    fail 'could not commit the ignore file'
+  conf "base dots/base $repo_url"
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_exists "$HOME/.dotfiles/dots/.shale-ignore" 'the cloned ignore file'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_exists "$HOME/.dotfiles/current/.DS_Store" 'the composed copy'
+  assert_missing "$HOME/.DS_Store"
+}
+
 test_build_reports_one_line_per_layer_in_config_order() {
   conf 'base personal/base' 'local local'
   mklayer personal/base .zshrc
@@ -4595,6 +4788,321 @@ test_apply_links_the_near_misses_of_the_ignore_list() {
     "$HOME/.dotfiles/current/.config/nvim/init.lua"
 }
 
+# The whole point of the feature, and the first apply is where it has to hold:
+# a ~/.stowrc shipped by a layer cannot filter the apply that installs it, and
+# the link it misses is not cleaned up afterwards, an ignored file being
+# invisible to stow rather than actively unstowed.  A committed ignore file is
+# in the built tree's list before stow is ever run.
+#
+# The file is still composed - shale copies layers and never reads them - so
+# what the pattern changes is what stow links, and both halves are asserted.
+test_apply_an_ignore_pattern_takes_effect_on_the_first_apply() {
+  conf 'base common/base'
+  mkignore common '.DS_Store'
+  mklayer common/base .zshrc
+  mklayer common/base .DS_Store
+  mklayer common/base .config/nvim/.DS_Store
+  mklayer common/base .config/nvim/init.lua
+  assert_missing "$HOME/.dotfiles/current" 'the built tree before the first apply'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_missing "$HOME/.DS_Store"
+  assert_missing "$HOME/.config/nvim/.DS_Store"
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua"
+  assert_exists "$HOME/.dotfiles/current/.DS_Store" 'the composed copy'
+  assert_exists "$HOME/.dotfiles/current/.config/nvim/.DS_Store" 'the composed copy'
+}
+
+# A pattern with no '/' matches one path component at any depth, and stow skips
+# a directory it matches as it descends - so the whole subtree goes, and neither
+# the directory nor anything under it is linked.  A pattern with a '/' anywhere
+# is anchored at the top of the tree instead, which is what a .gitignore does
+# with one, so the two spellings of the anchored form mean the same thing.
+#
+# Run through the real stow, because these are stow's readings and not shale's:
+# what the built tree's list says has to be what an apply does.
+test_apply_a_pattern_naming_a_directory_takes_its_subtree() {
+  conf 'base common/base'
+  mkignore common 'secrets' '/notes' 'top/deep'
+  mklayer common/base .zshrc
+  mklayer common/base secrets/key
+  mklayer common/base .config/secrets/token
+  mklayer common/base notes/todo
+  mklayer common/base .config/notes/kept
+  mklayer common/base top/deep/thing
+  mklayer common/base other/top/deep/thing
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/secrets"
+  assert_missing "$HOME/.config/secrets"
+  assert_missing "$HOME/notes"
+  assert_missing "$HOME/top/deep"
+  # Both anchored patterns name the top of the tree and nothing else, so the
+  # like-named directories further down are linked as any others would be.
+  assert_symlink_to "$HOME/.config/notes/kept" \
+    "$HOME/.dotfiles/current/.config/notes/kept"
+  assert_symlink_to "$HOME/other/top/deep/thing" \
+    "$HOME/.dotfiles/current/other/top/deep/thing"
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  # which is asked the same questions, because it answers them from the globs
+  # rather than from what stow did: a path is on the list when the pattern
+  # matched a directory above it, and nothing in its own name says so.
+  run_shale which secrets/key
+  assert_status 0 "$shale_status" 'which below a matched directory'
+  assert_contains "$shale_err" \
+    "shale: note: 'secrets/key' is on the ignore list — no apply links it" 'the which stderr'
+  run_shale which top/deep/thing
+  assert_status 0 "$shale_status" 'which below a matched anchored directory'
+  assert_contains "$shale_err" \
+    "shale: note: 'top/deep/thing' is on the ignore list — no apply links it" 'the anchored which stderr'
+  run_shale which other/top/deep/thing
+  assert_status 0 "$shale_status" 'which below the like-named directory'
+  assert_empty "$shale_err" 'the unmatched which stderr'
+}
+
+# The glob subset, against the real stow: '*' and '?' inside one path component,
+# '[abc]' with a range, and '[!abc]' for anything but.
+#
+# '*' not crossing a '/' is the one that would be silent if it were wrong, and
+# '/x*z' is where it shows: it matches 'xz' at the top of the tree and not
+# 'x/y/z', which a '*' that crossed would take.  What it does *not* mean is that
+# a subtree is safe from a pattern that matches the directory above it - stow
+# skips a directory whose name matches and never descends, so '/keep/*' takes
+# 'keep/deeper/kept' with it as surely as 'keep/gone'.  Both are asserted,
+# because the pair is what tells the two rules apart.
+test_apply_a_glob_matches_one_path_component_at_a_time() {
+  conf 'base common/base'
+  mkignore common '*.swp' 'sw?' '*.sw[a-p]' '[!0-9]notes' '/keep/*' '/x*z'
+  mklayer common/base .zshrc
+  mklayer common/base .config/nvim/.init.lua.swp
+  mklayer common/base .config/nvim/init.lua
+  mklayer common/base swa
+  mklayer common/base swap
+  mklayer common/base notes.swm
+  mklayer common/base xnotes
+  mklayer common/base 1notes
+  mklayer common/base keep/gone
+  mklayer common/base keep/deeper/kept
+  mklayer common/base xz
+  mklayer common/base x/y/z
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.config/nvim/.init.lua.swp"
+  assert_missing "$HOME/swa"
+  assert_missing "$HOME/notes.swm"
+  assert_missing "$HOME/xnotes"
+  assert_missing "$HOME/keep/gone"
+  assert_missing "$HOME/keep/deeper/kept"
+  assert_missing "$HOME/xz"
+  # '?' is one character, so a three-letter name matched and a four-letter one
+  # did not; '[!0-9]' is anything but a digit; and '/x*z' did not cross a '/'.
+  assert_symlink_to "$HOME/swap" "$HOME/.dotfiles/current/swap"
+  assert_symlink_to "$HOME/1notes" "$HOME/.dotfiles/current/1notes"
+  assert_symlink_to "$HOME/x/y/z" "$HOME/.dotfiles/current/x/y/z"
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua"
+}
+
+# What shale says and what stow does have to agree on a file name that is not
+# ASCII, and they did not: stow compiles these patterns with perl and no 'use
+# utf8', so its '.' is one byte, where the shell's '?' is one character under a
+# UTF-8 locale.  Every consequence was measured on both stow versions - a real
+# file silently blocked with 'which' reporting nothing about it, a doctor
+# permanently red over a link stow had correctly made, and #92's guarantee
+# broken through home_conflict - and the fix is that the matcher runs in a byte
+# locale.
+#
+# What this asserts is the invariant - which's verdict matches whether stow made
+# a link - and not which of the two happened, because that is not shale's to
+# decide and is not the same on two machines.  An earlier version of this case
+# pinned the outcome for a name spelled 'é.txt' and went red on macOS: how many
+# bytes that name has once it is on disk belongs to the filesystem, and a case
+# that states it encodes the one it was written on.  The invariant is true on
+# every platform and every normalisation, and it is the whole of what the byte
+# locale buys.
+#
+# Both spellings are built from explicit bytes rather than typed, so the case
+# controls what it asks for, and each goes in a directory of its own: a volume
+# that is normalisation-insensitive - APFS is - treats the two as one name, so
+# side by side the second write lands on the first file and one of them is gone
+# before stow ever runs.  What comes back out of the directory is then read
+# rather than assumed, because preserving what it was given is a property of the
+# volume too.
+#
+# The ASCII pair is what keeps the case honest: 'ab.txt' is two bytes and two
+# characters and is matched wherever this runs, 'abc.txt' is three of each and
+# is matched nowhere, so one verdict of each kind is pinned outright and the
+# case cannot pass by finding nothing.
+test_apply_a_non_ascii_file_name_is_matched_as_stow_matches_it() {
+  local utf8 candidate width dir entry name rel linked said
+  # A UTF-8 locale is what makes this case able to catch anything: under C the
+  # matcher and the shell agree whatever shale does.  Found by asking bash what
+  # it makes of a two-byte character rather than by asking the system what
+  # locales it has, and a machine with none fails the case rather than quietly
+  # testing less.
+  utf8=
+  for candidate in en_US.UTF-8 C.UTF-8 en_US.utf8 C.utf8; do
+    # stderr dropped because a locale the machine has not got is answered by
+    # bash's own 'cannot change locale' warning, which is this loop's normal
+    # course rather than anything to report.
+    # shellcheck disable=SC2016  # the expansion is for the bash being started, not this one
+    width=$(LC_ALL=$candidate "$BASH" -c 'printf %s "${#1}"' _ "$(printf '\303\251')" 2>/dev/null) ||
+      width=
+    if [ "$width" = 1 ]; then
+      utf8=$candidate
+      break
+    fi
+  done
+  [ -n "$utf8" ] ||
+    fail 'no UTF-8 locale on this machine, and this case needs one' \
+      'it asserts that shale agrees with stow about a multibyte file name, which under LC_ALL=C it would do however the matching worked' \
+      'tried: en_US.UTF-8 C.UTF-8 en_US.utf8 C.utf8'
+
+  conf 'base common/base'
+  mkignore common '??.txt'
+  mklayer common/base "nfc/$(printf '\303\251').txt" 'precomposed'
+  mklayer common/base "nfd/$(printf 'e\314\201').txt" 'decomposed'
+  mklayer common/base ascii/ab.txt 'two bytes'
+  mklayer common/base ascii/abc.txt 'three bytes'
+  mklayer common/base .zshrc
+  LC_ALL=$utf8 run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_missing "$HOME/ascii/ab.txt"
+  assert_symlink_to "$HOME/ascii/abc.txt" "$HOME/.dotfiles/current/ascii/abc.txt"
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+
+  for dir in nfc nfd; do
+    for entry in "$HOME/.dotfiles/common/base/$dir"/*; do
+      name=${entry##*/}
+      # The directory holds exactly one entry, so an unmatched glob is a fixture
+      # that did not survive rather than a name to answer for.
+      [ -e "$entry" ] || fail "the layer holds nothing at $entry"
+      rel=$dir/$name
+      linked=no
+      [ ! -L "$HOME/$rel" ] || linked=yes
+      said=no
+      LC_ALL=$utf8 run_shale which "$rel"
+      assert_status 0 "$shale_status" "which on $rel"
+      case "$shale_err" in
+        *'is on the ignore list'*) said=yes ;;
+      esac
+      # Exactly one of the two: a link stow made is a path shale must not call
+      # ignored, and a path shale calls ignored is one stow must not have
+      # linked.  Which way round it falls is the filesystem's business.
+      [ "$linked" != "$said" ] ||
+        fail "shale and stow disagree about $rel" \
+          "a link was made: $linked" \
+          "which says it is on the ignore list: $said" \
+          "under LC_ALL=$utf8"
+    done
+  done
+
+  # The same agreement seen from doctor: it cannot call a link stow has just
+  # correctly made stale, and cannot think a path is ignored that stow will
+  # refuse to write over.
+  LC_ALL=$utf8 run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_not_contains "$shale_out" 'the ignore list covers' 'the doctor stdout'
+}
+
+# The other half of that divergence, and not a multibyte one.  Two sub-cases,
+# and they are answered in different places:
+#
+# A newline *inside* a name diverged because perl's '.' never matches one and
+# the shell's '?' does - doctor 0 against apply 1, on both versions - and
+# '(?s:.)' in the emitted regexp is what closes it.
+#
+# A newline at the *end* of a name diverges for a different reason and is not
+# touched by that: stow anchors its list with '$', which perl also matches
+# immediately before a final newline, so 'foo.swp\n' is covered by '*.swp'
+# whatever the pattern was translated to, while the shell's '*.swp' does not
+# match it.  path_is_ignored's trailing-newline arm is what closes that one.
+#
+# That arm is per component rather than per path, so a *directory* whose name
+# ends in a newline takes its subtree with it in the same way - stow anchors the
+# basename of every node as it descends.  That half is not exercised here: this
+# harness proves a directory is inside the test root by resolving it with 'cd'
+# and 'pwd -P', and a command substitution strips exactly the trailing newline
+# such a name is made of, so the guard refuses the fixture before shale runs.
+# It was measured by hand against both stow versions instead.
+#
+# A newline in a file name is legal on every filesystem shale runs on, and these
+# are the only names in the suite that hold one.
+test_apply_a_newline_in_a_file_name_is_matched_as_stow_matches_it() {
+  local inside trailing
+  inside=$(printf 'a\nb.swp')
+  # printf -v rather than a command substitution, which strips exactly the
+  # trailing newline this name is about.
+  printf -v trailing 'foo.swp\n'
+  conf 'base common/base'
+  mkignore common '*.swp'
+  mklayer common/base "$inside" 'a newline in the middle of the name'
+  mklayer common/base "$trailing" 'a newline at the end of the name'
+  mklayer common/base plain.swp 'no newline'
+  mklayer common/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_missing "$HOME/$inside"
+  assert_missing "$HOME/$trailing"
+  assert_missing "$HOME/plain.swp"
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  run_shale which "$inside"
+  assert_status 0 "$shale_status" 'which on the name holding one'
+  assert_contains "$shale_err" 'is on the ignore list' 'the which stderr'
+  run_shale which "$trailing"
+  assert_status 0 "$shale_status" 'which on the name ending in one'
+  assert_contains "$shale_err" 'is on the ignore list' 'the trailing which stderr'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_not_contains "$shale_out" 'the ignore list covers' 'the doctor stdout'
+}
+
+# Every ASCII punctuation character that a file name can hold, as a literal
+# pattern, through a real stow.  This is the case that holds the escaping: a
+# character that reached perl unescaped would either change what its own pattern
+# matches or, for '(' and '[', swallow the '|' stow joins the patterns with and
+# take the neighbouring pattern with it.  Both were measured before this
+# translation existed.
+#
+# Every one of these files is suppressed and the one control file is linked, so
+# a pattern that stopped matching its own file fails here as loudly as one that
+# broke the list.
+test_apply_a_literal_punctuation_pattern_never_breaks_stow() {
+  local marks c patterns names
+  # '/' cannot be in a file name, and '[' and '\' are refused as patterns - the
+  # case above covers those two.  A leading '!' is refused too, so each name has
+  # the punctuation in the middle.
+  marks='! " # $ % & '\'' ( ) + , - . : ; < = > @ ] ^ ` { | } ~'
+  patterns=()
+  names=()
+  # shellcheck disable=SC2086  # the marks are this case's own literal list
+  for c in $marks; do
+    patterns[${#patterns[@]}]="a${c}b"
+    names[${#names[@]}]="a${c}b"
+  done
+  patterns[${#patterns[@]}]='a b'
+  names[${#names[@]}]='a b'
+  conf 'base common/base'
+  mkignore common ${patterns[@]+"${patterns[@]}"}
+  mklayer common/base .zshrc
+  for c in ${names[@]+"${names[@]}"}; do
+    mklayer common/base "$c" 'junk'
+  done
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  for c in ${names[@]+"${names[@]}"}; do
+    assert_missing "$HOME/$c"
+    assert_exists "$HOME/.dotfiles/current/$c" 'the composed copy'
+  done
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
 # The other half of that list: the files a layer keeps for its readers stay in
 # the layer.  Anchored at the package root, so a README a user asked for inside
 # a config directory is still linked.
@@ -5737,6 +6245,223 @@ test_doctor_a_home_with_a_trailing_slash_prints_single_slashes() {
 
 # Both locations stow reads: ~/.stowrc, and the one in the directory apply runs
 # from.  Neither can be defended against, hence a note rather than silence.
+# The patterns in force, named where they can be read without opening the built
+# tree.  A pattern that matches more than it was meant to leaves a real file
+# unlinked with every command exiting 0, which is why this is said at all; it is
+# a note and never a finding, because somebody wrote them on purpose.
+#
+# Grouped by file with the line numbers, because they concatenate across clone
+# roots and 'which file do I edit' is the question the list is read with.  The
+# singular half is asserted too: a report that said '1 ignore patterns are in
+# force' would be the first thing a reader distrusts.
+test_doctor_names_the_ignore_patterns_in_force() {
+  conf 'base common/base' 'local local'
+  mklayer common/base .zshrc
+  mklayer local .vimrc
+  mkignore common '# junk' '.DS_Store' '*.swp'
+  mkignore local 'Thumbs.db'
+  # Built first, so that the closing line counts this note and nothing else:
+  # before the first build doctor has one of its own about the missing tree.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale: 3 ignore patterns are in force' 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   shale writes them into $HOME/.dotfiles/current/.stow-local-ignore, below stow's own list, so no apply links a path they match" \
+    'stdout'
+  # The qualification is not decoration: without it this headline reads as a
+  # claim about $HOME as it stands, four lines above findings naming links at
+  # exactly the paths it just said nothing links.
+  assert_contains "$shale_out" \
+    'shale:   a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named below' \
+    'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.dotfiles/common/.shale-ignore" 'stdout'
+  assert_contains "$shale_out" 'shale:   line 2: .DS_Store' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 3: *.swp' 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.dotfiles/local/.shale-ignore" 'stdout'
+  assert_contains "$shale_out" 'shale:   line 1: Thumbs.db' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+  mkignore local '# nothing here now'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the second doctor'
+  assert_contains "$shale_out" 'shale: 2 ignore patterns are in force' 'the second stdout'
+  mkignore common '.DS_Store'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the third doctor'
+  assert_contains "$shale_out" 'shale: 1 ignore pattern is in force' 'the third stdout'
+  assert_contains "$shale_out" \
+    "shale:   shale writes it into $HOME/.dotfiles/current/.stow-local-ignore, below stow's own list, so no apply links a path it matches" \
+    'the third stdout'
+}
+
+# The silence that goes with it: a tree with no ignore file reports exactly as
+# it did before there were any, down to the note count in the closing line.
+test_doctor_says_nothing_about_ignoring_without_an_ignore_file() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_not_contains "$shale_out" 'ignore pattern' 'stdout'
+  assert_not_contains "$shale_out" 'stow-local-ignore' 'stdout'
+  assert_eq 'shale: no problems found' "$shale_out" 'stdout'
+}
+
+# doctor names the paths in $HOME that stow will refuse to write over, and it
+# reads the ignore list to know which paths an apply never reaches: a path the
+# list covers is one stow does not look at, so what stands in $HOME there is no
+# refusal at all.  Both halves in one case, because the finding this must not
+# raise is the finding it must still raise without the pattern - and the apply
+# is run either way, so the claim is checked against stow rather than asserted.
+test_doctor_an_ignored_path_is_not_an_apply_conflict() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mklayer common/base .DS_Store
+  sandbox_write "$HOME" .DS_Store 'mine, and not a link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor with no ignore file'
+  assert_contains "$shale_out" \
+    "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.DS_Store" 'stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply with no ignore file'
+  mkignore common '.DS_Store'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor with the pattern'
+  assert_not_contains "$shale_out" 'no apply put there' 'the second stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply with the pattern'
+  assert_eq 'mine, and not a link' "$(cat "$HOME/.DS_Store")" 'the file stow left alone'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
+# #92's guarantee, against the one input that would break it: a pattern shale
+# refuses stops every build and every apply, so doctor must not report it green.
+# The refusal is a finding, it blocks the build, and no line offering a build
+# survives it.
+test_doctor_a_refused_pattern_blocks_the_build_and_is_a_finding() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mkignore common '.DS_Store' '[a'
+  run_shale doctor
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:2: '[a' has a '[' that is never closed" 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  # Nothing may offer a build while one is refused, and the missing-tree note is
+  # where that offer lives.
+  assert_not_contains "$shale_out" 'build one with: shale build' 'stdout'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+  assert_missing "$HOME/.zshrc"
+}
+
+# The workflow the warning exists for: apply, notice the junk, add the pattern,
+# apply again - and the link is still there, because stow skips an ignored path
+# rather than unstowing it.  Both versions walk straight past it and exit 0.
+#
+# The nested link is the half a check on the leaf name alone would miss: nothing
+# is called 'junk' there, and the link is stale through the directory above it.
+test_doctor_names_links_left_behind_by_a_new_pattern() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mklayer common/base .DS_Store
+  mklayer common/base junk/inside
+  run_shale apply
+  assert_status 0 "$shale_status" 'the first apply'
+  assert_symlink_to "$HOME/.DS_Store" "$HOME/.dotfiles/current/.DS_Store"
+  assert_symlink_to "$HOME/junk/inside" "$HOME/.dotfiles/current/junk/inside"
+  mkignore common '.DS_Store' 'junk'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the second apply'
+  # stow said nothing and removed nothing, which is the whole reason for the
+  # check below.
+  assert_symlink_to "$HOME/.DS_Store" "$HOME/.dotfiles/current/.DS_Store"
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.DS_Store is a link into the built tree at a path the ignore list covers" 'stdout'
+  assert_contains "$shale_out" \
+    "shale: $HOME/junk/inside is a link into the built tree at a path the ignore list covers" 'stdout'
+  assert_contains "$shale_out" 'shale: remove the links named above' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   stow skips an ignored path rather than unstowing it, so no build or apply removes one' 'stdout'
+  assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
+  # The remedy is the whole of the fix: no rebuild, no reapply.  The directory
+  # is resolved and the leaf removed from it, sandbox_leaf refusing to hand back
+  # a path that is a symlink - which is what both of these are.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.DS_Store" || fail 'could not remove the link'
+  sandbox_mkdir "$HOME/junk"
+  rm -f "$sandbox_dir/inside" || fail 'could not remove the nested link'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the removal'
+  assert_not_contains "$shale_out" 'the ignore list covers' 'the second stdout'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
+# An ignore file nothing reads is silence otherwise: the patterns in it do
+# nothing, no build composes the file, and the reader has no way to tell it from
+# one that is working.  Beside the config is one place to put it by mistake;
+# inside a layer is the other, at its top or at any depth below it, and the
+# depth is the half a check on the layer's top alone would miss.
+#
+# The one at the top of a clone root that is a layer itself is the file shale
+# reads, and must not be named here: the last half of the case is that it works.
+test_doctor_notes_an_ignore_file_nothing_reads() {
+  local line seen
+  conf 'base common/base' 'local local' 'sub local/sub'
+  mklayer common/base .zshrc
+  mklayer local .vimrc
+  mklayer local/sub .inputrc
+  sandbox_write "$HOME/.dotfiles" .shale-ignore '.DS_Store'
+  sandbox_write "$HOME/.dotfiles/common/base" .shale-ignore '.DS_Store'
+  sandbox_write "$HOME/.dotfiles/common/base/.config/nvim" .shale-ignore '.DS_Store'
+  sandbox_write "$HOME/.dotfiles/local/sub" .shale-ignore '.DS_Store'
+  mkignore local 'Thumbs.db'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/.shale-ignore is read by nothing" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   shale reads one .shale-ignore per clone root, at $HOME/.dotfiles/<root>/.shale-ignore" 'stdout'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/common/base/.shale-ignore is read by nothing" 'stdout'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/common/base/.config/nvim/.shale-ignore is read by nothing" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   one list covers the whole built tree, so a layer cannot have patterns of its own' 'stdout'
+  # The one shale does read is a layer's top as well, and is not named.
+  assert_not_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/local/.shale-ignore is read by nothing" 'stdout'
+  assert_contains "$shale_out" 'shale: 1 ignore pattern is in force' 'stdout'
+  # Once, however many layers' walks reach it: 'local' descends into 'sub' and
+  # 'local/sub' lists it directly, so without the dedup this file is named
+  # twice and counted twice.
+  seen=0
+  while IFS= read -r line; do
+    case "$line" in
+      "shale: $HOME/.dotfiles/local/sub/.shale-ignore is read by nothing")
+        seen=$((seen + 1))
+        ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  [ "$seen" -eq 1 ] ||
+    fail "the ignore file inside a nested layer is named $seen times, and once is right" \
+      "$shale_out"
+  # None of the unread ones was composed either.
+  assert_missing "$HOME/.dotfiles/current/.shale-ignore"
+  assert_missing "$HOME/.dotfiles/current/.config/nvim/.shale-ignore"
+}
+
 test_doctor_a_stow_resource_file_is_noted() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
@@ -9632,6 +10357,167 @@ shadowed  base   $HOME/.dotfiles/personal/base/.zshrc" "$shale_out" 'with the lo
   assert_empty "$shale_err" 'with the lock held'
   # Left exactly as its holder made it: not taken, and not given back.
   assert_exists "$HOME/.dotfiles/.lock" 'the lock'
+}
+
+# 'why is this file not in my home directory' is the question which is asked,
+# and a table naming the winning layer answers a different one: the file is
+# composed, it is in the built tree, and stow skipped it.  The note names the
+# file and the line, which is what there is to edit.
+#
+# Before the first build and after one, asserted to be the same answer: which
+# evaluates the patterns itself rather than reading the list a build writes, so
+# the answer does not wait on a build - and the reader asking this has usually
+# just run one.
+test_which_an_ignored_path_names_the_file_and_line() {
+  local expected first
+  conf 'base common/base'
+  mkignore common '# junk' '*.swp'
+  mklayer common/base .config/nvim/.init.lua.swp
+  expected="shale: note: '.config/nvim/.init.lua.swp' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/common/.shale-ignore:2: *.swp
+shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads"
+  assert_missing "$HOME/.dotfiles/current" 'the built tree'
+  run_shale which .config/nvim/.init.lua.swp
+  assert_status 0 "$shale_status" 'before the first build'
+  assert_eq "$expected" "$shale_err" 'stderr before the first build'
+  assert_contains "$shale_out" \
+    "winner    base  $HOME/.dotfiles/common/base/.config/nvim/.init.lua.swp" 'stdout'
+  first=$shale_out
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_missing "$HOME/.config/nvim/.init.lua.swp"
+  run_shale which .config/nvim/.init.lua.swp
+  assert_status 0 "$shale_status" 'after the apply'
+  assert_eq "$expected" "$shale_err" 'stderr after the apply'
+  assert_eq "$first" "$shale_out" 'stdout after the apply'
+}
+
+# The other half of that answer, and the one it got wrong: stow skips an ignored
+# path rather than unstowing it, so a pattern added after an apply leaves the
+# link that apply made exactly where it was.  'no apply links it' beside a live
+# link with content in it is the lie this closes.
+test_which_an_ignored_path_with_a_live_link_says_both() {
+  conf 'base common/base'
+  mklayer common/base .DS_Store
+  run_shale apply
+  assert_status 0 "$shale_status" 'the first apply'
+  assert_symlink_to "$HOME/.DS_Store" "$HOME/.dotfiles/current/.DS_Store"
+  mkignore common '.DS_Store'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the second apply'
+  run_shale which .DS_Store
+  assert_status 0 "$shale_status"
+  assert_eq "shale: note: '.DS_Store' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/common/.shale-ignore:1: .DS_Store
+shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads
+shale:   a link an earlier apply made is still at $HOME/.DS_Store, because stow skips an ignored path rather than unstowing it
+shale:   remove that link by hand: no build or apply removes it" "$shale_err" 'stderr'
+  # sandbox_leaf refuses to hand back a path that is a symlink, which this is,
+  # so the directory is resolved and the leaf removed from it.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.DS_Store" || fail 'could not remove the link'
+  run_shale which .DS_Store
+  assert_status 0 "$shale_status" 'after the removal'
+  assert_not_contains "$shale_err" 'still at' 'the second stderr'
+}
+
+# Every pattern that matches, not the first: one that matches more than it was
+# meant to is the defect this exists to surface, and naming one file would send
+# the reader to edit a line that is not the one to remove.  They come from two
+# clone roots here, which is where the concatenation shows.
+test_which_names_every_pattern_that_matches() {
+  conf 'base common/base' 'local local'
+  mkignore common '.DS_Store'
+  mkignore local '*'
+  mklayer common/base .DS_Store
+  mklayer local .zshrc
+  run_shale which .DS_Store
+  assert_status 0 "$shale_status"
+  assert_eq "shale: note: '.DS_Store' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/common/.shale-ignore:1: .DS_Store
+shale:   $HOME/.dotfiles/local/.shale-ignore:1: *
+shale:   shale writes those patterns into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads" \
+    "$shale_err" 'stderr'
+  # The pattern that matches everything is the whole of why this is reported at
+  # all: the apply that follows links nothing and says nothing, exiting 0.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply stderr'
+  assert_missing "$HOME/.zshrc"
+}
+
+# Both facts, in the order they are true: no layer provides it, and the ignore
+# list would not have let it through anyway.  A reader who has just moved a file
+# out of a layer to stop it being linked is owed the pattern that was already
+# doing it, or the next thing they do is put the file back and wonder.
+test_which_an_ignored_path_no_layer_provides_says_both() {
+  conf 'base common/base'
+  mkignore common '.DS_Store'
+  mklayer common/base .zshrc
+  run_shale which Desktop/.DS_Store
+  assert_status 1 "$shale_status"
+  assert_empty "$shale_out" 'stdout'
+  assert_eq "shale: no layer provides 'Desktop/.DS_Store'
+shale: note: 'Desktop/.DS_Store' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/common/.shale-ignore:1: .DS_Store
+shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads" \
+    "$shale_err" 'stderr'
+}
+
+# The silence around it.  A path no pattern matches is answered exactly as it
+# was before there were patterns, whether or not there is an ignore file - so
+# the note cannot become a line every 'which' carries and nobody reads.
+test_which_says_nothing_about_ignoring_an_ordinary_path() {
+  conf 'base common/base'
+  mkignore common '.DS_Store' 'sw?'
+  mklayer common/base .zshrc
+  mklayer common/base .DS_Store_but_not_quite
+  mklayer common/base swap
+  run_shale which .zshrc
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_eq "winner    base  $HOME/.dotfiles/common/base/.zshrc" "$shale_out" 'stdout'
+  # A near miss on both ends of the pattern: stow anchors a pattern at both, so
+  # neither a longer name nor a longer path is a match, and '?' is exactly one
+  # character rather than one or more.
+  run_shale which .DS_Store_but_not_quite
+  assert_status 0 "$shale_status" 'the near miss'
+  assert_empty "$shale_err" 'the near miss stderr'
+  run_shale which swap
+  assert_status 0 "$shale_status" 'the one-character near miss'
+  assert_empty "$shale_err" 'the one-character near miss stderr'
+}
+
+# A layer shipping the file shale reads: the table names the layer holding it
+# truthfully, and no build composes it, so without the note the answer says a
+# file is on its way to $HOME that never goes.
+test_which_a_layer_shipping_an_ignore_file_says_no_build_composes_one() {
+  conf 'base common/base'
+  mklayer common/base .config/.shale-ignore 'read by nothing'
+  run_shale which .config/.shale-ignore
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "winner    base  $HOME/.dotfiles/common/base/.config/.shale-ignore" 'stdout'
+  assert_eq 'shale: note: no build composes a .shale-ignore — shale reads the one at the top of a clone root and copies none of them' \
+    "$shale_err" 'stderr'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_missing "$HOME/.dotfiles/current/.config/.shale-ignore"
+}
+
+# which refuses a pattern it will not read rather than answering around it: it
+# cannot say whether the path matches one it did not translate, and an answer
+# leaving it out would be the silent half of the same mistake every build makes
+# loudly.
+test_which_refuses_a_pattern_it_will_not_read() {
+  conf 'base common/base'
+  mkignore common '[a'
+  mklayer common/base .zshrc
+  run_shale which .zshrc
+  assert_status 1 "$shale_status"
+  assert_empty "$shale_out" 'stdout'
+  assert_contains "$shale_err" \
+    "shale: $HOME/.dotfiles/common/.shale-ignore:1: '[a' has a '[' that is never closed" 'stderr'
 }
 
 test_which_a_path_no_layer_provides_exits_1() {
