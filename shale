@@ -1817,7 +1817,11 @@ shell_quote() {
 # that is not a regular file and for one that cannot be read: stow reads a
 # resource file under '-r' and shale runs as the same user, so a file shale
 # cannot open is one stow does not read either.  STOWRC_PATHS is 1 when one of
-# them is --dir or --target.
+# them is --dir or --target, and STOWRC_DOTFILES is 1 when one of them is
+# --dotfiles - the one option that decides where a path lands rather than
+# whether it lands, which which reads to know it cannot follow the rename.  Both
+# are set from the canonical name rather than from the token, an abbreviation
+# being what the file may spell it as.
 #
 # An option is in the set for what it is, not for what one version or one of
 # shale's own code paths makes of it: --verbose changes no link and is named,
@@ -1839,6 +1843,7 @@ stowrc_options() {
   local file=${1-} line lineno tok word rest ch eq skip matched name toks
   STOWRC_OPTIONS=()
   STOWRC_PATHS=0
+  STOWRC_DOTFILES=0
   { [ -f "$file" ] && [ -r "$file" ]; } || return 1
   lineno=0
   skip=0
@@ -1921,6 +1926,7 @@ EOF
           case "$name" in
             "$word"*)
               matched=1
+              [ "$name" != dotfiles ] || STOWRC_DOTFILES=1
               break
               ;;
           esac
@@ -3255,6 +3261,38 @@ obscured_ancestor() {
   done
 }
 
+# The other half of 'shale cannot see whether the path is there', and which's
+# own: zero when a directory on the way from $1 to the path $2 inside it is a
+# symlink that resolves to nothing shale can reach.  A link to nothing and a link
+# into a directory nobody can search are the same two answers here - -L yes and
+# -e no, -e following the link and failing either way - and they are not
+# separable without reading the link and walking what it names.  Under either,
+# every test below that component answers no exactly as the path's absence does.
+#
+# obscured_ancestor is left exactly as it stands rather than widened: it answers
+# for the shape this one does not - a real directory with its search bit off -
+# and build and doctor read it too, where the pair of them is one refusal to
+# search rather than this question.  The one caller runs both.
+#
+# A link that resolves to a file is not this: nothing can be below it, shale can
+# see that, and the note that follows is true of the path.
+unresolvable_ancestor() {
+  local here=$1 rest=$2 component
+  while :; do
+    if [ -L "$here" ] && [ ! -e "$here" ]; then
+      return 0
+    fi
+    case "$rest" in
+      */*)
+        component=${rest%%/*}
+        rest=${rest#*/}
+        ;;
+      *) return 1 ;;
+    esac
+    here=$here/$component
+  done
+}
+
 # How $1 is composed, in WHICH_KIND, and how it is shown, in WHICH_SHOW.  A
 # symlink is a leaf whatever it points at, because the composer treats one that
 # way: calling it a directory here promises a merge build refuses to perform.
@@ -3337,6 +3375,148 @@ report_ignored() {
       lines[${#lines[@]}]="a link an earlier apply made is still at $link, because stow skips an ignored path rather than unstowing it"
       lines[${#lines[@]}]='remove that link by hand: no build or apply removes it'
     fi
+  fi
+  emit ${lines[@]+"${lines[@]}"}
+}
+
+# Non-zero unless some path in the built tree under $1 - relative to $CUR, and ''
+# for the whole of it - is linked at the matching path in $HOME.  That is the
+# whole of what tells a tree an apply has landed from one nothing has ever
+# applied: shale keeps no state, so there is nothing on disk that says when the
+# last apply ran, and stow leaves no mark of its own either.
+#
+# The first hit ends the walk, so an applied tree costs a directory read or two;
+# the whole tree is read only where the answer is 'nothing at all', which is the
+# answer that pays for it.  Both are reached only from the note below, which is
+# already looking at a path that is in the tree and not in $HOME.
+#
+# -ef against the built tree rather than -L at the leaf: a folded directory is
+# one link with real files below it - shale passes --no-folding, so one comes
+# from a stow run that did not - and testing for a link at each leaf would read
+# that whole subtree as unlinked.  A path that no apply ever
+# links - the built list itself, anything either ignore list covers - is counted
+# as unlinked here, which is why the note hedges rather than concluding.
+#
+# A dangling link is the one shape -ef cannot answer for at all, and a tree whose
+# files are all symlinks into nothing is a tree stow links and -ef reads as empty
+# - which would be the note saying nothing is linked with a link from that tree
+# in $HOME.  home_conflict meets the same shape and answers it the same way, with
+# the readlink that link_points_into_the_tree spends; the guard is what keeps
+# that fork off every path, there being at most a handful of them in any $HOME.
+# Its 'cannot say' - no readlink on the machine - answers 'linked' here, which is
+# the hedged line rather than the one that concludes.
+#
+# BUILT_TREE_UNREAD is what keeps 'nothing is linked' off a walk that could not
+# see: a directory that cannot be listed answers every glob with nothing, exactly
+# as an empty one does, and the two are not the same answer to give.  The caller
+# clears it, this being a recursion, and reads it only where the walk found no
+# link at all - a walk that found one has read enough whatever it could not open
+# afterwards.
+BUILT_TREE_UNREAD=0
+built_tree_is_linked() {
+  local rel=$1 here e base srel link
+  here=$CUR${rel:+/$rel}
+  if { [ ! -r "$here" ] || [ ! -x "$here" ]; }; then
+    BUILT_TREE_UNREAD=1
+    return 1
+  fi
+  for e in "$here"/* "$here"/.*; do
+    base=${e##*/}
+    # Dropped by name, as at every glob in this script: bash 3.2 matches '.' and
+    # '..' with "$here"/.* where 5.2's globskipdots does not.
+    case "$base" in
+      . | ..) continue ;;
+    esac
+    # Also where an unmatched glob lands, its literal being at no path.
+    { [ -e "$e" ] || [ -L "$e" ]; } || continue
+    srel=${rel:+$rel/}$base
+    link=$HOME_PREFIX/$srel
+    [ ! "$link" -ef "$e" ] || return 0
+    if [ -L "$link" ] && [ ! -e "$link" ]; then
+      ! link_points_into_the_tree "$link" || return 0
+    fi
+    if [ -d "$e" ] && [ ! -L "$e" ]; then
+      ! built_tree_is_linked "$srel" || return 0
+    fi
+  done
+  return 1
+}
+
+# The fact that $1 reached the built tree and $HOME has nothing at it, on stderr
+# with which's other notes.  The caller has established both halves.
+#
+# This is what is left when nothing above it knows a reason: stow declines a path
+# for reasons of its own that shale cannot enumerate - an --ignore in a resource
+# file, whose values are perl regexps shale will not match; an option shale does
+# not model; a difference between one stow version and the next.  Observing that
+# the path is not linked needs none of that, and is what the reader asked about.
+#
+# What it may not do is claim the apply that would have linked it has run.
+# Nothing here can date the last apply against this build, so the two states are
+# separated only as far as they can be - whether anything at all is linked - and
+# the remedy settles the rest: an apply builds first, so a path still missing
+# after one is a path stow was offered and declined.
+#
+# 'something has linked', never 'an apply has': -ef is true of a link a hand
+# made and of an absolute one pointing at the right file, and stow refuses to
+# write that second shape at all - so what the walk found is a link into the
+# tree, and which of them wrote it is not shale's to say.
+#
+# --dotfiles is where the whole inference stops holding, and the one option in a
+# resource file that has to be looked for by name: it links 'dot-zshrc' as
+# '.zshrc', so the path this note is about can be in $HOME under another name,
+# nothing in the tree matches the path the walk compares against, and 'still
+# missing after an apply' stops meaning declined.  The option name is read, never
+# a pattern - which is the line #96 drew - and where it is set the two lines that
+# reason give way to two that say shale cannot follow the rename.
+report_unlinked() {
+  local rel=$1 lines entry files renamed named i
+  # Both files, in doctor's order and spelt as doctor spells them - './.stowrc'
+  # is read from the directory apply runs stow in, which is $DOTFILES.  Read
+  # before the lines below, which turn on what is in them.
+  files=()
+  renamed=0
+  named=0
+  for entry in "${HOME-}/.stowrc" "$DOTFILES/.stowrc"; do
+    { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
+    files[${#files[@]}]=$entry
+    if stowrc_options "$entry"; then
+      named=1
+      [ "$STOWRC_DOTFILES" -eq 0 ] || renamed=1
+    fi
+  done
+  lines=("note: '$rel' is in the built tree at $CUR/$rel, and nothing is at $HOME_PREFIX/$rel")
+  if [ "$renamed" -eq 1 ]; then
+    lines[${#lines[@]}]='a stow resource file sets --dotfiles, which links a name beginning dot- under one beginning a full stop'
+    lines[${#lines[@]}]="so this path may be in ${HOME-} under a name shale cannot work out, and shale does not translate one"
+  else
+    BUILT_TREE_UNREAD=0
+    if built_tree_is_linked ''; then
+      lines[${#lines[@]}]='something has linked other paths from that tree, though not necessarily since this one reached it'
+    elif [ "$BUILT_TREE_UNREAD" -eq 1 ]; then
+      # Neither of the two below, and for the reason the whole note exists:
+      # where shale could not look it does not conclude.  A tree it cannot read
+      # is doctor's finding to name, and the build an apply runs replaces it.
+      lines[${#lines[@]}]="shale could not read all of $CUR, so it cannot tell whether anything from that tree is linked"
+    else
+      lines[${#lines[@]}]="no path in that tree is linked in ${HOME-} at all, which is what a build nobody has applied looks like"
+    fi
+    lines[${#lines[@]}]="run 'shale apply': a path still missing after one is a path stow declined to link"
+  fi
+  # Named where one exists, and no pattern in it read: stow's own two resource
+  # files are the reachable cause shale can point at without interpreting
+  # anything, and doctor is where their options are listed.  The line sending a
+  # reader to that list is printed only where there is one to read: an empty
+  # file, a directory and a dangling link are all files stow reads nothing out
+  # of, and doctor names no option for any of them either.
+  if [ "${#files[@]}" -gt 0 ]; then
+    i=0
+    while [ "$i" -lt "${#files[@]}" ]; do
+      lines[${#lines[@]}]="stow reads ${files[$i]} as well, and shale does not act on what is in it"
+      i=$((i + 1))
+    done
+    [ "$named" -eq 0 ] ||
+      lines[${#lines[@]}]='shale doctor names the options such a file sets, any of which can keep this path out of an apply'
   fi
   emit ${lines[@]+"${lines[@]}"}
 }
@@ -4212,6 +4392,7 @@ cmd_doctor() {
 # layers say, so it is the same before the first build as after it.
 cmd_which() {
   local arg=${1-} rel path i n lower upper keyword column width obscured ignored
+  local explained
 
   parse_config || exit 1
   # Refused rather than answered around: a pattern shale will not read is one it
@@ -4341,15 +4522,28 @@ cmd_which() {
   # look at.  Not conditional on the ignore answer either - an ancestor holding
   # a newline takes the list's rows off this path and leaves the composer's
   # skip exactly where it was.
+  #
+  # Each of the five below says why this path is not in $HOME, and each records
+  # that it did: the residual note at the end is the one for a path none of them
+  # can account for, and two notes making the one point read as two problems.
+  explained=0
   case "/$rel/" in
     */.git/*)
       emit "note: no build composes a .git — shale skips one at every depth, so this path never reaches $CUR"
+      explained=1
       ;;
   esac
-  [ "$ignored" -eq 0 ] || report_ignored "$rel"
+  if [ "$ignored" -ne 0 ]; then
+    report_ignored "$rel"
+    explained=1
+  fi
 
   if [ "$upper" -ge 0 ]; then
     emit "note: 'build' would fail here — $rel is a ${WHICH_KINDS[$lower]} in '${WHICH_NAMES[$lower]}' and a ${WHICH_KINDS[$upper]} in '${WHICH_NAMES[$upper]}'"
+    # A tree built before the collision arrived can hold this path with nothing
+    # at it in $HOME, and the residual note's remedy is an apply - which builds
+    # first, dies here, and leaves the path exactly where it was.
+    explained=1
   fi
   # Second, and after the pair above rather than instead of it: build reaches
   # the conflict first and dies there, so the note in build's order is the one
@@ -4359,11 +4553,45 @@ cmd_which() {
   # layer does.
   if [ "$rel" = .stow-local-ignore ]; then
     emit "note: 'build' would fail here — shale writes $CUR/.stow-local-ignore itself, and no build accepts a layer providing one"
+    # The tree holds that path after any earlier build, and no apply has ever
+    # linked it: stow reads it and leaves it where it is.  Accounted for by the
+    # line above, whose remedy is the layer rather than another apply.
+    explained=1
   fi
   # At any depth, which is where the composer drops it: the table above names
   # the layer holding this file truthfully, and no build puts it in the tree.
   if [ "${rel##*/}" = "$IGNORE_NAME" ]; then
     emit "note: no build composes a $IGNORE_NAME — shale reads the one at the top of a clone root and copies none of them"
+    # Accounted for, like the three above: only a hand puts one of these in the
+    # built tree, and the line above says why no build did.
+    explained=1
+  fi
+
+  # Last, and the residual: everything above names a reason shale knows, and
+  # this is the fact that is left when it knows none - the path is in the built
+  # tree and $HOME has nothing at it.  It is what happened rather than a model of
+  # what stow does, so it covers an --ignore in a resource file, an option shale
+  # does not model and a difference between stow versions alike.
+  #
+  # -e and -L at both ends, neither implying the other.  A layer's symlink into
+  # nothing is composed and linked like any other file - checked against stow
+  # 2.3.1 and 2.4.1 - and the link an apply leaves for it in $HOME is a path -e
+  # answers no for: calling that file missing while it sits in $HOME is the one
+  # wrong answer this note must not give.  A folded directory is the same shape
+  # from the other side, and is why the test is against whatever is at the path
+  # in $HOME rather than for a link at it - every file under a folded directory
+  # answers -e through the one link above it.
+  #
+  # Nothing is claimed about a path shale cannot look at, and there are two such
+  # directories above it in $HOME: one that cannot be searched, and one that is a
+  # link resolving to nothing shale can reach.  Every test below either answers
+  # no, which is what the file not being there answers too.
+  if [ "$explained" -eq 0 ] && [ -n "${HOME-}" ] &&
+    { [ -e "$CUR/$rel" ] || [ -L "$CUR/$rel" ]; } &&
+    [ ! -e "$HOME_PREFIX/$rel" ] && [ ! -L "$HOME_PREFIX/$rel" ] &&
+    ! obscured_ancestor "$HOME_PREFIX" "$rel" &&
+    ! unresolvable_ancestor "$HOME_PREFIX" "$rel"; then
+    report_unlinked "$rel"
   fi
 }
 

@@ -10477,8 +10477,11 @@ test_which_every_spelling_of_the_path_agrees() {
   conf 'base personal/base' 'local local'
   mklayer personal/base .config/x
   mklayer local .config/x
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
+  # An apply rather than a build, every spelling below being asserted silent:
+  # nothing is linked in $HOME until one has run, and the note which prints about
+  # an unapplied tree would then arrive on all seven answers alike.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
   run_shale which .config/x
   assert_status 0 "$shale_status" 'the relative spelling'
   expected=$shale_out
@@ -11224,8 +11227,11 @@ test_which_a_dot_git_says_no_build_composes_one() {
   mklayer common/base .config/nvim/.git/HEAD
   mklayer common/base .gitconfig
   mklayer common/base .zshrc
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
+  # An apply rather than a build: the near miss below is asserted silent, and
+  # every path in a tree no apply has landed is unlinked - which says so in a
+  # note of its own, which is not what this case is about.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
   assert_missing "$HOME/.dotfiles/current/.git" 'the built tree'
   assert_missing "$HOME/.dotfiles/current/.config/nvim/.git" 'the built tree'
   run_shale which .git/config
@@ -11281,6 +11287,451 @@ test_which_stows_default_list_table_covers_the_list_build_writes() {
   unjoinable=$(printf '%s\n' "$rows" | sed -e "s/^  '[^']*' '//" -e "s/'\$//" |
     grep -c '[|()]')
   assert_eq 0 "$unjoinable" 'table globs holding a character the alternation would take'
+}
+
+# The residual answer, and the one that needs no model of stow at all: a path
+# that is in the built tree with nothing at it in $HOME did not get linked,
+# whatever the cause.  A ~/.stowrc's --ignore is a cause shale cannot name - its
+# values are perl regexps, and no regexp shale did not write reaches a matcher -
+# so nothing here matches anything.  which reads the two trees and reports what
+# it finds.
+#
+# Both supported stows drop the file and exit 0 saying nothing: checked against
+# 2.3.1 and 2.4.1, which is what makes silence here a defect on both rather than
+# a version difference.  The resource file is named because it exists, which is
+# a fact shale can see without reading a line of it.
+test_which_a_path_a_stowrc_dropped_says_it_reached_the_tree() {
+  conf 'base common/base'
+  mklayer common/base secret
+  mklayer common/base .zshrc
+  sandbox_write "$HOME" .stowrc '--ignore=secret'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply stderr'
+  assert_missing "$HOME/secret"
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  run_shale which secret
+  assert_status 0 "$shale_status"
+  assert_eq "winner    base  $HOME/.dotfiles/common/base/secret" "$shale_out" 'stdout'
+  assert_eq "shale: note: 'secret' is in the built tree at $HOME/.dotfiles/current/secret, and nothing is at $HOME/secret
+shale:   something has linked other paths from that tree, though not necessarily since this one reached it
+shale:   run 'shale apply': a path still missing after one is a path stow declined to link
+shale:   stow reads $HOME/.stowrc as well, and shale does not act on what is in it
+shale:   shale doctor names the options such a file sets, any of which can keep this path out of an apply" \
+    "$shale_err" 'stderr'
+  # The control beside it, and the whole of what keeps this from being a line
+  # every answer carries: the file that was linked gets nothing.
+  run_shale which .zshrc
+  assert_status 0 "$shale_status" 'the linked path'
+  assert_empty "$shale_err" 'the linked path stderr'
+}
+
+# The other resource file, and a pattern that takes the whole tree with it: the
+# note has to hold where *nothing* is linked as well, and it may not then claim
+# an apply declined this path - which is the one thing it cannot see.
+test_which_a_stowrc_that_drops_everything_is_not_read_as_a_missing_apply() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  sandbox_write "$HOME/.dotfiles" .stowrc '--ignore=.*'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_missing "$HOME/.zshrc"
+  run_shale which .zshrc
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: note: '.zshrc' is in the built tree at $HOME/.dotfiles/current/.zshrc, and nothing is at $HOME/.zshrc" \
+    'stderr'
+  assert_contains "$shale_err" \
+    "shale:   stow reads $HOME/.dotfiles/.stowrc as well, and shale does not act on what is in it" 'stderr'
+  # Nothing is linked, so this reads as an unapplied tree and says only that.
+  assert_contains "$shale_err" 'shale:   no path in that tree is linked in' 'stderr'
+  assert_not_contains "$shale_err" 'something has linked other paths' 'stderr'
+}
+
+# The shape -ef cannot answer for, from the other side of the same walk: an apply
+# writes an ordinary link for a layer's symlink into nothing, and that link
+# dangles.  A tree whose files are all of that shape is one -ef reads as having
+# nothing linked, and the note would then say so with a link from that tree
+# sitting in $HOME.  home_conflict meets it on its own walk and spends the same
+# readlink on it.
+test_which_a_tree_linked_only_by_a_dangling_link_is_not_called_unapplied() {
+  conf 'base common/base'
+  mklayer common/base secret
+  sandbox_mkdir "$HOME/.dotfiles/common/base"
+  sandbox_leaf "$sandbox_dir" .dangling new
+  ln -s nowhere-at-all "$sandbox_path" || fail 'could not create the symlink'
+  sandbox_write "$HOME" .stowrc '--ignore=secret'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  # The whole of what that apply linked, and it resolves to nothing.
+  assert_dangling_symlink "$HOME/.dangling" 'the only link the apply wrote'
+  assert_missing "$HOME/secret"
+  run_shale which secret
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_err" \
+    'shale:   something has linked other paths from that tree, though not necessarily since this one reached it' \
+    'stderr'
+  assert_not_contains "$shale_err" 'no path in that tree is linked' 'stderr'
+}
+
+# --dotfiles is the one option a resource file can set that decides where a path
+# lands rather than whether it lands: stow links 'dot-zshrc' as '.zshrc', so the
+# file is in $HOME under a name shale did not compose, nothing in the tree
+# matches the path the walk compares against, and 'a path still missing after an
+# apply is one stow declined' would be said of a path that is not missing at all.
+# Both versions do it - 2.3.1's --help does not list the option and Stow.pm
+# implements it - so the note stops reasoning and says what it cannot follow.
+#
+# The option's name is read and no pattern in the file is, which is the line #96
+# drew: an --ignore value is a perl regexp and stays unread.
+test_which_a_stowrc_setting_dotfiles_is_not_read_as_a_declined_path() {
+  conf 'base common/base'
+  mklayer common/base dot-zshrc
+  sandbox_write "$HOME" .stowrc '--dotfiles'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/dot-zshrc"
+  assert_missing "$HOME/dot-zshrc"
+  run_shale which dot-zshrc
+  assert_status 0 "$shale_status"
+  assert_eq "shale: note: 'dot-zshrc' is in the built tree at $HOME/.dotfiles/current/dot-zshrc, and nothing is at $HOME/dot-zshrc
+shale:   a stow resource file sets --dotfiles, which links a name beginning dot- under one beginning a full stop
+shale:   so this path may be in $HOME under a name shale cannot work out, and shale does not translate one
+shale:   stow reads $HOME/.stowrc as well, and shale does not act on what is in it
+shale:   shale doctor names the options such a file sets, any of which can keep this path out of an apply" \
+    "$shale_err" 'stderr'
+  # Neither of the two lines that reason from the walk, both of which are false
+  # of a path stow renamed.
+  assert_not_contains "$shale_err" 'stow declined to link' 'stderr'
+  assert_not_contains "$shale_err" 'nobody has applied' 'stderr'
+  assert_not_contains "$shale_err" 'something has linked' 'stderr'
+  # An unambiguous abbreviation is the same option to stow, which parses its
+  # resource file with Getopt::Long: '--dotf' applies alike on 2.3.1 and 2.4.1.
+  sandbox_write "$HOME" .stowrc '--dotf'
+  run_shale which dot-zshrc
+  assert_status 0 "$shale_status" 'the abbreviation'
+  assert_contains "$shale_err" 'shale:   a stow resource file sets --dotfiles' \
+    'the abbreviation stderr'
+  # A resource file setting something else leaves the reasoning where it was -
+  # and on this tree it reasons wrongly, which is the whole of why the option is
+  # read: the one file there is linked, at a name shale did not compose, and the
+  # walk that compares $HOME against the tree path by path can only miss it.
+  sandbox_write "$HOME" .stowrc '--ignore=nothing-of-the-kind'
+  run_shale which dot-zshrc
+  assert_status 0 "$shale_status" 'without the option'
+  assert_not_contains "$shale_err" '--dotfiles' 'stderr without the option'
+  assert_contains "$shale_err" "shale:   run 'shale apply': a path still missing after one is a path stow declined to link" \
+    'stderr without the option'
+  # A file stow reads no option out of is still named, because stow reads it -
+  # and the line sending a reader to the list doctor prints is not, because
+  # doctor names no option for it either.
+  sandbox_write "$HOME" .stowrc
+  run_shale which dot-zshrc
+  assert_status 0 "$shale_status" 'the empty resource file'
+  assert_contains "$shale_err" "shale:   stow reads $HOME/.stowrc as well" \
+    'the empty resource file stderr'
+  assert_not_contains "$shale_err" 'shale doctor names the options' \
+    'the empty resource file stderr'
+}
+
+# The state the note must never claim: a tree nobody has applied has every path
+# in it unlinked, and 'stow declined this one' would be false of all of them.
+# Only what is on disk is stated, and the remedy is the apply that settles it -
+# an apply builds first, so a path missing after one was offered to stow.
+test_which_a_built_tree_no_apply_has_landed_says_which_it_is() {
+  local expected home home_slash
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale which .zshrc
+  assert_status 0 "$shale_status"
+  expected="shale: note: '.zshrc' is in the built tree at $HOME/.dotfiles/current/.zshrc, and nothing is at $HOME/.zshrc
+shale:   no path in that tree is linked in $HOME at all, which is what a build nobody has applied looks like
+shale:   run 'shale apply': a path still missing after one is a path stow declined to link"
+  assert_eq "$expected" "$shale_err" 'stderr'
+  # The path in the first line is a join and the directory in the second is
+  # printed on its own, which are the two spellings of $HOME shale keeps apart.
+  # They name one directory whatever the environment spells it as, shale
+  # stripping a trailing slash from HOME before either is built.
+  home=$HOME
+  home_slash=$home///
+  HOME=$home_slash
+  run_shale which .zshrc
+  HOME=$home
+  assert_status 0 "$shale_status" 'under a trailing slash'
+  assert_eq "$expected" "$shale_err" 'stderr under a trailing slash'
+  # And the apply the note prescribes ends it.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  run_shale which .zshrc
+  assert_status 0 "$shale_status" 'after the apply'
+  assert_empty "$shale_err" 'stderr after the apply'
+}
+
+# A build newer than the last apply, which is the state shale cannot tell from a
+# path stow declined: nothing on disk dates one against the other.  So the note
+# says an apply has run and stops there, and the wording that would have been
+# wrong here is the one it does not use.
+test_which_a_path_newer_than_the_apply_is_not_called_declined() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the first apply'
+  mklayer common/base .vimrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale which .vimrc
+  assert_status 0 "$shale_status"
+  assert_eq "shale: note: '.vimrc' is in the built tree at $HOME/.dotfiles/current/.vimrc, and nothing is at $HOME/.vimrc
+shale:   something has linked other paths from that tree, though not necessarily since this one reached it
+shale:   run 'shale apply': a path still missing after one is a path stow declined to link" \
+    "$shale_err" 'stderr'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the second apply'
+  run_shale which .vimrc
+  assert_status 0 "$shale_status" 'after the second apply'
+  assert_empty "$shale_err" 'stderr after the second apply'
+}
+
+# The silence around all of it.  A note saying a file is not in $HOME while it
+# sits there is worse than no note at all, so every shape an apply leaves is
+# asserted silent: a file at the top, one inside a directory, a name with a
+# space in it, the directory itself, and a relative dangling symlink - which is
+# the shape that answers -e no while the link is plainly there, and is linked by
+# both 2.3.1 and 2.4.1.
+#
+# Twice over, with and without an ignore file: the patterns are read on every
+# which, and a matcher that fell through to the wrong answer would show here.
+test_which_says_nothing_about_a_path_an_apply_linked() {
+  local rels rel round
+  rels=('.zshrc' '.config/nvim/init.lua' 'bin/tool' 'a b/c d' 'notes.txt')
+  conf 'base common/base'
+  for rel in ${rels[@]+"${rels[@]}"}; do
+    mklayer common/base "$rel"
+  done
+  sandbox_mkdir "$HOME/.dotfiles/common/base"
+  sandbox_leaf "$sandbox_dir" .dangling new
+  ln -s nowhere-at-all "$sandbox_path" || fail 'could not create the symlink'
+  for round in bare ignore; do
+    [ "$round" = bare ] || mkignore common '*.swp'
+    run_shale apply
+    assert_status 0 "$shale_status" "the $round apply"
+    assert_empty "$shale_err" "the $round apply stderr"
+    for rel in ${rels[@]+"${rels[@]}"}; do
+      assert_symlink_to "$HOME/$rel" "$HOME/.dotfiles/current/$rel" "the $round link for '$rel'"
+      run_shale which "$rel"
+      assert_status 0 "$shale_status" "the $round which '$rel'"
+      assert_empty "$shale_err" "the $round which '$rel' stderr"
+    done
+    # The directories the files above are in, which stow makes as directories of
+    # their own under --no-folding rather than linking.
+    for rel in .config .config/nvim bin 'a b'; do
+      assert_real_dir "$HOME/$rel" "the $round directory '$rel'"
+      run_shale which "$rel"
+      assert_status 0 "$shale_status" "the $round which '$rel'"
+      assert_empty "$shale_err" "the $round which '$rel' stderr"
+    done
+    # -e is false for this one and -L is true, and the file is in $HOME.
+    [ ! -e "$HOME/.dangling" ] || fail 'the dangling link resolves'
+    [ -L "$HOME/.dangling" ] || fail 'no link at the dangling path'
+    run_shale which .dangling
+    assert_status 0 "$shale_status" "the $round which '.dangling'"
+    assert_empty "$shale_err" "the $round which '.dangling' stderr"
+  done
+}
+
+# Two more shapes $HOME can hold at the path, neither of them this note's
+# business: a file of the reader's own, which is a conflict doctor reports, and a
+# link into somewhere else.  Both are a path with something at it, and calling
+# either of them missing is the false positive.
+test_which_says_nothing_where_home_holds_the_path() {
+  local elsewhere
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mklayer common/base .vimrc
+  sandbox_write "$HOME" .vimrc 'mine, not a layer copy'
+  run_shale apply
+  # Both versions refuse the whole apply over it, in shale's own words.
+  assert_status 1 "$shale_status" 'the apply over a real file'
+  assert_contains "$shale_err" "shale: stow failed; nothing in $HOME was relinked" \
+    'the apply stderr'
+  run_shale which .vimrc
+  assert_status 0 "$shale_status" 'the real file'
+  assert_empty "$shale_err" 'the real file stderr'
+  # A link, and pointing outside the built tree.
+  sandbox_write "$CASE_DIR/elsewhere" .vimrc 'somewhere else'
+  elsewhere=$sandbox_path
+  sandbox_target "$HOME" .vimrc
+  rm -f "$sandbox_path" || fail 'could not remove the file'
+  sandbox_leaf "$HOME" .vimrc new
+  ln -s "$elsewhere" "$sandbox_path" || fail 'could not create the symlink'
+  run_shale which .vimrc
+  assert_status 0 "$shale_status" 'the foreign link'
+  assert_empty "$shale_err" 'the foreign link stderr'
+}
+
+# The folded directory on its own, because it is the one shape that has nothing
+# at all at the leaf and is still a file in $HOME: ~/.config is one link into
+# the built tree and every file below it is reached through it.  shale passes
+# --no-folding, so no apply of its own makes one - a stow run before shale, or
+# by hand, is where it comes from, and it is here as a link made by hand.
+test_which_says_nothing_about_a_path_below_a_folded_directory() {
+  conf 'base common/base'
+  mklayer common/base .config/nvim/init.lua
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_leaf "$HOME" .config new
+  ln -s .dotfiles/current/.config "$sandbox_path" ||
+    fail 'could not create the folded link'
+  # Nothing is at the leaf, and the file is in $HOME through the link above it.
+  [ ! -L "$HOME/.config/nvim/init.lua" ] || fail 'the leaf is a link of its own'
+  [ -e "$HOME/.config/nvim/init.lua" ] || fail 'the folded file is not readable'
+  run_shale which .config/nvim/init.lua
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+}
+
+# The same rule on the other side of the note: the walk that says whether
+# anything from the tree is linked may not answer 'nothing' for a tree it could
+# not read.  A directory that cannot be listed answers every glob with nothing,
+# exactly as an empty one does, and 'no apply has landed' would be false of a
+# $HOME full of that tree's links.
+test_which_a_built_tree_it_cannot_read_is_never_called_unapplied() {
+  skip_if_root
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mklayer common/base .vimrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  # One link gone by hand is what brings the note out; the other stays, so the
+  # tree plainly is applied and only the walk cannot see it.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.vimrc" || fail 'could not remove the link'
+  # Searchable and unlistable: the path itself is still testable, and the glob
+  # that would find the link beside it returns nothing.
+  chmod 0300 "$HOME/.dotfiles/current" || fail 'could not remove the read bit'
+  run_shale which .vimrc
+  chmod 0755 "$HOME/.dotfiles/current" || fail 'could not restore the mode'
+  assert_status 0 "$shale_status"
+  assert_eq "shale: note: '.vimrc' is in the built tree at $HOME/.dotfiles/current/.vimrc, and nothing is at $HOME/.vimrc
+shale:   shale could not read all of $HOME/.dotfiles/current, so it cannot tell whether anything from that tree is linked
+shale:   run 'shale apply': a path still missing after one is a path stow declined to link" \
+    "$shale_err" 'stderr'
+  # And with the tree readable again, the same path gets the answer the walk can
+  # stand behind.
+  run_shale which .vimrc
+  assert_status 0 "$shale_status" 'once it can be read'
+  assert_contains "$shale_err" 'shale:   something has linked other paths from that tree' \
+    'stderr once it can be read'
+}
+
+# A path shale cannot look at is not a path shale reports on.  Three directories
+# above it answer 'no' to every test below them exactly as the file's absence
+# does, and none of the three is distinguishable from it: one whose search bit is
+# off, one that is a link into a directory whose search bit is off, and one that
+# is a link to nothing.  The last two are one answer here - -L yes and -e no,
+# which is what a link shale cannot follow gives whichever it is.
+test_which_says_nothing_where_it_cannot_look_in_home() {
+  local outside
+  skip_if_root
+  conf 'base common/base'
+  mklayer common/base .config/x
+  mklayer common/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  chmod 0000 "$HOME/.config" || fail 'could not remove the search bit'
+  run_shale which .config/x
+  chmod 0755 "$HOME/.config" || fail 'could not restore the mode'
+  assert_status 0 "$shale_status"
+  assert_eq "winner    base  $HOME/.dotfiles/common/base/.config/x" "$shale_out" 'stdout'
+  assert_empty "$shale_err" 'stderr'
+  # A link in its place, pointing into a directory nobody can search: -d follows
+  # it and fails, so the search-bit test above never sees this one.
+  sandbox_mkdir "$CASE_DIR/outside/inner"
+  outside=$sandbox_dir
+  sandbox_target "$HOME" .config
+  rm -rf "$sandbox_path" || fail 'could not remove the directory'
+  sandbox_leaf "$HOME" .config new
+  ln -s "$outside" "$sandbox_path" || fail 'could not create the symlink'
+  chmod 0000 "${outside%/*}" || fail 'could not remove the search bit'
+  run_shale which .config/x
+  chmod 0755 "${outside%/*}" || fail 'could not restore the mode'
+  assert_status 0 "$shale_status" 'the unsearchable link target'
+  assert_empty "$shale_err" 'the unsearchable link target stderr'
+  # And the same two answers from a link to nothing at all, which is the one
+  # shape that needs no permissions to make.  sandbox_leaf will not hand back a
+  # path that is a symlink, which this one is, so the directory is resolved and
+  # the leaf removed from it.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.config" || fail 'could not remove the link'
+  sandbox_leaf "$HOME" .config new
+  ln -s nowhere-at-all "$sandbox_path" || fail 'could not create the symlink'
+  run_shale which .config/x
+  assert_status 0 "$shale_status" 'the link to nothing'
+  assert_empty "$shale_err" 'the link to nothing stderr'
+  # The other side of it: once that ancestor resolves to a directory shale can
+  # search, the path is one shale can speak for again.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.config" || fail 'could not remove the link'
+  sandbox_leaf "$HOME" .config new
+  ln -s "$outside" "$sandbox_path" || fail 'could not create the symlink'
+  run_shale which .config/x
+  assert_status 0 "$shale_status" 'the readable link target'
+  assert_contains "$shale_err" "shale: note: '.config/x' is in the built tree at" \
+    'the readable link target stderr'
+}
+
+# One note per path.  Every note above this one names a reason a path is not in
+# $HOME, and the residual fact is true of all of them - so a path with a reason
+# gets the reason, and the fact is left for the paths shale has none for.
+test_which_a_path_with_a_reason_gets_the_reason_and_not_the_fact() {
+  local rel
+  conf 'base common/base'
+  mkignore common '.DS_Store'
+  mklayer common/base .DS_Store
+  mklayer common/base 'notes~'
+  mklayer common/base .git/config
+  mklayer common/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  for rel in .DS_Store 'notes~' .git/config; do
+    assert_missing "$HOME/$rel" "'$rel' in \$HOME"
+    run_shale which "$rel"
+    assert_status 0 "$shale_status" "which '$rel'"
+    assert_contains "$shale_err" 'shale: note: ' "which '$rel' stderr"
+    assert_not_contains "$shale_err" 'is in the built tree at' "which '$rel' stderr"
+  done
+  # The file shale writes itself, which no apply has ever linked and which a
+  # layer providing one is told about in build's words instead.
+  mklayer common/base .stow-local-ignore 'a layer may not provide this'
+  run_shale which .stow-local-ignore
+  assert_status 0 "$shale_status" 'the built list'
+  assert_contains "$shale_err" "shale: note: 'build' would fail here" 'the built list stderr'
+  assert_not_contains "$shale_err" 'is in the built tree at' 'the built list stderr'
+  # The ignore file shale reads, which no build composes either.  Only a hand
+  # puts one in the built tree, so one is put there by hand: the reason is the
+  # note above, and the fact must not arrive under it saying the same thing.
+  mklayer common/base .shale-ignore 'read by nothing'
+  sandbox_write "$HOME/.dotfiles/current" .shale-ignore 'planted, not composed'
+  run_shale which .shale-ignore
+  assert_status 0 "$shale_status" 'the ignore file'
+  assert_contains "$shale_err" 'shale: note: no build composes a .shale-ignore' \
+    'the ignore file stderr'
+  assert_not_contains "$shale_err" 'is in the built tree at' 'the ignore file stderr'
+  # The other 'build would fail here', which is the collision between two layers:
+  # the tree still holds the copy an earlier build composed, the link that apply
+  # made is gone from $HOME, and the residual note's remedy is an apply that dies
+  # on the collision without touching the path.
+  rm -f "$HOME/.zshrc" || fail 'could not remove the link'
+  conf 'base common/base' 'local local'
+  mklayer local .zshrc/inside 'a directory where base has a file'
+  run_shale which .zshrc
+  assert_status 0 "$shale_status" 'the collision'
+  assert_contains "$shale_err" "shale: note: 'build' would fail here — .zshrc is a file in 'base' and a directory in 'local'" \
+    'the collision stderr'
+  assert_not_contains "$shale_err" 'is in the built tree at' 'the collision stderr'
 }
 
 # A layer shipping the file shale reads: the table names the layer holding it
@@ -11922,6 +12373,7 @@ ${h}=\$trip/root/home${nl}\
 ${h}=\$trip/root/link${nl}\
 ${h}=\$trip/root/sub/../../outside${nl}\
 ${h}=\$home_link${nl}\
+${h}=\$home${nl}\
 ${h}=\$home_ok${nl}\
 ${h}=\$home_rel${nl}\
 ${h}=\$CASE_DIR/unmarked${nl}"
