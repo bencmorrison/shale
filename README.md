@@ -280,6 +280,28 @@ $ shale which .vimrc
 shale: no layer provides '.vimrc'
 ```
 
+`which` also answers the question that brings most people to it — why a file it names is not in
+`$HOME`. Where shale knows the reason it gives it: an ignore pattern of yours, stow's own default
+list, a `.git` no build composes. Where it does not, it says what it can see, which is that the file
+is in `current/` and nothing is at that path in your home directory:
+
+```
+$ shale which secret
+winner    base  /home/you/.dotfiles/personal/base/secret
+shale: note: 'secret' is in the built tree at /home/you/.dotfiles/current/secret, and nothing is at /home/you/secret
+shale:   something has linked other paths from that tree, though not necessarily since this one reached it
+shale:   run 'shale apply': a path still missing after one is a path stow declined to link
+shale:   stow reads /home/you/.stowrc as well, and shale does not act on what is in it
+shale:   shale doctor names the options such a file sets, any of which can keep this path out of an apply
+```
+
+That covers every cause at once: a `--ignore` in a stow resource file, an option shale does not
+model, a stow version that behaves differently. Run the apply it names — an apply builds first, so a
+file still missing after one is a file stow was offered and declined. A resource file setting
+`--dotfiles` is the one exception shale names rather than reasons about: stow links `dot-zshrc` as
+`.zshrc`, so shale says it cannot follow the rename and stops there. A path that is in `$HOME` gets
+no such note, whether it is a link into `current/`, a file of your own, or a link somewhere else.
+
 ## When two layers disagree about a path
 
 A file replaces a file and a directory merges into a directory, but neither may replace the other.
