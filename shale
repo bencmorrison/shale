@@ -974,9 +974,15 @@ path_is_ignored() {
 # test_which_stows_default_list_table_covers_the_list_build_writes is what holds
 # the two together, in both directions.
 #
-# stow's own '^/\.stow-local-ignore$' is not a row.  It is not in the file -
-# stow adds it to whatever the file holds - and which answers for that path in
-# words of its own already, no layer being allowed to provide one.
+# stow's own '^/\.stow-local-ignore$' is not a row, because a row here is
+# compared with the file cmd_build writes and this entry is not in it: stow adds
+# it to whatever the file holds.  home_conflict carries an arm of its own for it
+# instead.  which says nothing about it, which is right for the name itself - no
+# build accepts a layer providing one, and which says that instead - and is a
+# gap for '.stow-local-ignore' with a trailing newline, which composes, which
+# stow's '$' then covers, and which no apply links.  Naming that one wants
+# wording this table cannot supply, every line report_ignored prints about these
+# rows pointing at a file entry that is not there.
 STOW_IGNORE_LIST=(
   'RCS' 'RCS'
   '.+,v' '?*,v'
@@ -996,17 +1002,60 @@ STOW_IGNORE_LIST=(
   '^/COPYING' '/COPYING'
 )
 
-# The rows of that table matching a path, as indexes of its regexp column.
-STOW_IGNORED_BY=()
-
-# Fills STOW_IGNORED_BY for $1, and is non-zero unless it filled it.  Separate
-# from path_is_ignored rather than folded into it because the report tells the
-# two apart: an ignore file's pattern names a file and a line to edit, and one
-# of these has neither.
+# That table's glob column as two extglob alternations - the anchored rows and
+# the segment rows apart, because the first component is the whole of what an
+# anchored row can match.  One 'case' against one of these answers what a loop
+# over the table answers, and answers it in a fraction of the time: doctor tests
+# every composed path against this list twice over, and a walk of sixteen rows
+# per path is what made it four times slower in #104.
 #
-# Byte locale for path_is_ignored's reasons, and never nested inside it: the two
-# share one saved LC_ALL, and the one caller that wants both answers runs them
-# one after the other.
+# Derived here rather than written out, and this is the point of it.  These
+# thirteen globs stood as a hand-written 'case' in home_conflict as well until
+# #108, where the copy that had never been given the newline rules below made
+# doctor pass a setup apply then refused.  A copy cannot be kept correct by
+# saying it must be; there is one list, and everything that matches against it
+# reads it from here.
+STOW_TOP_ALT=
+STOW_SEG_ALT=
+derive_stow_alternations() {
+  local i glob
+  STOW_TOP_ALT=
+  STOW_SEG_ALT=
+  i=0
+  while [ "$i" -lt "${#STOW_IGNORE_LIST[@]}" ]; do
+    glob=${STOW_IGNORE_LIST[$((i + 1))]}
+    case "$glob" in
+      /*) STOW_TOP_ALT="${STOW_TOP_ALT:+$STOW_TOP_ALT|}${glob#/}" ;;
+      *) STOW_SEG_ALT="${STOW_SEG_ALT:+$STOW_SEG_ALT|}$glob" ;;
+    esac
+    i=$((i + 2))
+  done
+  # A pattern that arrives by expansion is never quote-processed, so the '#' of
+  # '#*#' and '.#?*' is a literal here where it would open a comment if these
+  # were written out as case arms.  No entry holds a '|', a '(' or a ')', which
+  # is what lets them be joined at all; the shape test in
+  # test_which_stows_default_list_table_covers_the_list_build_writes is what
+  # keeps that true of the next row somebody adds.
+  STOW_TOP_ALT="@($STOW_TOP_ALT)"
+  STOW_SEG_ALT="@($STOW_SEG_ALT)"
+}
+derive_stow_alternations
+
+# Whether extglob was already on when shale started.  stow_default_covers turns
+# it on for the length of one 'case' and must leave the shell as it found it:
+# BASHOPTS is inheritable, and shale's own matching of an ignore file's patterns
+# is written for the ordinary meaning of '?(' and '!(' rather than extglob's.
+# Read once, because 'shopt -q' is a fork-free builtin but not a free one, and
+# this is consulted on every composed path.
+EXTGLOB_HAD=0
+if shopt -q extglob; then
+  EXTGLOB_HAD=1
+fi
+
+# Non-zero unless stow's default list covers $1, a path relative to the top of
+# the tree.  The same question path_is_stow_ignored answers, without saying
+# which rows answered it - which is all the two doctor walks need, and they run
+# it once per composed path.
 #
 # Three things upstream's regexps do that the globs beside them do not, all
 # three measured against stow 2.3.1 and 2.4.1.  All three are a newline in a
@@ -1024,10 +1073,10 @@ STOW_IGNORED_BY=()
 # rather than as a second pattern.
 #
 # A newline inside a name is linked by stow and would be called ignored here:
-# 'a\nb~' is linked by both versions.  A row whose glob holds a wildcard is
-# therefore refused outright for a component that still holds a newline once
-# that trailing one is off.  The rows with no wildcard are literals, which
-# cannot diverge that way.
+# 'a\nb~' is linked by both versions.  A component that still holds one once
+# that trailing newline is off is therefore refused outright - a wildcard row
+# would match it where perl's '.' cannot, and a literal row cannot match a name
+# holding a newline at all.
 #
 # A newline in an *ancestor* component takes every segment row with it, literals
 # included, and this is the one that is not about the pattern at all.  Stow does
@@ -1040,10 +1089,84 @@ STOW_IGNORED_BY=()
 # match a segment row, whatever that component is, and the descent stops there.
 # The anchored rows are unaffected: they go through stow's path regexp against
 # the whole of '/$target', not through that basename.
+#
+# Locale is the caller's: path_is_stow_ignored runs this inside the byte locale
+# and home_conflict does not, which is the locale each of them matched in
+# before there was one matcher.
+stow_default_covers() {
+  local rest=$1 raw seg top=1 hit=1
+  shopt -s extglob
+  while :; do
+    raw=${rest%%/*}
+    seg=${raw%"$NL"}
+    case "$seg" in
+      # Refused rather than matched, and before either alternation: no row of
+      # the list can cover a component that still holds a newline.
+      *"$NL"*) ;;
+      *)
+        if [ "$top" -eq 1 ]; then
+          # Unquoted on purpose: the alternation is a pattern, and these two
+          # arms are the only places it is matched.
+          # shellcheck disable=SC2254
+          case "$seg" in
+            $STOW_TOP_ALT) hit=0 ;;
+          esac
+          [ "$hit" -ne 0 ] || break
+        fi
+        # shellcheck disable=SC2254
+        case "$seg" in
+          $STOW_SEG_ALT) hit=0 ;;
+        esac
+        [ "$hit" -ne 0 ] || break
+        ;;
+    esac
+    top=0
+    # Untrimmed on purpose: a directory called 'a\n' breaks the basename stow
+    # tests below it exactly as one called 'a\nb' does, and the trim above is
+    # about the pattern's end rather than about this.
+    case "$raw" in
+      *"$NL"*) break ;;
+    esac
+    case "$rest" in
+      */*) rest=${rest#*/} ;;
+      *) break ;;
+    esac
+  done
+  [ "$EXTGLOB_HAD" -eq 1 ] || shopt -u extglob
+  return "$hit"
+}
+
+# The rows of that table matching a path, as indexes of its regexp column.
+STOW_IGNORED_BY=()
+
+# Fills STOW_IGNORED_BY for $1, and is non-zero unless it filled it.  Separate
+# from path_is_ignored rather than folded into it because the report tells the
+# two apart: an ignore file's pattern names a file and a line to edit, and one
+# of these has neither.
+#
+# Byte locale for path_is_ignored's reasons, and never nested inside it: the two
+# share one saved LC_ALL, and the one caller that wants both answers runs them
+# one after the other.
+#
+# stow_default_covers is the gate rather than a second opinion, and that is the
+# whole of what keeps doctor and which from parting company over a path: where
+# it says no, no row is looked for and both answer no.  The loop below is
+# reached only for a path it has already covered, so its cost is paid on the
+# handful of paths that are on the list rather than on every path there is.
+#
+# It repeats the three newline rules stow_default_covers states, because it has
+# to say which rows answered and the rules decide which component each row is
+# tried against.  Two spellings of one set of rules is one more than anybody
+# would like; test_doctor_and_which_agree_about_stows_default_list is what holds
+# them to each other, over a corpus rather than an example.
 path_is_stow_ignored() {
   local rel=$1 i glob anchored wild rest raw seg matched try
   STOW_IGNORED_BY=()
   enter_byte_locale
+  if ! stow_default_covers "$rel"; then
+    leave_byte_locale
+    return 1
+  fi
   i=0
   while [ "$i" -lt "${#STOW_IGNORE_LIST[@]}" ]; do
     glob=${STOW_IGNORE_LIST[$((i + 1))]}
@@ -1896,38 +2019,37 @@ home_conflict() {
       "$HOME_CONFLICT_SKIP"/*) return 0 ;;
     esac
   fi
-  # The ignore list cmd_build writes, read as stow reads it, and it has to stay
-  # that list: a name missing here is a finding on a working setup for ever - a
-  # ~/.gitignore of the reader's own beside a layer that has one - and a name
-  # here that is not in the list is a refusal doctor goes quiet about.  Inline
-  # rather than a predicate of its own because this runs once per composed path
-  # and a bash function call is not free at that count - so this is a third
-  # spelling of the same list, beside the file cmd_build writes and
-  # STOW_IGNORE_LIST.  test_doctor_says_nothing_about_stows_default_list is what
-  # holds this one to the other two, by planting every name it covers in $HOME.
+  # The one entry stow adds to whatever the file holds rather than reading out
+  # of it, which is why STOW_IGNORE_LIST has no row for it and why this arm
+  # stands on its own.  Anchored at the top of the tree, and a literal, so the
+  # trailing-newline trim stow's '$' allows is the whole of the reading.
   #
-  # Stow compiles the list into two regexps, checked against both 2.3.1 and
-  # 2.4.1.  A pattern holding a '/' is matched against the whole path anchored
-  # at its ends, so the four below match at the top of the tree only and cover
-  # everything under a directory one of them names; stow adds
-  # '^/\.stow-local-ignore$' to whatever the file holds, which is the fourth.  A
-  # pattern without one is matched against a single path segment at any depth,
-  # and stow skips the directory as it descends, as the skip above does here.
+  # Both spellings, and the second is the reachable one: no build accepts a
+  # layer providing '.stow-local-ignore', and every build composes one called
+  # '.stow-local-ignore\n' without a word.  Stow covers it and links nothing
+  # there, so a finding at that path would be about a file no apply can reach.
   case "${srel%%/*}" in
-    .stow-local-ignore | COPYING | README* | LICENSE*)
+    .stow-local-ignore | ".stow-local-ignore$NL")
       [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
       return 0
       ;;
   esac
-  case "${srel##*/}" in
-    RCS | CVS | .cvsignore | .svn | _darcs | .hg | .git | .gitignore | .gitmodules | \
-      ?*,v | '.#'?* | ?*~ | '#'*'#')
-      # '.+,v', '\.\#.+', '.+~' and '\#.*\#' in glob: '.+' is one character or
-      # more, and '.*' is none or more.
-      [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
-      return 0
-      ;;
-  esac
+  # The rest of the list cmd_build writes, read as stow reads it, and it has to
+  # stay that list in both directions: a name missing is a finding on a working
+  # setup for ever - a ~/.gitignore of the reader's own beside a layer that has
+  # one - and a name that is not in the list is a refusal doctor goes quiet
+  # about.  This stood as a hand-written 'case' until #108 and had never been
+  # given the three newline rules, so doctor passed a setup apply then refused.
+  # There is one matcher now, and it reads the one list.
+  #
+  # stow_default_covers is given the whole path rather than the last component:
+  # the skip above means an ancestor on the list has already returned, but the
+  # newline rules are about ancestors this walk passed through without matching,
+  # and only the path carries them.
+  if stow_default_covers "$srel"; then
+    [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
+    return 0
+  fi
   # The ignore files' patterns, which cmd_build appends to that same file:
   # stow never looks at a path they match, so nothing standing in $HOME there is
   # a refusal any apply can meet.  Guarded on the count rather than left to the

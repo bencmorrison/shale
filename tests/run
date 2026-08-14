@@ -6457,6 +6457,235 @@ test_doctor_says_nothing_about_stows_default_list() {
   assert_eq 'shale: no problems found' "$shale_out" 'the third stdout'
 }
 
+# #108's reproduction, and the third of the newline rules #104 measured: stow
+# does not test the last component of a path.  Stow.pm's 'ignore' takes the
+# basename with '(my $basename = $target) =~ s!.+/!!' and '.+' cannot cross a
+# newline, so a newline anywhere before the last '/' leaves a mangled basename
+# no segment entry can match - '.+~' included.  Both versions link
+# 'a\nb/notes~'.
+#
+# The direction that costs is this one: doctor calling the path ignored is
+# doctor reporting green on a setup that apply then refuses, which is what #81
+# and #92 closed for every other finding.  So the two statuses are asserted
+# together, and against the same run.
+#
+# 'plain/notes~' is the control, and the regression that would be worse: it
+# genuinely is ignored, no apply goes near it, and a finding there is noise
+# about a file that is in nobody's way.
+test_doctor_names_a_conflict_below_a_newline_in_an_ancestor() {
+  local dir
+  dir=$(printf 'a\nb')
+  conf 'base common/base'
+  mklayer common/base "$dir/notes~"
+  mklayer common/base 'plain/notes~'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_write "$HOME/$dir" 'notes~' 'mine, and not a link'
+  sandbox_write "$HOME/plain" 'notes~' 'mine, and not a link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/$dir/notes~" 'stdout'
+  assert_not_contains "$shale_out" "$HOME/plain/notes~" 'the ignored control'
+  # The other half of the claim: stow refuses this apply, so a doctor that had
+  # passed it would have contradicted shale's own next command.
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+  assert_contains "$shale_err" "shale: stow failed; nothing in $HOME was relinked" \
+    'the apply stderr'
+  assert_eq 'mine, and not a link' "$(cat "$HOME/plain/notes~")" \
+    'the ignored control after the apply'
+}
+
+# The second rule: perl's '.' never matches a newline where the shell's '?' and
+# '*' do, so '.+~' does not cover 'a\nb~' and both versions link it.  A wildcard
+# row is refused outright for a component still holding one.
+#
+# 'notes~' is the control on the other side of the same row.
+test_doctor_names_a_conflict_at_a_newline_inside_a_name() {
+  local inside
+  inside=$(printf 'a\nb~')
+  conf 'base common/base'
+  mklayer common/base "$inside"
+  mklayer common/base 'notes~'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_write "$HOME" "$inside" 'mine, and not a link'
+  sandbox_write "$HOME" 'notes~' 'mine, and not a link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/$inside" 'stdout'
+  assert_not_contains "$shale_out" "$HOME/notes~" 'the ignored control'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+  assert_contains "$shale_err" "shale: stow failed; nothing in $HOME was relinked" \
+    'the apply stderr'
+}
+
+# The first rule, and the one that goes the other way: stow anchors every entry
+# with '$', which perl matches immediately before a final newline as well as at
+# the end, so '.+~' covers 'notes~\n' where the shell's '?*~' does not.  Both
+# versions skip it.
+#
+# So this is a finding shale must not raise.  A file of the reader's own at a
+# path no apply will ever touch is not in anybody's way, and naming it sends
+# them to move a file that did not need moving - which is why the apply below
+# is run and its status and its stderr both asserted: nothing about this setup
+# is wrong.
+test_doctor_says_nothing_at_a_name_ending_in_a_newline() {
+  local trailing
+  # printf -v rather than a command substitution, which strips exactly the
+  # trailing newline this name is about.
+  printf -v trailing 'notes~\n'
+  conf 'base common/base'
+  mklayer common/base "$trailing" 'a newline at the end of the name'
+  mklayer common/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_write "$HOME" "$trailing" 'mine, and not a link'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_eq 'shale: no problems found' "$shale_out" 'stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply stderr'
+  assert_eq 'mine, and not a link' "$(cat "$HOME/$trailing")" \
+    'the file stow left alone'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
+# The entry stow adds to whatever the list holds rather than reading out of it,
+# at the one spelling of it a layer can actually ship: every build refuses a
+# layer providing '.stow-local-ignore' and every build composes one called
+# '.stow-local-ignore\n' without a word, after which perl's '$' covers it before
+# that final newline exactly as it covers every other entry, and no apply links
+# it.
+#
+# So this is the same claim as the case above, for the one name that is not a
+# row of STOW_IGNORE_LIST and is matched by an arm of home_conflict's own.
+# Without that arm a file of the reader's own here is a finding for ever, about
+# a path no apply can reach.
+test_doctor_says_nothing_at_a_stow_local_ignore_ending_in_a_newline() {
+  local trailing
+  printf -v trailing '.stow-local-ignore\n'
+  conf 'base common/base'
+  mklayer common/base "$trailing" 'composed, and linked by no apply'
+  mklayer common/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_exists "$HOME/.dotfiles/current/$trailing" 'the composed copy'
+  sandbox_write "$HOME" "$trailing" 'mine, and not a link'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_eq 'shale: no problems found' "$shale_out" 'stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply stderr'
+  assert_eq 'mine, and not a link' "$(cat "$HOME/$trailing")" \
+    'the file stow left alone'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
+# extglob is off in the shell shale runs in, and every pattern shale matches is
+# written for that: '@(a|b).swp' in a .shale-ignore is the literal name
+# '@(a|b).swp' and covers nothing else, which is what cmd_build writes into the
+# list stow reads as well.
+#
+# stow_default_covers turns the option on for the length of one 'case' and puts
+# it back, and this is about the putting back.  home_conflict consults that
+# matcher before the ignore patterns, so an option left on there reads the
+# reader's own pattern as something it does not say, suppresses the conflict,
+# and puts doctor straight back to passing a setup apply refuses - #108's defect
+# by another route, on a setup with an ignore file rather than a newline in it.
+test_doctor_an_ignore_pattern_is_not_read_as_extglob() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mklayer common/base a.swp
+  mkignore common '@(a|b).swp'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_write "$HOME" a.swp 'mine, and not a link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/a.swp" 'stdout'
+  # The other half, and the reason the finding is right: stow was given the
+  # pattern as a literal too, so it refuses this apply.
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+  assert_contains "$shale_err" "shale: stow failed; nothing in $HOME was relinked" \
+    'the apply stderr'
+}
+
+# The drift guard for stow's own list on doctor's side, and the counterpart of
+# test_which_stows_default_list_table_covers_the_list_build_writes on which's.
+#
+# doctor carried a hand-written 'case' of its own until #108 - the whole list
+# spelled a third time, for the walk's sake - and it had never been given the
+# newline rules, so doctor suppressed a conflict at a path apply then refused.
+# The two answers are one matcher now, and this is what says so: for every name
+# below, doctor raising a conflict and which naming stow's list are opposite
+# answers to the same question, and any future copy that says otherwise fails
+# here rather than in somebody's $HOME.
+#
+# The names cover every shape the matcher has arms for: a segment row, an
+# anchored row at the top and the same name one level down, a near miss on
+# either side, and all three newline rules.
+test_doctor_and_which_agree_about_stows_default_list() {
+  local names i rel covered reported inside ancestor trailing plant
+  inside=$(printf 'a\nb~')
+  ancestor=$(printf 'a\nb/notes~')
+  printf -v trailing 'notes~\n'
+  names=('RCS/x' 'x,v' '.#lock' '.cvsignore' '.gitignore' '.gitmodules' 'notes~'
+    '#n#' 'README.md' 'COPYING' 'sub/README.md' 'sub/notes~' 'plain' 'notesx'
+    "$inside" "$ancestor" "$trailing")
+  conf 'base common/base'
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    mklayer common/base "${names[$i]}"
+    i=$((i + 1))
+  done
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    rel=${names[$i]}
+    case "$rel" in
+      */*) sandbox_write "$HOME/${rel%/*}" "${rel##*/}" 'mine, and not a link' ;;
+      *) sandbox_write "$HOME" "$rel" 'mine, and not a link' ;;
+    esac
+    # Kept now: run_shale proves leaves of its own and leaves sandbox_path
+    # holding the last of them.
+    plant=$sandbox_path
+    run_shale doctor
+    reported=0
+    case "$shale_out" in
+      *'no apply put there'*) reported=1 ;;
+    esac
+    run_shale which "$rel"
+    assert_status 0 "$shale_status" "which on '$rel'"
+    covered=0
+    case "$shale_err" in
+      *"stow's default ignore list"*) covered=1 ;;
+    esac
+    if [ "$covered" -eq 1 ]; then
+      assert_eq 0 "$reported" \
+        "doctor raised a conflict at '$rel', which which calls ignored"
+    else
+      assert_eq 1 "$reported" \
+        "doctor was silent about '$rel', which which calls linked"
+    fi
+    # The plant and nothing else: the directory it needed stays, and stands at
+    # the same path the layer's directory does, which is no conflict either way.
+    rm -f "$plant" || fail "could not remove the plant for '$rel'"
+    i=$((i + 1))
+  done
+}
+
 # #92's guarantee, against the one input that would break it: a pattern shale
 # refuses stops every build and every apply, so doctor must not report it green.
 # The refusal is a finding, it blocks the build, and no line offering a build
@@ -11030,8 +11259,14 @@ shale:   that list has no line to edit: nothing but a different name gets this p
 # whitespace before its '#'.  The table is two single-quoted fields on one line
 # per row and no entry holds a single quote, which is what makes the column
 # extractable without a parser; the second assertion is what keeps that shape.
+#
+# The third is about what the globs may hold rather than how the rows are
+# written.  derive_stow_alternations joins the glob column into one extglob
+# alternation per arm, and a '|', a '(' or a ')' in an entry would be taken as
+# the alternation's own punctuation - a pattern that still compiles and no
+# longer means what the row says.
 test_which_stows_default_list_table_covers_the_list_build_writes() {
-  local written rows table misshapen
+  local written rows table misshapen unjoinable
   conf 'base personal/base'
   mklayer personal/base .zshrc
   run_shale build
@@ -11043,6 +11278,9 @@ test_which_stows_default_list_table_covers_the_list_build_writes() {
   assert_eq "$written" "$table" 'the table against the list build writes'
   misshapen=$(printf '%s\n' "$rows" | grep -vc "^  '[^']*' '[^']*'\$")
   assert_eq 0 "$misshapen" 'table rows that are not a regexp and a glob'
+  unjoinable=$(printf '%s\n' "$rows" | sed -e "s/^  '[^']*' '//" -e "s/'\$//" |
+    grep -c '[|()]')
+  assert_eq 0 "$unjoinable" 'table globs holding a character the alternation would take'
 }
 
 # A layer shipping the file shale reads: the table names the layer holding it
