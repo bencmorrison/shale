@@ -493,6 +493,11 @@ require_sandbox() {
 # The second is the rigs the guard cases build under $CASE_DIR/trip: they are
 # the input being proven against, so they go in with plain mkdir, ln and printf.
 
+# A literal newline: '$(printf "\n")' is the empty string, which is the whole of
+# why the strip below has to be written this way.
+LF='
+'
+
 sandbox_dir=
 sandbox_path=
 
@@ -508,10 +513,24 @@ sandbox_path=
 # a resolved $HOME outside the root is refused below - but every caller then
 # acts on the wrong directory inside it, and the wrapper's --unsearchable is one
 # that acts by taking a mode off.
+#
+# 'printf x' and the two strips, because this is the containment proof the whole
+# suite writes through and a command substitution takes off every trailing
+# newline.  A directory whose name ends in one - a name shale has to answer for,
+# stow's own ignore entry covering it - resolved to the name without it: a
+# *different* path, which is contained, so the check passed and every caller
+# then wrote somewhere the caller never named.  Reproduced with two directories
+# side by side, 'name\n' and 'name', where the resolution of the first returned
+# the second and its contents.  Where that other name does not exist the failure
+# is loud instead, which is the shape that hid this one.  The 'x' makes pwd's
+# own newline the only one there is to remove, so what comes back is the
+# directory that was resolved.
 sandbox_resolve() {
   local dir=$1 resolved
-  resolved=$(cd -- "$dir" 2>/dev/null && pwd -P) ||
+  resolved=$(cd -- "$dir" 2>/dev/null && pwd -P && printf x) ||
     guard_trip_unresolved "path does not resolve to a directory: $dir"
+  resolved=${resolved%x}
+  resolved=${resolved%"$LF"}
   [ -n "$resolved" ] ||
     guard_trip_unresolved "path does not resolve to a directory: $dir"
   case "$resolved" in
@@ -5310,11 +5329,10 @@ test_apply_a_non_ascii_file_name_is_matched_as_stow_matches_it() {
 #
 # That arm is per component rather than per path, so a *directory* whose name
 # ends in a newline takes its subtree with it in the same way - stow anchors the
-# basename of every node as it descends.  That half is not exercised here: this
-# harness proves a directory is inside the test root by resolving it with 'cd'
-# and 'pwd -P', and a command substitution strips exactly the trailing newline
-# such a name is made of, so the guard refuses the fixture before shale runs.
-# It was measured by hand against both stow versions instead.
+# basename of every node as it descends.  Measured by hand against both stow
+# versions rather than here; sandbox_resolve keeps such a name now, and
+# test_which_below_a_stow_local_ignore_ending_in_a_newline_says_the_same plants
+# one for the entry stow adds to every list.
 #
 # A newline in a file name is legal on every filesystem shale runs on, and these
 # are the only names in the suite that hold one.
@@ -12163,6 +12181,210 @@ test_which_a_layer_providing_the_file_shale_writes_says_build_would_fail() {
   assert_eq "merged    local  $HOME/.dotfiles/local/.stow-local-ignore/" \
     "$shale_out" 'a directory provider'
   assert_eq "$note" "$shale_err" 'a directory provider'
+  # And the build that refusal promises, for the directory as for the file: the
+  # test is whether anything is at that path in the composed tree, so a
+  # directory of the name stops it and nothing below one is ever composed.
+  mklayer local .stow-local-ignore/inside 'a layer may not provide this either'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build a directory of that name fails'
+  assert_contains "$shale_err" \
+    "shale: layer 'local' provides $HOME/.dotfiles/local/.stow-local-ignore" 'the build stderr'
+  # So a path below it gets the same note, by the same first component: without
+  # that, which answered for the name with a trailing newline and said nothing
+  # for this one, which is the nearer of the two shapes.
+  run_shale which .stow-local-ignore/inside
+  assert_status 0 "$shale_status" 'below a directory of that name'
+  assert_eq "winner    local  $HOME/.dotfiles/local/.stow-local-ignore/inside" \
+    "$shale_out" 'below a directory of that name'
+  assert_eq "$note" "$shale_err" 'below a directory of that name'
+  # The same path with no layer providing it, which is which's other branch and
+  # reads the component in its own right.
+  sandbox_mkdir "$HOME/.dotfiles/local/.stow-local-ignore"
+  sandbox_leaf "$sandbox_dir" inside
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale which .stow-local-ignore/inside
+  assert_status 1 "$shale_status" 'below it with no provider'
+  assert_eq "shale: no layer provides '.stow-local-ignore/inside'
+shale: note: shale writes $HOME/.dotfiles/current/.stow-local-ignore itself, and no build accepts a layer providing one" \
+    "$shale_err" 'below it with no provider'
+}
+
+# The name beside that one, which build accepts and stow declines: stow adds
+# '^/\.stow-local-ignore$' to whatever a package's list holds, and perl's '$'
+# matches before a final newline, so a file called '.stow-local-ignore\n'
+# composes, is covered by an entry no line of the built list holds, and is
+# linked by no apply.  #108 gave doctor its silence here; which named the winner
+# and, since #106, sent the reader to run an apply that can never link it.
+#
+# The answer is checked whole rather than by fragment, because the two things
+# that make it a wrong answer are both absences: the residual note that follows
+# it when nothing accounts for the path, and any claim that the entry is a line
+# in the file shale writes.
+test_which_a_stow_local_ignore_ending_in_a_newline_says_no_apply_links_it() {
+  local trailing note
+  printf -v trailing '.stow-local-ignore\n'
+  note="shale: note: no apply links this — the top of its path is '.stow-local-ignore' and a trailing newline
+shale:   stow ignores its own ignore file's name at the top of the tree whatever a package's list holds, ignores that name with one trailing newline too, and goes nowhere below a directory it ignores
+shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfiles/current/.stow-local-ignore: nothing but a different name at the top of this path gets it linked"
+  conf 'base personal/base'
+  mklayer personal/base "$trailing" 'composed, and linked by no apply'
+  mklayer personal/base .zshrc
+  # The winner's path ends in that newline and printf adds another, and the
+  # harness's capture strips both - so the expected line carries neither.
+  run_shale which "$trailing"
+  assert_status 0 "$shale_status" 'before the first build'
+  assert_eq "winner    base  $HOME/.dotfiles/personal/base/.stow-local-ignore" \
+    "$shale_out" 'stdout before the first build'
+  assert_eq "$note" "$shale_err" 'stderr before the first build'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_exists "$HOME/.dotfiles/current/$trailing" 'the composed copy'
+  # The line the third note says is not there, in the file it names.
+  assert_not_contains "$(cat "$HOME/.dotfiles/current/.stow-local-ignore")" \
+    'stow-local-ignore' 'the built list'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_missing "$HOME/$trailing" 'the path in the home directory'
+  # After an apply that linked other paths from the same tree, which is where
+  # the residual note fires and where its remedy - run an apply - is one this
+  # path has just had.
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  run_shale which "$trailing"
+  assert_status 0 "$shale_status" 'after the apply'
+  assert_eq "$note" "$shale_err" 'stderr after the apply'
+}
+
+# The same name with no layer providing it, which is the branch the reader
+# reaches a moment after renaming the file: the tree still holds the old name,
+# and the stale note is true of it and is not the answer to whether an apply
+# would ever have linked it.
+test_which_a_stow_local_ignore_ending_in_a_newline_with_no_provider() {
+  local trailing
+  printf -v trailing '.stow-local-ignore\n'
+  conf 'base personal/base'
+  mklayer personal/base "$trailing" 'composed, and linked by no apply'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" "$trailing"
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale which "$trailing"
+  assert_status 1 "$shale_status"
+  assert_empty "$shale_out" 'stdout'
+  assert_eq "shale: no layer provides '$trailing'
+shale: note: no apply links this — the top of its path is '.stow-local-ignore' and a trailing newline
+shale:   stow ignores its own ignore file's name at the top of the tree whatever a package's list holds, ignores that name with one trailing newline too, and goes nowhere below a directory it ignores
+shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfiles/current/.stow-local-ignore: nothing but a different name at the top of this path gets it linked
+shale: note: present in current/ but no layer provides it — current/ is stale, run 'shale build'" \
+    "$shale_err" 'stderr'
+}
+
+# A layer may ship that name as a directory, and stow declines the whole of what
+# is under it: it never descends into a path it ignores, checked at three depths
+# against real stow 2.3.1 and 2.4.1, neither of which links any of them.  So the
+# answer for a path below one is the answer for the directory, which is what
+# home_conflict has always read - it matches the first component - and what
+# which read as the whole path until this case.  doctor is silent about every
+# path under such a directory, and which sent the reader to run an apply.
+test_which_below_a_stow_local_ignore_ending_in_a_newline_says_the_same() {
+  local trailing note
+  printf -v trailing '.stow-local-ignore\n'
+  note="shale: note: no apply links this — the top of its path is '.stow-local-ignore' and a trailing newline
+shale:   stow ignores its own ignore file's name at the top of the tree whatever a package's list holds, ignores that name with one trailing newline too, and goes nowhere below a directory it ignores
+shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfiles/current/.stow-local-ignore: nothing but a different name at the top of this path gets it linked"
+  conf 'base personal/base'
+  mklayer personal/base "$trailing/deep/foo" 'composed, and linked by no apply'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_exists "$HOME/.dotfiles/current/$trailing/deep/foo" 'the composed copy'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_missing "$HOME/$trailing/deep/foo" 'the path in the home directory'
+  # The other half of the disagreement this closes: doctor is silent about that
+  # subtree, and which must not answer as though an apply would reach it.
+  #
+  # A file of the reader's own at that path first, which is what makes the
+  # silence load-bearing rather than incidental: doctor reports a path in $HOME
+  # that no apply put there and a layer provides, and home_conflict's arm for
+  # this name is the whole of what suppresses it.  Without the plant the walk
+  # finds nothing at the path and is silent whatever the arm says.
+  sandbox_write "$HOME/$trailing/deep" foo 'mine, and not a link'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_eq 'shale: no problems found' "$shale_out" 'the doctor stdout'
+  # And the apply that silence promises: stow declines the whole subtree, so the
+  # reader's file is still theirs afterwards.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply over the reader own file'
+  assert_empty "$shale_err" 'the apply stderr'
+  assert_eq 'mine, and not a link' "$(cat "$HOME/$trailing/deep/foo")" \
+    'the file stow left alone'
+  run_shale which "$trailing/deep/foo"
+  assert_status 0 "$shale_status" 'the path below the directory'
+  assert_eq "$note" "$shale_err" 'stderr below the directory'
+  # The directory itself, which the same first component answers for.
+  run_shale which "$trailing"
+  assert_status 0 "$shale_status" 'the directory'
+  assert_eq "$note" "$shale_err" 'stderr at the directory'
+  # And the same path with the layer's copy gone, which is the other branch of
+  # which and reads the component in its own right.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/$trailing/deep"
+  sandbox_leaf "$sandbox_dir" foo
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale which "$trailing/deep/foo"
+  assert_status 1 "$shale_status" 'with no provider'
+  assert_eq "shale: no layer provides '$trailing/deep/foo'
+$note
+shale: note: present in current/ but no layer provides it — current/ is stale, run 'shale build'" \
+    "$shale_err" 'stderr with no provider'
+}
+
+# Every other spelling of that name, and none of them is this note's: stow's
+# entry is a path regexp anchored at '^/', and its '$' allows one trailing
+# newline and no more.  Checked against real stow 2.3.1 and 2.4.1, which link
+# every one of these - so which must answer for them as it answers for any other
+# file, and a note claiming no apply links them would be false.
+#
+# The last three are the near misses for the first component the answer is read
+# from.  Two are directories with a file inside - one whose name is two
+# characters longer, one carrying the second newline that puts the name back
+# outside stow's entry, '$' allowing one - because a directory is what a
+# component match has to be tried against, and the two-newline name cannot also
+# appear here as a file of its own.  The third is the covered name itself, one
+# level down, where stow's entry does not reach and a match on any component
+# rather than the first would wrongly claim it does.
+test_which_the_spellings_beside_that_name_are_ordinary_files() {
+  local names rel i two space trailing
+  # printf -v rather than a command substitution, which strips a trailing
+  # newline and would leave these spellings the covered name.
+  printf -v two '.stow-local-ignore\n\n'
+  printf -v space '.stow-local-ignore '
+  printf -v trailing 'sub/.stow-local-ignore\n'
+  names=('.stow-local-ignoreX' 'x.stow-local-ignore' '.config/.stow-local-ignore'
+    "$space" ' .stow-local-ignore' '.stow-local-ignore.d/foo' "$two/foo"
+    "$trailing")
+  conf 'base personal/base'
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    mklayer personal/base "${names[$i]}"
+    i=$((i + 1))
+  done
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  i=0
+  while [ "$i" -lt "${#names[@]}" ]; do
+    rel=${names[$i]}
+    assert_symlink_to "$HOME/$rel" "$HOME/.dotfiles/current/$rel"
+    run_shale which "$rel"
+    assert_status 0 "$shale_status" "which '$rel'"
+    assert_empty "$shale_err" "which '$rel' stderr"
+    i=$((i + 1))
+  done
 }
 
 test_which_works_before_the_first_build() {

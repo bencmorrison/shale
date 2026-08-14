@@ -1093,12 +1093,12 @@ path_is_ignored() {
 # stow's own '^/\.stow-local-ignore$' is not a row, because a row here is
 # compared with the file cmd_build writes and this entry is not in it: stow adds
 # it to whatever the file holds.  home_conflict carries an arm of its own for it
-# instead.  which says nothing about it, which is right for the name itself - no
-# build accepts a layer providing one, and which says that instead - and is a
-# gap for '.stow-local-ignore' with a trailing newline, which composes, which
-# stow's '$' then covers, and which no apply links.  Naming that one wants
-# wording this table cannot supply, every line report_ignored prints about these
-# rows pointing at a file entry that is not there.
+# instead, and which answers for both of its spellings in words of its own -
+# build's refusal for the exact name, no build accepting a layer that provides
+# one, and report_stow_local_ignore_newline for the name with a trailing
+# newline, which composes and which stow's '$' then covers.  Every line
+# report_ignored prints about a row of this table would send that reader to a
+# line of the built list that is not there.
 STOW_IGNORE_LIST=(
   'RCS' 'RCS'
   '.+,v' '?*,v'
@@ -3552,6 +3552,39 @@ report_ignored() {
   emit ${lines[@]+"${lines[@]}"}
 }
 
+# The one path no apply links that neither list can be made to account for:
+# '.stow-local-ignore' with a trailing newline.  Stow adds
+# '^/\.stow-local-ignore$' to whatever a package's list holds rather than
+# reading it out of one, so STOW_IGNORE_LIST has no row for it - that table is
+# compared with the file cmd_build writes and the file does not hold it - and
+# every line report_ignored prints about a row of it would be false here: the
+# reader sent to open the built list finds no such line to read.  home_conflict
+# carries the same pair of names for doctor's side.
+#
+# Only this spelling reaches here, and the exact name never does: no build
+# accepts a layer providing one, and which says that instead, above - by the
+# same first-component test, so the two spellings answer alike for a file, for a
+# directory of the name, and for anything below one.
+#
+# That component is what home_conflict has always read, and reading the whole
+# path instead is a wrong answer twice over.  A layer may ship this name as a
+# directory, and stow declines the whole of its subtree - it never descends into
+# a path it ignores, measured at three depths against real stow 2.3.1 and 2.4.1
+# - so doctor went silent about every path below one while which prescribed an
+# apply for it.  The note reads the same for all three shapes, all three being
+# answered by that one component.
+#
+# Every other spelling is an ordinary file, checked against both versions, which
+# link all of them: two trailing newlines, a trailing space or tab, a leading
+# space or newline, and the name at any depth below the top - the entry is a
+# path regexp anchored at '^/', and the whole path with a '/' in front of it is
+# what it is matched against.
+report_stow_local_ignore_newline() {
+  emit "note: no apply links this — the top of its path is '.stow-local-ignore' and a trailing newline" \
+    "stow ignores its own ignore file's name at the top of the tree whatever a package's list holds, ignores that name with one trailing newline too, and goes nowhere below a directory it ignores" \
+    "stow adds that entry itself, so there is no line for it in $CUR/.stow-local-ignore: nothing but a different name at the top of this path gets it linked"
+}
+
 # Non-zero unless some path in the built tree under $1 - relative to $CUR, and ''
 # for the whole of it - is linked at the matching path in $HOME.  That is the
 # whole of what tells a tree an apply has landed from one nothing has ever
@@ -4627,13 +4660,23 @@ cmd_which() {
     # has just moved the file out of a layer to stop it being linked is owed the
     # pattern that was already doing it.
     [ "$ignored" -eq 0 ] || report_ignored "$rel"
+    # Said here for the same reason, and beside the stale note rather than
+    # instead of it: the tree holding this path and no layer providing it is
+    # where a reader lands the moment after renaming the file, and 'run build'
+    # answers where the path went without answering whether an apply would ever
+    # have linked it.
+    [ "${rel%%/*}" != ".stow-local-ignore$NL" ] ||
+      report_stow_local_ignore_newline
     # The one path a build puts in the built tree that no layer provides, so on
     # a tree built a moment ago the stale note below is false about it and the
-    # build it prescribes writes it again and answers the same.  Top level and
-    # nowhere else, the test scan_built_tree skips it by: shale writes that one
-    # path, and a '.stow-local-ignore' inside a layer's directory is an ordinary
-    # file that an ordinary build copies.
-    if [ "$rel" = .stow-local-ignore ]; then
+    # build it prescribes writes it again and answers the same.  The first
+    # component, like the arm above and like home_conflict: build's refusal is
+    # satisfied by a directory of that name as readily as by a file - checked -
+    # so no build composes anything below one either.  Top level and nowhere
+    # else, the test scan_built_tree skips it by: shale writes that one path,
+    # and a '.stow-local-ignore' inside a layer's directory is an ordinary file
+    # that an ordinary build copies.
+    if [ "${rel%%/*}" = .stow-local-ignore ]; then
       emit "note: shale writes $CUR/.stow-local-ignore itself, and no build accepts a layer providing one"
     elif [ -e "$CUR/$rel" ] || [ -L "$CUR/$rel" ]; then
       emit "note: present in current/ but no layer provides it — current/ is stale, run 'shale build'"
@@ -4726,11 +4769,25 @@ cmd_which() {
   # of them wins, no build gets past this one - and the table above answers
   # 'which layer wins' truthfully while the answer someone needs is that no
   # layer does.
-  if [ "$rel" = .stow-local-ignore ]; then
+  #
+  # The first component here as well, so both spellings are read the same way.
+  # build's refusal tests whether anything is at that path in the composed tree,
+  # which a directory of the name satisfies - checked, and it names the layer -
+  # so nothing below one is ever composed and the note is as true of a path
+  # under it as of the name itself.
+  if [ "${rel%%/*}" = .stow-local-ignore ]; then
     emit "note: 'build' would fail here — shale writes $CUR/.stow-local-ignore itself, and no build accepts a layer providing one"
     # The tree holds that path after any earlier build, and no apply has ever
     # linked it: stow reads it and leaves it where it is.  Accounted for by the
     # line above, whose remedy is the layer rather than another apply.
+    explained=1
+  elif [ "${rel%%/*}" = ".stow-local-ignore$NL" ]; then
+    report_stow_local_ignore_newline
+    # The name beside that one, and the reachable half of the pair: every build
+    # composes this path without a word and no apply links it, so the residual
+    # note below would send the reader to run an apply that answers the same
+    # thing again for as long as the name stands.  The first component, because
+    # a directory of that name takes everything under it.
     explained=1
   fi
   # At any depth, which is where the composer drops it: the table above names
