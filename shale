@@ -569,8 +569,10 @@ ignore_error() {
 }
 
 # The saved LC_ALL while a byte-wise stretch is running.  One value, so these
-# must not nest; the three callers - the reader and the two matchers - do not,
-# and the callers that want both matchers run them one after the other.
+# must not nest; the four callers - the reader, the two matchers and list_dir -
+# do not, and the callers that want both matchers run them one after the other.
+# list_dir is the one of the four that a recursive walk reaches, and it calls
+# nothing between the two: the glob it wraps cannot re-enter this.
 BYTE_LC_HAD=0
 BYTE_LC_SAVED=
 enter_byte_locale() {
@@ -967,25 +969,36 @@ parse_ignore_files() {
 # APFS stores names NFD-decomposed, so an accent in a layer's file name is
 # multibyte by construction.
 #
-# Scoped rather than set for the whole script because LC_ALL also decides the
-# order a glob expands in, and the trees shale walks are listed by globs whose
-# order several reports print in: '.Xresources' sorts before '.bashrc' by byte
-# and after it by en_US collation, which is an ordinary pair of dotfiles rather
-# than a contrived one.  Widening the stretch to a whole walk would trade this
-# function's cost for a silent dependency on that ordering across the two
-# largest walks in the program - the failure this codebase treats as the
-# expensive kind - so the cost stays here.  No subshell either: this runs once
-# per composed path in doctor's walk.  Nothing between the two calls may return
-# early.
+# Scoped to this function rather than set for the whole script, and the reason is
+# no longer the ordering: list_dir puts every listing in the byte locale too, so
+# the order shale walks a tree in is byte order everywhere and is pinned by a
+# case.  What stays scoped is everything between the listings - LC_ALL is also
+# what decides the language of the diagnosis cp, git and stow print for
+# themselves, which shale passes through rather than reads, and a build that
+# answered in English on a German machine would be shale editing it.  No subshell
+# either: this runs once per composed path in doctor's walk.  Nothing between the
+# two calls may return early.
 #
-# What that costs is noise, and only in an environment that is already broken.
-# Where LC_ALL names a locale the machine has not got, bash 5 re-emits its
-# 'cannot change locale' warning on every restore - 68 of them on a 33-path
-# tree, against the one the shell prints at startup - which a redirection
-# cannot suppress and which buries what doctor prints.  bash 3.2 says nothing.
-# Every answer and every exit status is the same either way, so this is the
-# accepted trade: a loud symptom in an environment the user can see is broken,
-# rather than a quiet reordering in every environment that is not.
+# What every byte-locale stretch in this script costs is noise, and only in an
+# environment that is already broken.  Where LC_ALL names a locale the machine
+# has not got, bash 5 re-emits its 'cannot change locale' warning on every
+# restore - against the one the shell prints at startup - which a redirection
+# cannot suppress and which buries what the command prints.  bash 3.2 says
+# nothing at all.
+#
+# This function is no longer the only source, and is now the smaller one: since
+# list_dir, the same warning is paid once per *directory listed*, so build pays
+# it too where it used to pay almost nothing.  Measured on bash 5.2 over a layer
+# of 300 directories, one file in each: build 2 lines before and 303 after,
+# doctor 602 before and 1506 after.  The tree composed is the same 301 files and
+# every exit status is 0, before and after, on both bashes.
+#
+# So the trade is the same one, taken twice over: a loud symptom in an
+# environment the user can see is broken, rather than - here - a matcher that
+# answers differently on each bash, and - at list_dir - a subtree dropped from
+# the build with nothing reporting it.  What it may not become is noise in a
+# working environment, which is #75's rule and which this does not touch: with
+# LC_ALL naming a locale the machine has, or unset, not a line of it is printed.
 #
 # The trailing-newline arm in both loops below is stow's '$', which perl also
 # matches immediately before a final newline: 'foo.swp\n' is a path the ignore
@@ -1322,6 +1335,67 @@ path_is_stow_ignored() {
   [ "${#STOW_IGNORED_BY[@]}" -gt 0 ]
 }
 
+# ------------------------------------------------------------- listing a tree
+
+# The entries of one directory, as full paths.  Written by list_dir and read by
+# the loop that follows each call.
+DIR_ENTRIES=()
+
+# Every glob in this script that lists a directory goes through here, so that the
+# rules below are stated once rather than at each of the seven.  $1 is the
+# directory; $2 is 1 to expand '.*' as well as '*', which the walks that run
+# without dotglob need and the composer, which sets it, does not.
+#
+# The listing runs in the byte locale, and the caller's locale decides nothing
+# about it.  bash 3.2 - the floor, and what macOS ships - puts the fixed
+# directory part of a glob through a wide-character round trip before it opens
+# it, and a byte that is not valid in the locale does not survive that: measured,
+# a layer's 'b<0xff>dir'/* expands to nothing on 3.2 under en_US.UTF-8 and lists
+# the directory on the same bash under LC_ALL=C, while bash 5.2 lists it under
+# either.  What that cost was that subtree, dropped from the build, from doctor's
+# walks and from nothing else - so every command reported success while a real
+# file never reached $HOME and which went on naming the layer that provided it.
+# The '*' at the end is not where it goes wrong: a name holding the same byte
+# comes back from a listing of the directory above it on every bash and locale.
+#
+# So the order that comes back is byte order - strcoll in the C locale is strcmp
+# - on every machine and in every locale, and that is the point of doing it here
+# rather than a side effect to be tolerated.  The composer copies in this order
+# and several of doctor's reports print in it, and '.Xresources' sorts before
+# '.bashrc' by byte and after it by en_US collation, which is an ordinary pair of
+# dotfiles rather than a contrived one: an order that moved with the reader's
+# locale would be an unstated input to both.
+#
+# '.' and '..' are dropped by name at every caller, whatever the pattern and
+# whatever the glob options: bash 5.2 has globskipdots on by default and never
+# returns them, and bash 3.2 returns both from '.*'.  With nullglob off an
+# unmatched pattern arrives as itself, which the callers tell from a file
+# genuinely called '*' or '.*' with -e and -L.
+#
+# One global rather than a returned list, for callers that recurse - the
+# composer, three of doctor's walks and which's.  A 'for' list is expanded once,
+# before the first pass of the body, so a recursive call that overwrites
+# DIR_ENTRIES cannot disturb the loop already running over it; nothing may read
+# DIR_ENTRIES after such a call.  dir_is_empty runs from a trap and so can land
+# between the two locale calls here, which would leave the saved LC_ALL wrong -
+# every path that reaches that trap exits, so there is nothing left to be wrong
+# for.
+#
+# The switch is not free where LC_ALL names a locale the machine has not got:
+# bash 5 warns on every restore, so this pays one line per directory listed and
+# build pays it where it used to pay almost nothing.  Measured and accepted at
+# path_is_ignored, which is where the whole of that trade is written down.
+list_dir() {
+  local dir=$1 dots=$2
+  enter_byte_locale
+  if [ "$dots" -eq 1 ]; then
+    DIR_ENTRIES=("$dir"/* "$dir"/.*)
+  else
+    DIR_ENTRIES=("$dir"/*)
+  fi
+  leave_byte_locale
+}
+
 # ----------------------------------------------------------- the scratch trees
 
 # The scratch tree while one exists, and empty otherwise, which is what makes
@@ -1333,12 +1407,6 @@ CLONING=
 # releases only a lock this process took and never one another shale is holding.
 LOCKED=
 
-# The rule for every glob in this script that lists a directory, stated here
-# because this is the first of them and repeated at none of them: drop '.' and
-# '..' by name, whatever the pattern and whatever the glob options.  bash 5.2
-# has globskipdots on by default and never returns those two; bash 3.2, the
-# floor, returns both from '.*' and neither from '*'.
-#
 # Non-zero when directory $1 holds an entry of any kind, dotfiles included.
 # Written so that dotglob and nullglob may be set either way round: build sets
 # both partway through, and this runs from a trap.  With nullglob off an
@@ -1351,7 +1419,8 @@ dir_is_empty() {
   # Not knowing is therefore reported as not empty, which is the answer all
   # three callers are safe to act on.
   { [ -r "$dir" ] && [ -x "$dir" ]; } || return 1
-  for entry in "$dir"/* "$dir"/.*; do
+  list_dir "$dir" 1
+  for entry in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
     case "${entry##*/}" in
       . | ..) continue ;;
       '*' | '.*')
@@ -1717,7 +1786,9 @@ compose_dir() {
       'shale composes a layer by walking it' \
       'check the permissions on that directory'
   fi
-  for e in "$here"/*; do
+  # dotglob is set by the time this runs, so '*' is the whole listing.
+  list_dir "$here" 0
+  for e in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
     base=${e##*/}
     # Dropped by name at every glob, whatever the options say about them.
     case "$base" in
@@ -2310,9 +2381,10 @@ scan_layer_trees() {
       layer_denied "${LAYER_NAMES[$i]}" "$here" directory
       continue
     fi
-    # Both patterns spelled out, and '.' and '..' dropped by name, whatever the
-    # glob options say about them.
-    for e in "$here"/* "$here"/.*; do
+    # Both patterns, and '.' and '..' dropped by name, whatever the glob options
+    # say about them.
+    list_dir "$here" 1
+    for e in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
       base=${e##*/}
       case "$base" in
         . | ..) continue ;;
@@ -2600,10 +2672,11 @@ scan_built_tree() {
   fi
   blocked_layers "$rel" "$cap" "$inherited"
   blocked=$BLOCKED_LAYER
-  # Neither dotglob nor nullglob is set in doctor, so both patterns are spelled
-  # out and an unmatched one arrives as itself.  '.' and '..' are dropped by
-  # name, whatever the glob options say about them.
-  for e in "$here"/* "$here"/.*; do
+  # Neither dotglob nor nullglob is set in doctor, so both patterns are wanted
+  # and an unmatched one arrives as itself.  '.' and '..' are dropped by name,
+  # whatever the glob options say about them.
+  list_dir "$here" 1
+  for e in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
     base=${e##*/}
     case "$base" in
       . | ..) continue ;;
@@ -2778,9 +2851,10 @@ scan_ignored_links() {
   local rel=$1 inherited=$2 cap=$3 here e base srel ignored link
   here=$CUR${rel:+/$rel}
   { [ -r "$here" ] && [ -x "$here" ]; } || return 0
-  # Both patterns spelled out, and '.' and '..' dropped by name, whatever the
-  # glob options say about them.
-  for e in "$here"/* "$here"/.*; do
+  # Both patterns, and '.' and '..' dropped by name, whatever the glob options
+  # say about them.
+  list_dir "$here" 1
+  for e in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
     base=${e##*/}
     case "$base" in
       . | ..) continue ;;
@@ -3519,7 +3593,8 @@ built_tree_is_linked() {
     BUILT_TREE_UNREAD=1
     return 1
   fi
-  for e in "$here"/* "$here"/.*; do
+  list_dir "$here" 1
+  for e in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
     base=${e##*/}
     # Dropped by name, as at every glob in this script: bash 3.2 matches '.' and
     # '..' with "$here"/.* where 5.2's globskipdots does not.
@@ -4246,7 +4321,8 @@ cmd_doctor() {
       'shale cannot tell which of the entries in it are layers and which are strays' \
       'check the permissions on that directory'
   elif [ -d "$DOTFILES" ]; then
-    for entry in "$DOTFILES"/*; do
+    list_dir "$DOTFILES" 0
+    for entry in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
       # Also the arm the unmatched glob lands in, a dangling symlink being the
       # one entry that is here and answers no to -e.
       { [ -e "$entry" ] || [ -L "$entry" ]; } || continue

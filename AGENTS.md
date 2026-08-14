@@ -41,8 +41,8 @@ so there is no `fixtures/` tree to add one to.
 
 They enforce **constructs, not meanings**. Identical source behaves differently on the bash 3.2 floor
 and on the container's bash 5.2, and no grep can see it — `"$dir"/.*` skips `.` and `..` under 5.2's
-`globskipdots` and matches them under 3.2. The standing answer, stated once at `dir_is_empty`, is
-that every glob listing a directory drops those two names by hand;
+`globskipdots` and matches them under 3.2. The standing answer, stated once at `list_dir`, is that
+every glob listing a directory goes through it and drops those two names by hand;
 `test_meta_dot_globs_answer_the_same_under_both_glob_meanings` runs the script under the older
 meaning on both jobs. Treating a clean meta run as portability evidence is the mistake; the macOS CI
 job is what catches the rest of this class, after you push.
