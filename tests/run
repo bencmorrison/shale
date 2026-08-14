@@ -219,6 +219,8 @@ SHALE_RUNS=0
 # names it creates are 'new' leaves, and a second call into one directory would
 # be refused rather than reused.
 STUB_PATHS=0
+# One file per inherit_shell_line call, for the same reason.
+SHELL_ENVS=0
 # Set to 1 in the copy run_inner_suite builds, by a line appended after this
 # one.  A plain assignment, not ${INNER_SUITE-}: innerness is a property of the
 # harness file, and anything inherited from the environment would make a
@@ -877,6 +879,28 @@ mkignore() {
   # below it is looked at, exactly as mklayer does it.
   sandbox_mkdir "$HOME/.dotfiles"
   sandbox_write "$HOME/.dotfiles/$root" .shale-ignore ${1+"$@"}
+}
+
+# inherit_shell_line LINE... - makes the shell that runs shale execute LINE
+# before shale's own first line.  In force for the rest of the case, each case
+# being its own subshell.
+#
+# One of the three routes a shell has for handing an option to a script it
+# starts, and the only one that carries all of them.  Merely setting an option
+# hands on nothing; 'export BASHOPTS' carries a shopt but does not exist on
+# bash 3.2, the portability floor, so a case using it would report a pass there
+# having inherited nothing at all; 'export SHELLOPTS' carries a 'set -o' option
+# on every bash and is readonly in this harness's own shell.  BASH_ENV is read
+# by every non-interactive bash there is and the file it names can set a shopt,
+# a 'set -o' option and a variable alike, which is what lets one helper cover
+# the three shapes the cases below need.
+#
+# Nothing else in the case reads it.  shale starts no bash of its own, and the
+# only other programs a run reaches are cat and sed.
+inherit_shell_line() {
+  SHELL_ENVS=$((SHELL_ENVS + 1))
+  sandbox_write "$CASE_DIR" "shell-env.$SHELL_ENVS.sh" ${1+"$@"}
+  export BASH_ENV=$sandbox_path
 }
 
 # stub_path_without TOOL... - a directory holding a link to every tool shale and
@@ -12104,6 +12128,344 @@ test_meta_dot_globs_answer_the_same_under_both_glob_meanings() {
   run_shale --script "$shim" doctor
   assert_status 0 "$shale_status" 'the doctor'
   assert_not_contains "$shale_out" 'is not a configured layer' 'the doctor stdout'
+}
+
+# The shell shale was started in decides nothing about what shale means.  A
+# shell that exports BASHOPTS or SHELLOPTS, or that names a BASH_ENV file,
+# hands its own options to every script it starts, and the options below
+# rewrite either what a 'case' pattern matches or what a glob expands to - so
+# without the normalising block at the top of the script, the same committed
+# .shale-ignore gave one answer from that shell and another from cron, with
+# nothing saying which had been got.
+#
+# One fixture and one set of answers for all of them, below, because the claim
+# is one claim.  Each case is then the option and the sentence saying what it
+# did before, and a case that stopped exercising anything would stop being the
+# odd one out.
+#
+# What is not here: the option that only changes what '**' expands to, no glob
+# in the script being one and its name being banned by the floor guard;
+# globskipdots, which
+# test_meta_dot_globs_answer_the_same_under_both_glob_meanings covers by running
+# the whole script under both of its meanings; and every option that reaches
+# neither matching nor expansion.  set -k, set -t, set -v and set -x all still
+# change what a run does and none of them is normalised - they are loud rather
+# than quiet, and they are not this claim.
+
+# The tree the cases below share, built to be sensitive to every option in the
+# set at once.  'notes.txt' against an upper-case '*.TXT' is what nocasematch
+# widens; the two planted dotfiles, one at the top and one a level down, are
+# what a dotglob makes doctor count twice; the empty layer directory is what
+# failglob turns into an expansion error; and the composed listing is what
+# noglob empties and what a GLOBIGNORE thins.
+#
+# The case difference is carried by the pattern and never by a filename, and
+# that is the portability half of it.  An 'A.SWP' beside the 'a.swp' below is
+# one file on a case-insensitive volume - macOS's default, and the platform of
+# the bash 3.2 floor - so the layer composed without it and ten cases failed on
+# the tree listing, green in the container the whole time.  No two names here
+# differ only in case, and no assertion needs a name's case to survive being
+# written to a filesystem and read back.  Nothing is lost by it: what
+# nocasematch does is fold the case of a match, which is symmetric, so a
+# lower-case name against an upper-case pattern proves what the other way round
+# proved.
+#
+# The three extended-glob operators shale documents as literal have a name each
+# in the ignore file and a layer file each on both sides of the difference,
+# because each fails differently and none of them stands for the others.  Read
+# as extglob, '@(a|b).swp' stops covering the file called that and starts
+# covering 'a.swp'; '+(a)' and '?(a)' stop covering the files called that and
+# start covering 'a' and 'aa'.  Read as shale's own subset, '+(a)' is entirely
+# literal while '?(a)' is one character and then '(a)' - so it covers the file
+# called '?(a)' and the file called '+(a)', which is why that one's report
+# names two lines.
+#
+# '!(x)' is the fourth operator and is not here: shale refuses a pattern
+# beginning with '!' while reading the file, so no setting of extglob can reach
+# a matcher with one.  test_build_refuses_a_pattern_it_cannot_translate is
+# where that refusal is asserted, on the '!keep' line of its ignore file.
+option_fixture() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mklayer common/base notes.txt
+  mklayer common/base notes.swp
+  mklayer common/base '@(a|b).swp'
+  mklayer common/base a.swp
+  mklayer common/base '+(a)'
+  mklayer common/base '?(a)'
+  mklayer common/base a
+  mklayer common/base aa
+  mklayer common/base sub/.nested
+  sandbox_mkdir "$HOME/.dotfiles/common/base/empty"
+  mkignore common '*.swp' '@(a|b).swp' '+(a)' '?(a)' '*.TXT'
+  sandbox_write "$HOME" .zshrc 'mine, and not a link'
+  sandbox_write "$HOME/sub" .nested 'mine, and not a link'
+}
+
+# The whole of which's stderr for a path this fixture composes and no ignore
+# pattern covers.  Nothing here ever applies - the fixture plants two files of
+# its own in $HOME so that doctor has a conflict to count - so every such path
+# gets the note for a built tree nobody has stowed.
+option_unlinked_note() {
+  local name=$1
+  printf "shale: note: '%s' is in the built tree at %s, and nothing is at %s\n" \
+    "$name" "$HOME/.dotfiles/current/$name" "$HOME/$name"
+  printf 'shale:   no path in that tree is linked in %s at all, which is what a build nobody has applied looks like\n' \
+    "$HOME"
+  printf "shale:   run 'shale apply': a path still missing after one is a path stow declined to link\n"
+}
+
+# The answers that fixture has, under any shell that started shale.  Every
+# assertion is labelled with the option in force, so a failure names it rather
+# than leaving a dozen near-identical cases to be told apart by line number.
+assert_option_answers() {
+  local label=$1
+  run_shale build
+  assert_status 0 "$shale_status" "$label: the build"
+  assert_empty "$shale_err" "$label: the build stderr"
+  # LC_ALL on the sort, not on the run: the order a glob expands in is the
+  # locale's, and this is the harness's own listing rather than shale's answer.
+  assert_eq '.
+./+(a)
+./.stow-local-ignore
+./.zshrc
+./?(a)
+./@(a|b).swp
+./a
+./a.swp
+./aa
+./empty
+./notes.swp
+./notes.txt
+./sub
+./sub/.nested' \
+    "$(cd "$HOME/.dotfiles/current" && find . -print | LC_ALL=C sort)" \
+    "$label: the composed tree"
+  # The whole of stderr on every one of these rather than a fragment, because
+  # what an inherited option does to them is add a line or swap one note for
+  # the other, and a 'contains' on the first line would see neither.
+  run_shale which notes.txt
+  assert_status 0 "$shale_status" "$label: which notes.txt"
+  assert_contains "$shale_out" \
+    "winner    base  $HOME/.dotfiles/common/base/notes.txt" "$label: which notes.txt stdout"
+  # nocasematch's half: the upper-case pattern on line 5 must not reach this
+  # name.  It is the only thing keeping this path off the ignore list, so an
+  # option that folds case moves it to the other note entirely.
+  assert_eq "$(option_unlinked_note notes.txt)" "$shale_err" "$label: which notes.txt stderr"
+  # extglob's, four times over.  Read as an alternation the second pattern
+  # covers this name too, and the report grows a line naming it.
+  run_shale which a.swp
+  assert_status 0 "$shale_status" "$label: which a.swp"
+  assert_eq "shale: note: 'a.swp' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/common/.shale-ignore:1: *.swp
+shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads" \
+    "$shale_err" "$label: which a.swp stderr"
+  # Covered twice under the documented subset - by its own line and by the '?'
+  # of the line below it - and by neither as an extglob operator.
+  run_shale which '+(a)'
+  assert_status 0 "$shale_status" "$label: which +(a)"
+  assert_eq "shale: note: '+(a)' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/common/.shale-ignore:3: +(a)
+shale:   $HOME/.dotfiles/common/.shale-ignore:4: ?(a)
+shale:   shale writes those patterns into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads" \
+    "$shale_err" "$label: which +(a) stderr"
+  run_shale which '?(a)'
+  assert_status 0 "$shale_status" "$label: which ?(a)"
+  assert_eq "shale: note: '?(a)' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/common/.shale-ignore:4: ?(a)
+shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads" \
+    "$shale_err" "$label: which ?(a) stderr"
+  # The other direction: the two names an extglob '+(a)' and '?(a)' would
+  # start covering, which the documented subset does not reach at all.
+  run_shale which a
+  assert_status 0 "$shale_status" "$label: which a"
+  assert_eq "$(option_unlinked_note a)" "$shale_err" "$label: which a stderr"
+  run_shale which aa
+  assert_status 0 "$shale_status" "$label: which aa"
+  assert_eq "$(option_unlinked_note aa)" "$shale_err" "$label: which aa stderr"
+  run_shale doctor
+  assert_status 1 "$shale_status" "$label: the doctor"
+  assert_contains "$shale_out" \
+    "shale: 2 paths in $HOME hold something no apply put there" "$label: the doctor stdout"
+}
+
+# The clean run, so that the cases below are asserting a difference from
+# something rather than agreeing with each other about a fixture that never
+# worked.
+test_meta_the_inherited_option_fixture_answers_under_a_plain_shell() {
+  option_fixture
+  assert_option_answers 'no option'
+}
+
+# A pattern of the shape the README teaches, and under nocasematch it covered a
+# name whose case it does not have - which stow, given that same pattern as a
+# perl regexp, went on linking.  which said no apply links a file apply had
+# just linked.
+test_meta_an_inherited_nocasematch_does_not_widen_an_ignore_pattern() {
+  option_fixture
+  inherit_shell_line 'shopt -s nocasematch'
+  assert_option_answers 'nocasematch'
+}
+
+# The other half of the same divergence, and the one where shale's two views
+# came apart from each other: translate_segment escapes '@(a|b).swp' character
+# by character into the literal stow reads, while the matcher here read it as
+# an alternation.
+test_meta_an_inherited_extglob_leaves_an_ignore_pattern_literal() {
+  option_fixture
+  inherit_shell_line 'shopt -s extglob'
+  assert_option_answers 'extglob'
+}
+
+# Every walk in the script pairs '*' with '.*', so a dotglob makes '*' return
+# the dotfiles a second time: doctor reported four conflicts where there were
+# two, and named each path twice.
+test_meta_an_inherited_dotglob_does_not_walk_a_path_twice() {
+  option_fixture
+  inherit_shell_line 'shopt -s dotglob'
+  assert_option_answers 'dotglob'
+}
+
+# failglob makes an unmatched listing an expansion error rather than a pattern
+# arriving as itself, which the empty layer directory in the fixture is: the
+# build ended with bash's own 'no match' on stderr and nothing composed.
+test_meta_an_inherited_failglob_does_not_stop_a_build() {
+  option_fixture
+  inherit_shell_line 'shopt -s failglob'
+  assert_option_answers 'failglob'
+}
+
+# noglob arrives through an exported SHELLOPTS on every bash there is, the
+# floor included; BASH_ENV is the route used here because SHELLOPTS is readonly
+# in this shell.  Nothing expands at all under it, so the composer was handed
+# the pattern and the build died in cp.
+test_meta_an_inherited_noglob_does_not_stop_a_build() {
+  option_fixture
+  inherit_shell_line 'set -f'
+  assert_option_answers 'noglob'
+}
+
+# GLOBIGNORE is inert as an imported variable and live the moment anything
+# assigns it, which a BASH_ENV file does.  Spelled with the whole directory
+# because that is the only spelling both bashes act on: 5.2 matches the pattern
+# against the expanded word with '/' respected and 3.2 does not, so a bare
+# '*.swp' thins a build on the floor and passes vacuously here.  Either way the
+# files left the composed tree with the build still exiting 0.
+test_meta_an_inherited_globignore_does_not_thin_a_build() {
+  option_fixture
+  inherit_shell_line "GLOBIGNORE=\$HOME/.dotfiles/common/base/*.swp"
+  assert_option_answers 'GLOBIGNORE'
+}
+
+# The one line of that normalising block that can fail.  'unset' will not
+# remove a readonly variable: it complains on stderr, leaves the value in
+# force, and changes no exit status - so before shale checked, this composed a
+# tree with two of the layer's files missing from it, exited 0, and named
+# neither.  Losing files in silence is the outcome class that is worse than
+# any refusal, so the refusal is what is asserted here.
+#
+# A readonly needs a BASH_ENV file, which is arbitrary code and which shale
+# does not otherwise defend against.  The distinction this case holds is not
+# that shale survives a hostile environment: it is that shale's own
+# normalisation failing is something shale says rather than something the user
+# discovers in a diff.  Both bash's complaint and shale's own line are on
+# stderr, so the assertions name shale's.
+test_meta_a_globignore_shale_cannot_unset_stops_the_build() {
+  option_fixture
+  inherit_shell_line "GLOBIGNORE=\$HOME/.dotfiles/common/base/*.swp" \
+    'readonly GLOBIGNORE'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" \
+    "shale: GLOBIGNORE is set to '$HOME/.dotfiles/common/base/*.swp' and shale could not unset it" \
+    'the build stderr'
+  assert_contains "$shale_err" \
+    'shale:   it decides what every directory listing returns, so a build would drop layer files and name none of them' \
+    'the build stderr'
+  # Nothing composed, rather than a tree that is missing the two files the
+  # pattern covers: the refusal is before any of the work.
+  assert_missing "$HOME/.dotfiles/current" 'the built tree'
+  # And every other command refuses alike - the environment is wrong before
+  # there is a command to run in it.
+  run_shale which .zshrc
+  assert_status 1 "$shale_status" 'which'
+  assert_contains "$shale_err" 'shale: GLOBIGNORE is set to' 'the which stderr'
+}
+
+# No listing in the script holds a case-bearing character, so this changes
+# nothing today.  It is normalised and pinned here so that a listing which one
+# day does cannot acquire a second meaning without a case saying so.
+test_meta_an_inherited_nocaseglob_changes_no_answer() {
+  option_fixture
+  inherit_shell_line 'shopt -s nocaseglob'
+  assert_option_answers 'nocaseglob'
+}
+
+# Also no change: every listing is written for an unmatched pattern arriving as
+# itself, and the two doctor walks that say so in a comment are the reason this
+# is normalised rather than left.
+test_meta_an_inherited_nullglob_changes_no_answer() {
+  option_fixture
+  inherit_shell_line 'shopt -s nullglob'
+  assert_option_answers 'nullglob'
+}
+
+# The one deliberately not normalised that can still be turned off from the
+# environment.  A range is only ever matched inside the byte locale
+# enter_byte_locale sets, where both settings of the option agree, so
+# normalising it would tie shale's meaning to a name bash 3.2 does not have.
+# That missing name is what the redirection is for, and it leaves this case
+# asserting the clean answers a second time on the floor - which is the whole
+# of what an option that is not there can do.
+test_meta_globasciiranges_turned_off_changes_no_answer() {
+  option_fixture
+  inherit_shell_line 'shopt -u globasciiranges 2>/dev/null'
+  assert_option_answers 'globasciiranges off'
+}
+
+# The drift guard for the set above: the script normalises a list, the cases
+# above cover a list, and nothing else makes them the same list.  Adding a name
+# to the script without a case leaves it asserted by nothing, and a case for a
+# name the script no longer normalises passes without exercising anything.
+#
+# It reads the names off the script rather than holding a copy, so the script
+# stays the one place the list is written.
+test_meta_every_normalised_shell_option_has_a_case() {
+  local line count names name missing extra covered
+  # The single 'shopt -u' the script runs at the top level, with its arguments.
+  # Anchored, so a 'shopt -u' indented inside a function - stow_default_covers
+  # has one - is not read as part of the startup list.  Counted rather than
+  # tested for a newline: a command substitution strips the trailing one, so a
+  # single line and no line at all are told apart only by the count.
+  count=$(grep -c '^shopt -u ' "$SHALE")
+  [ "$count" = 1 ] ||
+    fail "the script has $count top-level 'shopt -u' lines, and this case reads one" \
+      'it guards nothing at zero and reads only the first at two'
+  line=$(grep '^shopt -u ' "$SHALE")
+  names=${line#shopt -u }
+  covered=' dotglob extglob failglob nocaseglob nocasematch nullglob '
+  missing=
+  extra=
+  # Unquoted on purpose: the script's own argument list, split into words.
+  # shellcheck disable=SC2086
+  for name in $names; do
+    case "$covered" in
+      *" $name "*) ;;
+      *) missing="$missing $name" ;;
+    esac
+  done
+  for name in $covered; do
+    case " $names " in
+      *" $name "*) ;;
+      *) extra="$extra $name" ;;
+    esac
+  done
+  [ -z "$missing" ] ||
+    fail "the script normalises an option no case above covers:$missing" \
+      'add a test_meta_an_inherited_<name>_ case, and this list, in the same change'
+  [ -z "$extra" ] ||
+    fail "this case names an option the script no longer normalises:$extra" \
+      'the case for it is passing without exercising anything'
 }
 
 # noclobber is what makes "nothing may already exist at a path the harness is

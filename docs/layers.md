@@ -407,6 +407,16 @@ directory whose name matches and never looks inside it.
 A `#` starts a comment only at the beginning of a line. Anywhere else it is part of the pattern, and
 a pattern that has to *begin* with one is written as a set: `[#]notes[#]`.
 
+That subset is the whole of it, whichever shell you run `shale` from. Setting an option does not on
+its own reach the scripts a shell starts, but exporting one does: `export SHELLOPTS` hands every
+`set -o` option on to every child, `export BASHOPTS` does the same for the `shopt` options on bash
+4.1 and later — there is no such variable on the bash 3.2 macOS ships — and a `BASH_ENV` file runs
+before any script bash starts and can set anything, on every version. In a shell that passes on an
+`extglob`, `@(a|b).swp` would be an alternation rather than a filename, and with a `nocasematch`,
+`*.swp` would cover a file called `A.SWP`. Shale turns those off for itself before it reads a
+pattern, so a committed `.shale-ignore` says the same thing from your login shell, from cron and from
+CI.
+
 Nothing you write is a regular expression. Shale translates each glob into the regexp stow's ignore
 file wants and escapes every other character on the way, so a `+`, a `(` or a `.` in a filename is
 that character and nothing else. What it will not translate it refuses by name, with the file and
