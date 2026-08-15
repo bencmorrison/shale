@@ -233,6 +233,7 @@ shale_err=
 inner_status=0
 inner_out=
 channel_probe=
+utf8_locale=
 
 # True when descriptors 7, 8 and 9 are the ones for the CASE_DIR in force.  It is
 # false in exactly two places, and both want the old by-name append: the main
@@ -942,6 +943,36 @@ stub_path_without() {
     sandbox_leaf "$stub_path" "$tool" new
     ln -s "$found" "$sandbox_path" || fail "could not link $tool"
   done
+}
+
+# The name of a UTF-8 locale this machine has, in utf8_locale.  $1 is the line
+# that says what the calling case needed it for, printed with the list of
+# candidates if there is none - a machine with no UTF-8 locale fails the case
+# rather than quietly testing less, run_case having pinned LC_ALL=C for every
+# case in the suite.
+#
+# Found by asking bash what it makes of a two-byte character rather than by
+# asking the system what locales it has, because what every caller is actually
+# asking is whether the shell it runs shale under will read that name as one
+# character.
+find_utf8_locale() {
+  local candidate width
+  utf8_locale=
+  for candidate in en_US.UTF-8 C.UTF-8 en_US.utf8 C.utf8; do
+    # stderr dropped because a locale the machine has not got is answered by
+    # bash's own 'cannot change locale' warning, which is this loop's normal
+    # course rather than anything to report.
+    # shellcheck disable=SC2016  # the expansion is for the bash being started, not this one
+    width=$(LC_ALL=$candidate "$BASH" -c 'printf %s "${#1}"' _ "$(printf '\303\251')" 2>/dev/null) ||
+      width=
+    if [ "$width" = 1 ]; then
+      utf8_locale=$candidate
+      return 0
+    fi
+  done
+  fail 'no UTF-8 locale on this machine, and this case needs one' \
+    "${1-}" \
+    'tried: en_US.UTF-8 C.UTF-8 en_US.utf8 C.utf8'
 }
 
 # ------------------------------------------------------------------ assertions
@@ -1948,6 +1979,206 @@ test_build_awkward_filenames_survive() {
     run_shale build
     assert_status 0 "$shale_status" "'$name' exit status"
     assert_eq "personal/base/$name" "$(cat "$HOME/.dotfiles/current/$name")" "'$name' content"
+  done
+}
+
+# #110: a layer *directory* whose name holds a byte that is not valid in the
+# locale was not descended into on bash 3.2, so its whole subtree was dropped
+# from the build - and from doctor's walks, which is why every command reported
+# success while a real file never reached $HOME and 'which' went on naming the
+# layer that provided it.  bash 3.2 is what macOS ships and a UTF-8 locale is
+# the default there, so this was the shipped configuration on one of the two
+# supported platforms.
+#
+# Both locales, because agreeing is the whole assertion: on the fix this case
+# reads the same on bash 3.2 and bash 5, under C and under UTF-8, and on main it
+# is red on bash 3.2 under UTF-8 alone.  The one CI job that can go red for it is
+# therefore the macOS one.
+#
+# The name is built from explicit bytes and then tried, because whether a volume
+# will keep it is the volume's business: APFS accepts only valid UTF-8 filenames
+# for creation, so a name refused here is dropped from the fixture rather than
+# failing the case.  The control file is asserted whatever happened, so a run
+# that got no fixture still says shale composed something - and says in the
+# transcript which of the two it was.
+test_build_a_layer_directory_named_with_an_invalid_byte_is_composed() {
+  local utf8 loc sub layer
+  find_utf8_locale \
+    'it asserts that a name the locale cannot decode is composed anyway, which under LC_ALL=C every bash does already'
+  utf8=$utf8_locale
+  sub=$(printf 'b\377dir')
+  conf 'local local'
+  mklayer local .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  layer=$sandbox_dir
+  # The creation is the probe: a volume that refuses the name answers here.
+  if mkdir "$layer/$sub" 2>/dev/null; then
+    sandbox_write "$layer/$sub" thing 'below the invalid byte'
+  else
+    sub=
+  fi
+  for loc in C "$utf8"; do
+    LC_ALL=$loc run_shale apply
+    assert_status 0 "$shale_status" "apply under LC_ALL=$loc"
+    assert_empty "$shale_err" "apply stderr under LC_ALL=$loc"
+    assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc" \
+      "the control link under LC_ALL=$loc"
+    LC_ALL=$loc run_shale doctor
+    assert_status 0 "$shale_status" "doctor under LC_ALL=$loc"
+    [ -n "$sub" ] || continue
+    assert_eq 'below the invalid byte' \
+      "$(cat "$HOME/.dotfiles/current/$sub/thing")" "the built copy under LC_ALL=$loc"
+    assert_symlink_to "$HOME/$sub/thing" "$HOME/.dotfiles/current/$sub/thing" \
+      "the link under LC_ALL=$loc"
+    # The half of #110 that made the silence worse: which said a layer provided
+    # a path the build had just dropped.
+    LC_ALL=$loc run_shale which "$sub/thing"
+    assert_status 0 "$shale_status" "which under LC_ALL=$loc"
+    assert_contains "$shale_out" "$HOME/.dotfiles/local/$sub/thing" \
+      "the which stdout under LC_ALL=$loc"
+  done
+}
+
+# The same walk against every shape of name a layer can hold, as a file and as a
+# directory with a subtree under it, through a real stow.  A name is only ever
+# one component here: what broke in #110 was the fixed directory part of the
+# glob, so a hostile name has to be *above* a file rather than at it before the
+# walk is asked anything hard.
+#
+# The first list is names every volume keeps; the second holds a byte that is
+# valid in no UTF-8 name, which a volume may refuse outright, and each of those
+# is tried rather than assumed for the reason above.  The first list is what
+# stops the case passing having built nothing.
+test_build_hostile_names_survive_as_files_and_as_directories() {
+  local utf8 loc name names odd layer files kept
+  find_utf8_locale \
+    'it asserts that names the locale cannot decode are composed anyway, which under LC_ALL=C every bash does already'
+  utf8=$utf8_locale
+  names=('-dash' 'two words' 'star*name' 'q?mark' 'bracket[name')
+  # A newline in the middle of the name, never at the end of it: this harness
+  # proves a directory is inside the test root by resolving it with 'cd' and
+  # 'pwd -P', and a command substitution strips exactly a trailing one.
+  names[${#names[@]}]=$(printf 'a\nb')
+  names[${#names[@]}]=$(printf 'caf\303\251')
+  odd=("$(printf 'caf\303')" "$(printf 'b\377dir')" "$(printf '\377')")
+  conf 'local local'
+  mklayer local .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  layer=$sandbox_dir
+  sandbox_mkdir "$layer/files"
+  files=$sandbox_dir
+  kept=()
+  for name in ${odd[@]+"${odd[@]}"}; do
+    mkdir "$layer/$name" 2>/dev/null || continue
+    rmdir "$layer/$name" || fail "could not remove the probe at $layer/$name"
+    kept[${#kept[@]}]=$name
+  done
+  names=(${names[@]+"${names[@]}"} ${kept[@]+"${kept[@]}"})
+  for name in ${names[@]+"${names[@]}"}; do
+    sandbox_write "$files" "$name" "a file called $name"
+    sandbox_mkdir "$layer/$name/deep"
+    sandbox_write "$sandbox_dir" leaf "under a directory called $name"
+  done
+  for loc in C "$utf8"; do
+    LC_ALL=$loc run_shale apply
+    assert_status 0 "$shale_status" "apply under LC_ALL=$loc"
+    assert_empty "$shale_err" "apply stderr under LC_ALL=$loc"
+    for name in ${names[@]+"${names[@]}"}; do
+      assert_eq "a file called $name" \
+        "$(cat "$HOME/.dotfiles/current/files/$name")" "'$name' as a file, under LC_ALL=$loc"
+      assert_symlink_to "$HOME/files/$name" "$HOME/.dotfiles/current/files/$name" \
+        "'$name' as a file, under LC_ALL=$loc"
+      assert_eq "under a directory called $name" \
+        "$(cat "$HOME/.dotfiles/current/$name/deep/leaf")" \
+        "'$name' as a directory, under LC_ALL=$loc"
+      assert_symlink_to "$HOME/$name/deep/leaf" \
+        "$HOME/.dotfiles/current/$name/deep/leaf" \
+        "'$name' as a directory, under LC_ALL=$loc"
+    done
+  done
+}
+
+# The order half of #110's fix, and the reason the byte locale could not simply
+# be widened to cover the walk: LC_ALL decides the order a glob comes back in as
+# well as what it matches.  Under en_US collation '.Xresources' sorts after
+# 'apple' and under C it sorts before it, which is an ordinary pair of dotfiles
+# rather than a contrived one - so before this the order shale walked a tree in,
+# and the order its reports print in, moved with the reader's locale.
+#
+# The order is spelled out rather than computed, every name in it being ASCII
+# and so the same bytes on every volume - the pin is the point, and a computed
+# expectation could only be computed by the glob under test.  Its members are
+# ordinary dotfiles and ordinary words, and en_US puts them in a different order
+# from all five of: '.Xresources' after 'apple', 'Zebra' after 'Mango' and after
+# 'apple'.
+#
+# Read out of build's conflict report, that being the one output printed in
+# listing order for a fixture this small.  On a machine whose UTF-8 locale
+# collates by byte the two orders coincide and this cannot tell them apart; the
+# Linux job's en_US.UTF-8 is where it does.
+test_build_a_directory_is_listed_in_byte_order_whatever_the_locale() {
+  local utf8 loc name line expected got
+  find_utf8_locale \
+    'it asserts that the listing order does not move with the locale, which needs a locale that collates differently from bytes'
+  utf8=$utf8_locale
+  conf 'base base' 'local local'
+  for name in .Xresources .bashrc Mango Zebra apple zulu; do
+    mklayer base "$name" "a file at $name"
+    mklayer local "$name/inside" "a directory at $name"
+  done
+  expected=' .Xresources .bashrc Mango Zebra apple zulu'
+  for loc in C "$utf8"; do
+    LC_ALL=$loc run_shale build
+    assert_status 1 "$shale_status" "build under LC_ALL=$loc"
+    got=
+    while IFS= read -r line; do
+      case "$line" in
+        'shale: conflict at '*) got="$got ${line#shale: conflict at }" ;;
+      esac
+    done <<PARSE
+$shale_err
+PARSE
+    assert_eq "$expected" "$got" "the conflict order under LC_ALL=$loc"
+  done
+}
+
+# Which layer wins is the config's business and never the walk's, and a locale
+# that reorders a listing must not be able to reach it.  Both orders are
+# exercised - the config puts 'local' last, so 'local' wins every path in it
+# whatever order either layer's directory came back in.
+#
+# The spread is the point: an ASCII name, a name that is valid UTF-8, and a name
+# holding a byte that is valid in no UTF-8 name, each provided by both layers,
+# at the top of the tree and below a directory both layers provide.
+test_build_layer_precedence_is_the_config_order_whatever_the_name() {
+  local utf8 loc name names layer
+  find_utf8_locale \
+    'it asserts that precedence is unmoved by a locale that reorders a listing'
+  utf8=$utf8_locale
+  names=(plain "$(printf 'caf\303\251')")
+  conf 'base base' 'local local'
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  layer=$sandbox_dir
+  if mkdir "$layer/$(printf '\377probe')" 2>/dev/null; then
+    rmdir "$layer/$(printf '\377probe')" ||
+      fail 'could not remove the probe directory'
+    names[${#names[@]}]=$(printf '\377probe')
+  fi
+  for name in ${names[@]+"${names[@]}"}; do
+    mklayer base "$name" 'base wins nothing'
+    mklayer local "$name" 'local wins'
+    mklayer base "shared/$name" 'base wins nothing'
+    mklayer local "shared/$name" 'local wins'
+  done
+  for loc in C "$utf8"; do
+    LC_ALL=$loc run_shale build
+    assert_status 0 "$shale_status" "build under LC_ALL=$loc"
+    for name in ${names[@]+"${names[@]}"}; do
+      assert_eq 'local wins' "$(cat "$HOME/.dotfiles/current/$name")" \
+        "'$name' at the top, under LC_ALL=$loc"
+      assert_eq 'local wins' "$(cat "$HOME/.dotfiles/current/shared/$name")" \
+        "'$name' below a shared directory, under LC_ALL=$loc"
+    done
   done
 }
 
@@ -5009,29 +5240,12 @@ test_apply_a_glob_matches_one_path_component_at_a_time() {
 # is matched nowhere, so one verdict of each kind is pinned outright and the
 # case cannot pass by finding nothing.
 test_apply_a_non_ascii_file_name_is_matched_as_stow_matches_it() {
-  local utf8 candidate width dir entry name rel linked said
+  local utf8 dir entry name rel linked said
   # A UTF-8 locale is what makes this case able to catch anything: under C the
-  # matcher and the shell agree whatever shale does.  Found by asking bash what
-  # it makes of a two-byte character rather than by asking the system what
-  # locales it has, and a machine with none fails the case rather than quietly
-  # testing less.
-  utf8=
-  for candidate in en_US.UTF-8 C.UTF-8 en_US.utf8 C.utf8; do
-    # stderr dropped because a locale the machine has not got is answered by
-    # bash's own 'cannot change locale' warning, which is this loop's normal
-    # course rather than anything to report.
-    # shellcheck disable=SC2016  # the expansion is for the bash being started, not this one
-    width=$(LC_ALL=$candidate "$BASH" -c 'printf %s "${#1}"' _ "$(printf '\303\251')" 2>/dev/null) ||
-      width=
-    if [ "$width" = 1 ]; then
-      utf8=$candidate
-      break
-    fi
-  done
-  [ -n "$utf8" ] ||
-    fail 'no UTF-8 locale on this machine, and this case needs one' \
-      'it asserts that shale agrees with stow about a multibyte file name, which under LC_ALL=C it would do however the matching worked' \
-      'tried: en_US.UTF-8 C.UTF-8 en_US.utf8 C.utf8'
+  # matcher and the shell agree whatever shale does.
+  find_utf8_locale \
+    'it asserts that shale agrees with stow about a multibyte file name, which under LC_ALL=C it would do however the matching worked'
+  utf8=$utf8_locale
 
   conf 'base common/base'
   mkignore common '??.txt'
@@ -11398,6 +11612,57 @@ test_which_a_tree_linked_only_by_a_dangling_link_is_not_called_unapplied() {
   assert_not_contains "$shale_err" 'no path in that tree is linked' 'stderr'
 }
 
+# built_tree_is_linked reads the built tree with a glob of its own, so #110
+# reaches it: on the bash 3.2 floor under a UTF-8 locale, a directory whose name
+# holds a byte the locale cannot decode was not descended into, and the only
+# linked path in the tree sitting under one made this note say 'no path in that
+# tree is linked in $HOME at all, which is what a build nobody has applied looks
+# like' about a tree an apply had just landed.  Measured, on that combination
+# alone, before the walk went through list_dir.
+#
+# Nothing is at the top of the tree but the file shale writes, so the walk has to
+# descend to answer at all, and 'thing' is kept out of the apply by a resource
+# file rather than by hand - which is the shape #106 exists for.  One directory,
+# not one of each: an ASCII sibling would be found by the same walk and the
+# descent this is about would never be needed.  Its name holds the byte where the
+# volume keeps it and is ASCII where it does not, so the wording is pinned
+# everywhere and the byte-locale descent wherever it can be.
+test_which_the_unlinked_note_descends_below_a_hostile_directory() {
+  local utf8 loc dir odd layer
+  find_utf8_locale \
+    'it asserts that the walk behind that note descends into a name the locale cannot decode'
+  utf8=$utf8_locale
+  conf 'base common/base'
+  sandbox_mkdir "$HOME/.dotfiles/common/base"
+  layer=$sandbox_dir
+  dir=plain
+  odd=$(printf 'b\377dir')
+  # The creation is the probe: a volume that refuses the name answers here.
+  if mkdir "$layer/$odd" 2>/dev/null; then
+    rmdir "$layer/$odd" || fail "could not remove the probe at $layer/$odd"
+    dir=$odd
+  fi
+  mklayer common/base "$dir/thing" 'the path asked about'
+  mklayer common/base "$dir/other" 'its sibling, which the apply does link'
+  sandbox_write "$HOME" .stowrc '--ignore=thing'
+  for loc in C "$utf8"; do
+    LC_ALL=$loc run_shale apply
+    assert_status 0 "$shale_status" "the apply under LC_ALL=$loc"
+    assert_empty "$shale_err" "the apply stderr under LC_ALL=$loc"
+    assert_missing "$HOME/$dir/thing"
+    assert_symlink_to "$HOME/$dir/other" "$HOME/.dotfiles/current/$dir/other" \
+      "the sibling under LC_ALL=$loc"
+    LC_ALL=$loc run_shale which "$dir/thing"
+    assert_status 0 "$shale_status" "which under LC_ALL=$loc"
+    assert_eq "shale: note: '$dir/thing' is in the built tree at $HOME/.dotfiles/current/$dir/thing, and nothing is at $HOME/$dir/thing
+shale:   something has linked other paths from that tree, though not necessarily since this one reached it
+shale:   run 'shale apply': a path still missing after one is a path stow declined to link
+shale:   stow reads $HOME/.stowrc as well, and shale does not act on what is in it
+shale:   shale doctor names the options such a file sets, any of which can keep this path out of an apply" \
+      "$shale_err" "the which stderr under LC_ALL=$loc"
+  done
+}
+
 # --dotfiles is the one option a resource file can set that decides where a path
 # lands rather than whether it lands: stow links 'dot-zshrc' as '.zshrc', so the
 # file is in $HOME under a name shale did not compose, nothing in the tree
@@ -12048,6 +12313,72 @@ test_meta_no_banned_constructs() {
   if [ "$found" -gt 0 ]; then
     fail "$found banned construct(s) in $SHALE" ${report[@]+"${report[@]}"}
   fi
+}
+
+# #110's standing rule, and the one thing that keeps it standing: every glob in
+# the script that lists a directory expands inside list_dir, which puts it in the
+# byte locale.  A glob written anywhere else reads exactly like the six that were
+# there before, and what it costs is a whole subtree dropped from the build on
+# the bash 3.2 floor under a UTF-8 locale - with build, apply, doctor and which
+# all exiting 0 and saying nothing, because nothing downstream can report what
+# the walk never enumerated.  No behavioural case can catch a glob added at a
+# path it does not reach, so this grep is what does.
+#
+# What it looks for is the glob itself and not the command around it, so that no
+# list of commands has to be kept complete: a '/*' or a '/.*' after a closing
+# quote, after a plain '$name', or after a '${...}' - which is every pathname
+# expansion in the script - plus 'compgen', whose -G takes its pattern quoted and
+# would slip past all of that.  It found seven listings on the rebase across
+# #106, one of them new.
+#
+# Two shapes are not that and are dropped: a case arm, and list_dir's own two
+# lines.  A case arm is told by its ')' arriving before any '=' or ';', which
+# separates '"$ANCESTOR"/*) return 0 ;;' from 'n=$(ls "$d"/*)' and from
+# 'done < <(printf "%s\n" "$d"/*)' - both of which reach a ')' too, and both of
+# which this must keep.  All ten shapes were run past it: a plain 'for' list, a
+# wrapped one, 'set --', '[ -e ]', 'printf', an array assignment, a command
+# substitution, a process substitution, 'compgen -G', and an unquoted '$dir/*'.
+#
+# What it still cannot see, and what the failure below therefore says rather than
+# claiming the file is clean: a glob whose '*' is inside the quotes, one built by
+# concatenation and expanded later, and the first line of a wrapped 'for' - that
+# last one only because the continuation carrying the glob is caught instead,
+# which is the line a reader has to fix anyway.  Full-line comments are blanked
+# first, keeping the line numbers pointing at the script.
+test_meta_every_directory_listing_expands_inside_list_dir() {
+  local hits line stray sentinel nl
+  nl=$'\n'
+  hits=$(sed 's/^[[:space:]]*#.*//' "$SHALE" |
+    grep -nE '"/\.?\*|\$[A-Za-z_][A-Za-z0-9_]*/\.?\*|\$\{[^}]*\}/\.?\*|(^|[^[:alnum:]_-])compgen([^[:alnum:]_-]|$)')
+  stray=
+  sentinel=0
+  while IFS= read -r line; do
+    # Every hit is 'LINENO:<source>'.
+    case "${line#*:}" in
+      *'DIR_ENTRIES=('*)
+        sentinel=1
+        continue
+        ;;
+    esac
+    # A case arm: a ')' with no '=' and no ';' before it.
+    if printf '%s\n' "${line#*:}" | grep -qE '^[[:space:]]*[^=;]*\)'; then
+      continue
+    fi
+    stray=${stray:+$stray$nl}$line
+  done <<PARSE
+$hits
+PARSE
+  # The strays first, they being the finding somebody has to act on; the sentinel
+  # second, and only where there were none, because a pattern that had stopped
+  # matching anything at all would otherwise report a clean script.
+  [ -z "$stray" ] ||
+    fail "a directory looks to be listed by a glob outside list_dir, which leaves it in the reader's locale:" \
+      "$stray" \
+      'route it through list_dir, or a name the locale cannot decode is dropped at that path' \
+      "this grep sees an unquoted '/*' after a quote, a \$name or a \${...}, and compgen; it does not see one inside the quotes or built by concatenation, so a clean run here is not a proof"
+  [ "$sentinel" -eq 1 ] ||
+    fail "the pattern found none of list_dir's own listings, so it has stopped matching what it was written for" \
+      'nothing this case says can be trusted until the pattern is fixed'
 }
 
 # The gap the case above cannot reach.  A dot-glob matches '.' and '..' on the
