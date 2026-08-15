@@ -12373,6 +12373,325 @@ shale: note: present in current/ but no layer provides it — current/ is stale,
     "$shale_err" 'stderr with no provider'
 }
 
+# A note that says no build gets past this path settles the ones that describe
+# what a build writes and what an apply does with it.  Both are true on their
+# own; together the reader is told about a list in a tree no build will produce,
+# and sent to rename a file that would still not be linked once renamed.
+#
+# The suppressed note's remedy is the tell: 'nothing but a different name gets
+# this path past it' is false while the layer stands, because the build that
+# would have written the list refuses to run at all.
+#
+# The two notes beside it that a refusal does not settle stay: they say the
+# composer skips a name, which is no less true where nothing is composed.  The
+# controls are the same two ignore notes on paths the refusal does not cover, so
+# a suppression that reached too far shows up as a missing answer rather than as
+# a passing case.
+test_which_a_layer_shale_refuses_settles_the_ignore_notes() {
+  local note
+  note="shale: note: 'build' would fail here — shale writes $HOME/.dotfiles/current/.stow-local-ignore itself, and no build accepts a layer providing one"
+  conf 'base personal/base'
+  mkignore personal 'secret*'
+  mklayer personal/base '.stow-local-ignore/foo~'
+  mklayer personal/base '.stow-local-ignore/secret/x'
+  mklayer personal/base '.stow-local-ignore/plain'
+  mklayer personal/base '.stow-local-ignore/.shale-ignore'
+  mklayer personal/base 'notes~'
+  mklayer personal/base secret/y
+  # The transcript in the issue: stow's own list, and the refusal beside it.
+  run_shale which '.stow-local-ignore/foo~'
+  assert_status 0 "$shale_status" "stow's own list"
+  assert_eq "winner    base  $HOME/.dotfiles/personal/base/.stow-local-ignore/foo~" \
+    "$shale_out" "stdout for stow's own list"
+  assert_eq "$note" "$shale_err" "stderr for stow's own list"
+  # The reader's own pattern, which names a file and a line and is settled the
+  # same way: the line is real and editing it changes nothing here.
+  run_shale which '.stow-local-ignore/secret/x'
+  assert_status 0 "$shale_status" 'the ignore file'
+  assert_eq "$note" "$shale_err" 'stderr for the ignore file'
+  # The refusal on its own, unchanged: this is about which of several notes
+  # fire together, so the single-reason answer may not move.
+  run_shale which '.stow-local-ignore/plain'
+  assert_status 0 "$shale_status" 'the refusal alone'
+  assert_eq "$note" "$shale_err" 'stderr for the refusal alone'
+  # And the note a refusal does not settle, which follows it as it always has.
+  run_shale which '.stow-local-ignore/.shale-ignore'
+  assert_status 0 "$shale_status" 'the name no build composes'
+  assert_eq "$note
+shale: note: no build composes a .shale-ignore — shale reads the one at the top of a clone root and copies none of them" \
+    "$shale_err" 'stderr for the name no build composes'
+  # The controls: the same two ignore notes where no refusal covers the path.
+  run_shale which 'notes~'
+  assert_status 0 "$shale_status" 'the control on stow list'
+  assert_eq "shale: note: 'notes~' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: .+~
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it" \
+    "$shale_err" 'stderr for the control on stow list'
+  run_shale which secret/y
+  assert_status 0 "$shale_status" 'the control on the ignore file'
+  assert_eq "shale: note: 'secret/y' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/personal/.shale-ignore:1: secret*
+shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads" \
+    "$shale_err" 'stderr for the control on the ignore file'
+  # The refusal the note promises, which is the whole of why the others are
+  # suppressed: nothing is composed and no apply is ever reached.
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" \
+    "shale: layer 'base' provides $HOME/.dotfiles/personal/base/.stow-local-ignore" 'the build stderr'
+  assert_missing "$HOME/.dotfiles/current" 'the built tree'
+}
+
+# The other refusal, and the same settling: a pair of layers disagreeing about a
+# path's kind stops every build, so the list a note would send the reader to
+# read is one no build writes either.
+#
+# The trailing-newline note goes with it for the same reason.  Its remedy is a
+# different name at the top of the path, and the collision survives a rename:
+# the reader who takes it still has a build that refuses.
+test_which_a_collision_settles_the_ignore_notes() {
+  local trailing
+  printf -v trailing '.stow-local-ignore\n'
+  conf 'base personal/base' 'local local'
+  mkignore personal 'secret*'
+  mklayer personal/base 'coll~'
+  mklayer local 'coll~/inside'
+  mklayer personal/base secret/coll
+  mklayer local secret/coll/inside
+  mklayer personal/base plain
+  mklayer local plain/inside
+  mklayer personal/base "$trailing/deep"
+  mklayer local "$trailing/deep/inside"
+  run_shale which 'coll~'
+  assert_status 0 "$shale_status" "stow's own list"
+  assert_eq "shale: note: 'build' would fail here — coll~ is a file in 'base' and a directory in 'local'" \
+    "$shale_err" "stderr for stow's own list"
+  run_shale which secret/coll
+  assert_status 0 "$shale_status" 'the ignore file'
+  assert_eq "shale: note: 'build' would fail here — secret/coll is a file in 'base' and a directory in 'local'" \
+    "$shale_err" 'stderr for the ignore file'
+  # The collision alone, unchanged.
+  run_shale which plain
+  assert_status 0 "$shale_status" 'the collision alone'
+  assert_eq "shale: note: 'build' would fail here — plain is a file in 'base' and a directory in 'local'" \
+    "$shale_err" 'stderr for the collision alone'
+  # The trailing-newline note, settled by the collision below that name.
+  run_shale which "$trailing/deep"
+  assert_status 0 "$shale_status" 'the trailing newline'
+  assert_eq "shale: note: 'build' would fail here — $trailing/deep is a file in 'base' and a directory in 'local'" \
+    "$shale_err" 'stderr for the trailing newline'
+  # And that note on its own, at the name itself, where both layers provide a
+  # directory and no build fails: the single-reason answer stands.
+  run_shale which "$trailing"
+  assert_status 0 "$shale_status" 'the name itself'
+  assert_eq "shale: note: no apply links this — the top of its path is '.stow-local-ignore' and a trailing newline
+shale:   stow ignores its own ignore file's name at the top of the tree whatever a package's list holds, ignores that name with one trailing newline too, and goes nowhere below a directory it ignores
+shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfiles/current/.stow-local-ignore: nothing but a different name at the top of this path gets it linked" \
+    "$shale_err" 'stderr at the name itself'
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_missing "$HOME/.dotfiles/current" 'the built tree'
+}
+
+# The pairings a refusal does not settle, pinned so that a note joining one of
+# them is a failure rather than a silence.  Each of these is two true notes
+# about a build that runs: the path is composed or skipped, the list is written,
+# and neither note takes the other's remedy away.
+test_which_the_notes_a_refusal_does_not_settle_stay_whole() {
+  local trailing
+  printf -v trailing '.stow-local-ignore\n'
+  conf 'base personal/base'
+  mkignore personal 'secret*'
+  mklayer personal/base secret/.shale-ignore
+  mklayer personal/base .git/.shale-ignore
+  mklayer personal/base "$trailing/secret/x"
+  mklayer personal/base "$trailing/.shale-ignore"
+  mklayer personal/base "$trailing/.git/config"
+  run_shale which secret/.shale-ignore
+  assert_status 0 "$shale_status" 'the ignore file and the name no build composes'
+  assert_eq "shale: note: 'secret/.shale-ignore' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/personal/.shale-ignore:1: secret*
+shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads
+shale: note: no build composes a .shale-ignore — shale reads the one at the top of a clone root and copies none of them" \
+    "$shale_err" 'stderr for the ignore file and the name'
+  run_shale which .git/.shale-ignore
+  assert_status 0 "$shale_status" 'all three'
+  assert_eq "shale: note: no build composes a .git — shale skips one at every depth, so this path never reaches $HOME/.dotfiles/current
+shale: note: '.git/.shale-ignore' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: \\.git
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it
+shale: note: no build composes a .shale-ignore — shale reads the one at the top of a clone root and copies none of them" \
+    "$shale_err" 'stderr for all three'
+  run_shale which "$trailing/secret/x"
+  assert_status 0 "$shale_status" 'the ignore file below that name'
+  assert_eq "shale: note: '$trailing/secret/x' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/personal/.shale-ignore:1: secret*
+shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads
+shale: note: no apply links this — the top of its path is '.stow-local-ignore' and a trailing newline
+shale:   stow ignores its own ignore file's name at the top of the tree whatever a package's list holds, ignores that name with one trailing newline too, and goes nowhere below a directory it ignores
+shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfiles/current/.stow-local-ignore: nothing but a different name at the top of this path gets it linked" \
+    "$shale_err" 'stderr for the ignore file below that name'
+  run_shale which "$trailing/.shale-ignore"
+  assert_status 0 "$shale_status" 'the name no build composes below that name'
+  assert_eq "shale: note: no apply links this — the top of its path is '.stow-local-ignore' and a trailing newline
+shale:   stow ignores its own ignore file's name at the top of the tree whatever a package's list holds, ignores that name with one trailing newline too, and goes nowhere below a directory it ignores
+shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfiles/current/.stow-local-ignore: nothing but a different name at the top of this path gets it linked
+shale: note: no build composes a .shale-ignore — shale reads the one at the top of a clone root and copies none of them" \
+    "$shale_err" 'stderr for the name below that name'
+  run_shale which "$trailing/.git/config"
+  assert_status 0 "$shale_status" 'the .git below that name'
+  assert_eq "shale: note: no build composes a .git — shale skips one at every depth, so this path never reaches $HOME/.dotfiles/current
+shale: note: no apply links this — the top of its path is '.stow-local-ignore' and a trailing newline
+shale:   stow ignores its own ignore file's name at the top of the tree whatever a package's list holds, ignores that name with one trailing newline too, and goes nowhere below a directory it ignores
+shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfiles/current/.stow-local-ignore: nothing but a different name at the top of this path gets it linked" \
+    "$shale_err" 'stderr for the .git below that name'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build none of these stops'
+}
+
+# A collision at a path the composer never reaches, which is not a refusal: it
+# takes neither provider, sees no disagreement, and exits 0.  So the notes
+# beside it stand - suppressing one here would be dropping a true note on the
+# strength of a false one.
+#
+# The false one is which's own, and is left exactly as it stands: 'build' would
+# fail here' is wrong at every path below, doctor reports nothing at any of
+# them, and that disagreement is not this one's to close.
+#
+# Both names are read as components, not as leaves.  compose_dir drops each of
+# them by basename and does not descend, so a collision *below* a directory of
+# either is as invisible to build as one at the name itself - and reading the
+# leaf instead deleted a true note at every path in the second half of this
+# case, with build exiting 0 and doctor silent.  The leaf test that is right is
+# the note's: it says which layer's copy of this file is not composed.
+test_which_a_collision_the_composer_never_sees_settles_nothing() {
+  local trailing
+  printf -v trailing '.stow-local-ignore\n'
+  conf 'base personal/base' 'local local'
+  mkignore personal 'secret*'
+  mklayer personal/base d/.git/c
+  mklayer local d/.git/c/inside
+  mklayer personal/base e/.shale-ignore
+  mklayer local e/.shale-ignore/inside
+  # Below a directory of that name, at one depth and at three, with each of the
+  # three notes a refusal would have taken: stow's own list, an ignore file's
+  # pattern, and the trailing-newline name.
+  mklayer personal/base 'sub/.shale-ignore/note~/deep'
+  mklayer local 'sub/.shale-ignore/note~'
+  mklayer personal/base sub/.shale-ignore/secret/deep
+  mklayer local sub/.shale-ignore/secret
+  mklayer personal/base "$trailing/.shale-ignore/note~/deep"
+  mklayer local "$trailing/.shale-ignore/note~"
+  mklayer personal/base .zshrc
+  # The build the note says would fail, which does not.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_missing "$HOME/.dotfiles/current/d/.git" 'the skipped .git'
+  assert_missing "$HOME/.dotfiles/current/e/.shale-ignore" 'the skipped ignore file'
+  assert_missing "$HOME/.dotfiles/current/sub/.shale-ignore" 'the skipped directory'
+  run_shale which d/.git/c
+  assert_status 0 "$shale_status" 'below a .git'
+  assert_eq "shale: note: no build composes a .git — shale skips one at every depth, so this path never reaches $HOME/.dotfiles/current
+shale: note: 'd/.git/c' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: \\.git
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it
+shale: note: 'build' would fail here — d/.git/c is a file in 'base' and a directory in 'local'" \
+    "$shale_err" 'stderr below a .git'
+  run_shale which e/.shale-ignore
+  assert_status 0 "$shale_status" 'at an ignore file'
+  assert_eq "shale: note: 'build' would fail here — e/.shale-ignore is a file in 'base' and a directory in 'local'
+shale: note: no build composes a .shale-ignore — shale reads the one at the top of a clone root and copies none of them" \
+    "$shale_err" 'stderr at an ignore file'
+  run_shale which 'sub/.shale-ignore/note~'
+  assert_status 0 "$shale_status" 'below an ignore file, on stow list'
+  assert_eq "shale: note: 'sub/.shale-ignore/note~' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: .+~
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it
+shale: note: 'build' would fail here — sub/.shale-ignore/note~ is a directory in 'base' and a file in 'local'" \
+    "$shale_err" 'stderr below an ignore file, on stow list'
+  run_shale which sub/.shale-ignore/secret
+  assert_status 0 "$shale_status" 'below an ignore file, on a pattern'
+  assert_eq "shale: note: 'sub/.shale-ignore/secret' is on the ignore list — no apply links it
+shale:   $HOME/.dotfiles/personal/.shale-ignore:1: secret*
+shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads
+shale: note: 'build' would fail here — sub/.shale-ignore/secret is a directory in 'base' and a file in 'local'" \
+    "$shale_err" 'stderr below an ignore file, on a pattern'
+  run_shale which "$trailing/.shale-ignore/note~"
+  assert_status 0 "$shale_status" 'below an ignore file below that name'
+  assert_eq "shale: note: 'build' would fail here — $trailing/.shale-ignore/note~ is a directory in 'base' and a file in 'local'
+shale: note: no apply links this — the top of its path is '.stow-local-ignore' and a trailing newline
+shale:   stow ignores its own ignore file's name at the top of the tree whatever a package's list holds, ignores that name with one trailing newline too, and goes nowhere below a directory it ignores
+shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfiles/current/.stow-local-ignore: nothing but a different name at the top of this path gets it linked" \
+    "$shale_err" 'stderr below an ignore file below that name'
+  # doctor's side of the same three, which is what makes the note above false
+  # rather than merely early: it reports none of them.
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_not_contains "$shale_out" 'would fail at' 'the doctor stdout'
+}
+
+# What the suppression costs, and where it is paid back.  report_ignored names a
+# link an earlier apply left at a path that is now ignored, and a refusal takes
+# that line with the rest of the note - so the one place it is still reported is
+# doctor, which names every such link as a finding rather than a note.
+test_which_a_refused_build_leaves_the_live_link_to_doctor() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base keep
+  mklayer local .vimrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_symlink_to "$HOME/keep" "$HOME/.dotfiles/current/keep"
+  mkignore personal 'keep'
+  mklayer local keep/inside
+  run_shale which keep
+  assert_status 0 "$shale_status" 'the which'
+  assert_eq "shale: note: 'build' would fail here — keep is a file in 'base' and a directory in 'local'" \
+    "$shale_err" 'the which stderr'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: $HOME/keep is a link into the built tree at a path the ignore list covers" \
+    'the doctor stdout'
+  assert_contains "$shale_out" 'shale: remove the link named above' 'the doctor stdout'
+}
+
+# The agreement #108 and #112 established, in the state this issue changes:
+# test_doctor_and_which_agree_about_stows_default_list reads which's answer as
+# the words 'stow's default ignore list', and a refusal takes those words away -
+# so the pair has to be read again as the question they stand for.  It is
+# whether an apply lands at the path, and both still answer no: doctor raises no
+# conflict over the reader's own file there, and names the same refusal which
+# does.
+test_doctor_and_which_agree_where_a_refusal_settles_the_note() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base 'coll~'
+  mklayer local .vimrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_missing "$HOME/coll~" 'the path stow declined to link'
+  # The reader's own file at that path, which is what makes doctor's silence
+  # load-bearing rather than incidental.
+  sandbox_write "$HOME" 'coll~' 'mine, and not a link'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor before the collision'
+  assert_not_contains "$shale_out" 'no apply put there' 'the doctor before'
+  mklayer local 'coll~/inside'
+  run_shale which 'coll~'
+  assert_status 0 "$shale_status" 'the which'
+  assert_eq "shale: note: 'build' would fail here — coll~ is a file in 'base' and a directory in 'local'" \
+    "$shale_err" 'the which stderr'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor after the collision'
+  assert_not_contains "$shale_out" 'no apply put there' 'the doctor after'
+  assert_contains "$shale_out" \
+    "shale: 'build' would fail at coll~ — it is a file in layer 'base' and a directory in layer 'local'" \
+    'the doctor after'
+}
+
 # Every other spelling of that name, and none of them is this note's: stow's
 # entry is a path regexp anchored at '^/', and its '$' allows one trailing
 # newline and no more.  Checked against real stow 2.3.1 and 2.4.1, which link
