@@ -221,6 +221,10 @@ SHALE_RUNS=0
 STUB_PATHS=0
 # One file per inherit_shell_line call, for the same reason.
 SHELL_ENVS=0
+# The SHELLOPTS every run of shale in this case is started with, set by
+# inherit_shell_option and empty for the shell this harness runs in - which is
+# the only correct default, an inherited one being the thing under test.
+INHERIT_SHELLOPTS=
 # Set to 1 in the copy run_inner_suite builds, by a line appended after this
 # one.  A plain assignment, not ${INNER_SUITE-}: innerness is a property of the
 # harness file, and anything inherited from the environment would make a
@@ -719,7 +723,14 @@ shale() {
     chmod u-x "$locked" || fail "could not remove the search bit from $locked"
   fi
   if [ "${1-}" != --script ]; then
-    "$SHALE" ${1+"$@"}
+    # 'env', not a 'SHELLOPTS=x cmd' prefix: SHELLOPTS is readonly in every bash
+    # there is, and a temporary assignment to a readonly name is an error in
+    # this shell rather than a variable in the child's environment.
+    if [ -n "$INHERIT_SHELLOPTS" ]; then
+      env "SHELLOPTS=$INHERIT_SHELLOPTS" "$SHALE" ${1+"$@"}
+    else
+      "$SHALE" ${1+"$@"}
+    fi
     status=$?
     # Before the caller sees the status, so a case cannot assert on a run whose
     # mode it forgot to restore and leave the sandbox undeletable.
@@ -921,6 +932,26 @@ inherit_shell_line() {
   SHELL_ENVS=$((SHELL_ENVS + 1))
   sandbox_write "$CASE_DIR" "shell-env.$SHELL_ENVS.sh" ${1+"$@"}
   export BASH_ENV=$sandbox_path
+}
+
+# inherit_shell_option NAME - starts every shale in the rest of this case from a
+# shell that has the 'set -o' option NAME on.
+#
+# The second of those three routes, and for a 'set -o' option it is the one a
+# user actually meets: BASH_ENV is a file somebody wrote on purpose, while a
+# shell that has SHELLOPTS in its environment at all re-exports it to every
+# child from then on, so one 'export SHELLOPTS' in a profile hands the whole
+# set down for the life of the session.  It carries these options on bash 3.2
+# as well as 5.2, which BASHOPTS does not, so a case written this way exercises
+# the same thing on the floor as in the container.
+#
+# Kept apart from inherit_shell_line rather than folded into it: a BASH_ENV
+# file setting the same option would prove the option's effect and not the
+# route, and the route is what the block at the top of the script is written
+# against.
+inherit_shell_option() {
+  [ -n "${1-}" ] || guard_trip 'inherit_shell_option was given no option name'
+  INHERIT_SHELLOPTS=$1
 }
 
 # stub_path_without TOOL... - a directory holding a link to every tool shale and
@@ -12700,10 +12731,18 @@ test_meta_dot_globs_answer_the_same_under_both_glob_meanings() {
 # in the script being one and its name being banned by the floor guard;
 # globskipdots, which
 # test_meta_dot_globs_answer_the_same_under_both_glob_meanings covers by running
-# the whole script under both of its meanings; and every option that reaches
-# neither matching nor expansion.  set -k, set -t, set -v and set -x all still
-# change what a run does and none of them is normalised - they are loud rather
-# than quiet, and they are not this claim.
+# the whole script under both of its meanings; and the 20 'set -o' options that
+# were measured changing nothing shale does.
+#
+# Seven of the 27 do change something.  noglob is the oldest of them and its
+# case is above, reached through a BASH_ENV file rather than SHELLOPTS; keyword
+# and errexit are turned off by the same block and have a case each below,
+# asserted the same way; verbose and xtrace are left in force on purpose and
+# have a case each holding that decision as well as the answers; and noexec and
+# onecmd cannot be turned off from inside a script that has a '#!' line - which
+# is why they have a paragraph in the script and no case here.  Nothing can
+# assert a defence that does not exist, and a case pinning 'shale does nothing
+# and exits 0' would be pinning the defect.
 
 # The tree the cases below share, built to be sensitive to every option in the
 # set at once.  'notes.txt' against an upper-case '*.TXT' is what nocasematch
@@ -12768,14 +12807,11 @@ option_unlinked_note() {
   printf "shale:   run 'shale apply': a path still missing after one is a path stow declined to link\n"
 }
 
-# The answers that fixture has, under any shell that started shale.  Every
-# assertion is labelled with the option in force, so a failure names it rather
-# than leaving a dozen near-identical cases to be told apart by line number.
-assert_option_answers() {
+# What a build of that fixture composes, on its own because the two cases for
+# the options left in force assert it and cannot assert the rest - stderr under
+# either of them is the script.
+assert_option_tree() {
   local label=$1
-  run_shale build
-  assert_status 0 "$shale_status" "$label: the build"
-  assert_empty "$shale_err" "$label: the build stderr"
   # LC_ALL on the sort, not on the run: the order a glob expands in is the
   # locale's, and this is the harness's own listing rather than shale's answer.
   assert_eq '.
@@ -12794,6 +12830,17 @@ assert_option_answers() {
 ./sub/.nested' \
     "$(cd "$HOME/.dotfiles/current" && find . -print | LC_ALL=C sort)" \
     "$label: the composed tree"
+}
+
+# The answers that fixture has, under any shell that started shale.  Every
+# assertion is labelled with the option in force, so a failure names it rather
+# than leaving a dozen near-identical cases to be told apart by line number.
+assert_option_answers() {
+  local label=$1
+  run_shale build
+  assert_status 0 "$shale_status" "$label: the build"
+  assert_empty "$shale_err" "$label: the build stderr"
+  assert_option_tree "$label"
   # The whole of stderr on every one of these rather than a fragment, because
   # what an inherited option does to them is add a line or swap one note for
   # the other, and a 'contains' on the first line would see neither.
@@ -12976,6 +13023,192 @@ test_meta_globasciiranges_turned_off_changes_no_answer() {
   assert_option_answers 'globasciiranges off'
 }
 
+# The same claim reached through the other route, for the two 'set -o' options
+# that reach the parser and the exit rather than the matcher.
+# inherit_shell_option is SHELLOPTS rather than a BASH_ENV file, which is what
+# a user meets: one 'export SHELLOPTS' anywhere in a profile hands every option
+# in it to every child for the life of the session, on the bash 3.2 floor as
+# well as on 5.2.
+
+# 'set -k' makes a 'name=value' word an assignment wherever it appears in a
+# command, so the script's own 'local x=$1' declared nothing.  On 5.2 that ended
+# the run with 'x: unbound variable' and a line number.  On the floor, which is
+# macOS's /bin/bash, the config parser read its own 'local' as the layer path
+# and refused a shale.conf that is correct - which is the reason this one is
+# normalised rather than left to be loud.
+test_meta_an_inherited_keyword_does_not_change_an_answer() {
+  option_fixture
+  inherit_shell_option keyword
+  assert_option_answers 'keyword'
+}
+
+# The half of that which is worse than a crash, asserted on its own because a
+# fixture whose answers all match cannot say why the mismatch mattered.  No
+# message may name the config, and none may name a valid layer path as invalid:
+# the file is right, and a user sent to fix it is a user shale has lied to.
+test_meta_an_inherited_keyword_never_blames_the_config() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  inherit_shell_option keyword
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_not_contains "$shale_err" 'invalid layer path' 'the build stderr'
+  assert_not_contains "$shale_err" "$HOME/.dotfiles/shale.conf" 'the build stderr'
+  assert_eq 'common/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the winner'
+  # Every other command too: the parse the option broke is the one every one of
+  # them starts with.
+  run_shale which .zshrc
+  assert_status 0 "$shale_status" 'which'
+  assert_not_contains "$shale_err" 'invalid layer path' 'the which stderr'
+  run_shale doctor
+  assert_not_contains "$shale_out" 'invalid layer path' 'the doctor stdout'
+}
+
+# errexit reads as already handled, on the grounds that shale does not set it
+# and a meta case greps for that - which is true and is not the question.  An
+# inherited one ends the run at the first command whose status shale reads
+# rather than acts on, and doctor is made of those: this fixture's report
+# stopped after the config section, printed no summary line, and exited 1.  The
+# status is right, the two lines it did print are right, and the three checks
+# that had not run yet are the ones naming the file in the way of the next
+# apply.  A report
+# that stops talking and still exits like a report is the quiet half of this
+# issue, so the summary line is what is asserted.
+#
+# The config error is what reaches it: parse_config answers non-zero for a
+# config with a bad line, doctor reads that status rather than acting on it,
+# and errexit acts on it instead.  A clean config leaves this case green under
+# a shale with no 'set +e' in it at all, which is why the bad line is here.
+test_meta_an_inherited_errexit_does_not_cut_a_report_short() {
+  conf 'base common/base' 'lonely'
+  mklayer common/base .zshrc
+  sandbox_write "$HOME" .zshrc 'mine, and not a link'
+  inherit_shell_option errexit
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  # The section that ran before the truncation, and the two that did not.
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/shale.conf:2: expected 'NAME PATH [URL]', got only 'lonely'" \
+    'the doctor stdout'
+  assert_contains "$shale_out" \
+    "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" \
+    'the doctor stdout'
+  assert_contains "$shale_out" \
+    "shale: there is no built tree at $HOME/.dotfiles/current" 'the doctor stdout'
+  # The line a reader scans for.  Its absence is what made the truncation quiet.
+  assert_contains "$shale_out" 'shale: 2 problems found' 'the doctor stdout'
+}
+
+# The two that are deliberately left in force, and the guard on that decision.
+#
+# Each asserts both halves: that the option changes no answer - the composed
+# tree, the exit status and shale's own lines are what they are without it -
+# and that the run is still tracing, which is the half that goes red if
+# somebody adds 'set +v' or 'set +x' to the block.  That is the point of them.
+# Turning either off would defeat 'bash -x shale build', which is how this
+# script gets debugged, and neither can be mistaken for shale's answer: every
+# line shale writes carries the 'shale: ' prefix and no trace line does.
+#
+# The exception to that last sentence is apply, where the trace of one subshell
+# went into a capture shale reads as another program's output.  That is not a
+# line about shale and it is not left: cmd_apply clears the option over the
+# capture alone, and the case below apply's own is what holds it.
+#
+# assert_option_answers is not used, and cannot be: it asserts the whole of
+# stderr, which under either of these is the script.  What is shared with it is
+# the fixture and the composed tree.
+test_meta_an_inherited_xtrace_changes_no_answer_and_is_left_in_force() {
+  option_fixture
+  # What the trace lines are prefixed with, said here rather than assumed: PS4
+  # defaults to this and is an ordinary exported variable, so a developer who
+  # has set one would otherwise make the assertion below read the wrong thing.
+  # bash repeats its first character once per level of nesting.
+  export PS4='+ '
+  inherit_shell_option xtrace
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_option_tree 'xtrace'
+  run_shale which notes.txt
+  assert_status 0 "$shale_status" 'which notes.txt'
+  assert_contains "$shale_out" \
+    "winner    base  $HOME/.dotfiles/common/base/notes.txt" 'which notes.txt stdout'
+  # The trace lines alone, with the '+ ' prefixes taken off - nothing shale
+  # prints begins with one - and asserted to reach a command that works on the
+  # built tree.  A 'set +x' added to the block would leave the four lines above
+  # it traced and this empty, so a 'contains +' would pass a mutant that turned
+  # the option off.
+  assert_contains "$(printf '%s\n' "$shale_err" | sed -n 's/^++* //p')" \
+    "$HOME/.dotfiles/current" 'the which stderr, trace lines only'
+  assert_contains "$shale_err" \
+    "shale: note: 'notes.txt' is in the built tree at" 'the which stderr'
+}
+
+# The same for verbose, whose output is the script's lines rather than the
+# commands they became.  The line asserted is the last of the script's own
+# dispatch, so a 'set +v' anywhere above it - which is anywhere at all - leaves
+# this case red rather than passing on the handful of lines that had already
+# been echoed before it.
+test_meta_an_inherited_verbose_changes_no_answer_and_is_left_in_force() {
+  option_fixture
+  inherit_shell_option verbose
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_option_tree 'verbose'
+  run_shale which notes.txt
+  assert_status 0 "$shale_status" 'which notes.txt'
+  assert_contains "$shale_out" \
+    "winner    base  $HOME/.dotfiles/common/base/notes.txt" 'which notes.txt stdout'
+  assert_contains "$shale_err" "    usage_error \"unknown command '\$cmd'\"" \
+    'the which stderr'
+  assert_contains "$shale_err" \
+    "shale: note: 'notes.txt' is in the built tree at" 'the which stderr'
+}
+
+# The one place leaving xtrace in force was not free, and the guard cmd_apply
+# puts on it.  Both of stow's streams go into one capture, so the trace of the
+# subshell holding stow landed in it: apply then said 'stow exited 0 and wrote
+# output', said it does not read what stow writes, and printed shale's own '++
+# cd' and '++ stow' lines as though stow had written them.  stow wrote nothing.
+# Three 'shale: ' lines of it, and every one untrue - which is not the noise the
+# option is allowed to add but shale asserting something about another program.
+#
+# Its own fixture rather than option_fixture: that one plants two files in $HOME
+# for doctor to find, and stow refuses an apply over either of them, so nothing
+# would reach the capture at all.
+#
+# The trace has to still be running afterwards, or the fix would be a 'set +x'
+# with the restore forgotten and this case would pass on it.  The lock cleanup
+# runs from the EXIT trap, which is after everything cmd_apply does, so it is
+# the trace line that says the option came back.
+test_meta_an_inherited_xtrace_is_not_reported_as_stows_output() {
+  local trace
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  export PS4='+ '
+  inherit_shell_option xtrace
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc" 'the applied link'
+  assert_not_contains "$shale_err" 'shale: stow exited 0 and wrote output' \
+    'the apply stderr'
+  # The second line of the same message, so a rewording of the first does not
+  # leave this case passing over a report that is still being made.  Not the
+  # bare 'shale: ' prefix: the trace of report itself carries that string.
+  assert_not_contains "$shale_err" 'shale does not read what stow writes' \
+    'the apply stderr'
+  trace=$(printf '%s\n' "$shale_err" | sed -n 's/^++* //p')
+  # The price, asserted rather than left to be discovered: the two commands
+  # inside the window are the two the trace no longer has.  stow ran - the link
+  # above is the proof - and the line saying so is what was traded for the three
+  # untrue ones.
+  assert_not_contains "$trace" 'stow -d' 'the apply stderr, trace lines only'
+  # And the option came back on the far side, which is the half a fix that
+  # cleared it and forgot the restore would fail.  cleanup runs from the EXIT
+  # trap, after everything in cmd_apply.
+  assert_contains "$trace" "rmdir $HOME/.dotfiles/.lock" \
+    'the apply stderr, trace lines only'
+}
+
 # The drift guard for the set above: the script normalises a list, the cases
 # above cover a list, and nothing else makes them the same list.  Adding a name
 # to the script without a case leaves it asserted by nothing, and a case for a
@@ -13018,6 +13251,55 @@ test_meta_every_normalised_shell_option_has_a_case() {
       'add a test_meta_an_inherited_<name>_ case, and this list, in the same change'
   [ -z "$extra" ] ||
     fail "this case names an option the script no longer normalises:$extra" \
+      'the case for it is passing without exercising anything'
+}
+
+# The same guard for the other half of that block.  The 'set -o' options are
+# turned off a letter at a time rather than by name, so this reads the letters
+# and holds the long name each of them stands for beside the case that covers
+# it - a letter with no case is an option nothing asserts, and a case for a
+# letter the script no longer clears is a case exercising nothing.
+#
+# 'set -uo pipefail' and every other line that turns an option on is not read:
+# only '^set +'.  A letter the script both clears and sets would be a
+# contradiction this cannot see, and there is no such letter.
+test_meta_every_normalised_set_option_has_a_case() {
+  local word letters letter covered name missing extra
+  letters=
+  # Unquoted on purpose: every such line is 'set +<letter>', so splitting it
+  # into words and keeping the ones that start with '+' collects the letters
+  # however many lines there are.
+  # shellcheck disable=SC2013
+  for word in $(grep '^set +' "$SHALE"); do
+    case "$word" in
+      +*) letters="$letters ${word#+}" ;;
+    esac
+  done
+  [ -n "$letters" ] ||
+    fail "the script has no top-level 'set +' line, and this case reads them" \
+      'it guards nothing at zero'
+  covered=' e:errexit f:noglob k:keyword '
+  missing=
+  extra=
+  # Unquoted on purpose: the letters collected above, split into words.
+  # shellcheck disable=SC2086
+  for letter in $letters; do
+    case "$covered" in
+      *" $letter:"*) ;;
+      *) missing="$missing $letter" ;;
+    esac
+  done
+  for name in $covered; do
+    case " $letters " in
+      *" ${name%%:*} "*) ;;
+      *) extra="$extra ${name#*:}" ;;
+    esac
+  done
+  [ -z "$missing" ] ||
+    fail "the script clears a 'set -o' option no case above covers:$missing" \
+      'add a test_meta_an_inherited_<name>_ case, and this list, in the same change'
+  [ -z "$extra" ] ||
+    fail "this case names an option the script no longer clears:$extra" \
       'the case for it is passing without exercising anything'
 }
 
