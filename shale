@@ -12,6 +12,89 @@ fi
 
 set -uo pipefail
 
+# What a pattern means, fixed here rather than left to the shell that started
+# shale.  The glob subset an ignore file may use is a documented contract -
+# '*', '?', '[abc]', '[!abc]', and everything else a literal - and half of the
+# options below rewrite it.  Two of them are ordinary things to have in an rc
+# file, and both were measured making shale contradict the stow it drives: with
+# nocasematch, the '*.swp' the README teaches covers a layer's 'A.SWP', which
+# stow then links; with extglob, '@(a|b).swp' becomes an alternation here while
+# translate_segment still writes the literal '\@\(a\|b\)\.swp' into the list
+# stow reads, so 'shale which' says no apply links a file that apply has just
+# linked.
+#
+# Restoring per call site was the other option and is the wrong one: the subset
+# is the same subset whoever ran shale, and a saved-and-restored option is
+# still the caller's option for the length of the match.
+#
+# Setting an option does not on its own hand it to a child: a shell that runs
+# 'shopt -s extglob' and then starts this script starts it with extglob off -
+# measured on 3.2.57 and 5.2.21.  It takes an export, and there are three of
+# them.  'export BASHOPTS' carries every shopt option, on bash 4.1 and later
+# only; 'export SHELLOPTS' carries every 'set -o' option, on every bash there
+# is, and it is the only one of the three that works on the 3.2 floor for the
+# option it carries; and BASH_ENV names a file every non-interactive bash runs
+# before the script, which can set anything at all.  That last one is arbitrary
+# code, so nothing here pretends to make shale safe against a hostile one -
+# what this does is stop a co-operative shell's options at the process
+# boundary.
+#
+# Each name earns its place:
+#   set +f          noglob arrives through an exported SHELLOPTS on every bash
+#                   there is, the floor included, and stops every listing below
+#                   from expanding at all.
+#   GLOBIGNORE      inert as an imported variable and live the moment anything
+#                   assigns it, so BASH_ENV is its only route.  A pattern holding
+#                   no '/' filters a full expanded path on 3.2 and does not on
+#                   5.2, so it silently drops layer files from a build on the
+#                   floor alone.  Unsetting it also undoes the dotglob it
+#                   implies while it is set.  The only line here that can fail,
+#                   and the failure is checked beside die rather than ignored.
+#   dotglob         makes '*' match dotfiles, and every walk here pairs '*'
+#                   with '.*' - so doctor visited each dotfile twice and
+#                   reported six conflicts where there were three.
+#   extglob         above.
+#   failglob        makes an unmatched listing an expansion error: an empty
+#                   layer directory ended a build with bash's own 'no match'.
+#   nocaseglob      no listing here holds a case-bearing character, so it
+#                   changes nothing; unset so that a listing that does one day
+#                   cannot quietly acquire a second meaning.
+#   nocasematch     above.
+#   nullglob        changes no answer either - every listing is written for an
+#                   unmatched pattern arriving as itself - and is unset so that
+#                   the two doctor walks that say so stay true.
+#
+# Three are deliberately absent, each because shale already pins its meaning by
+# other means and naming it here would introduce the very thing this block
+# exists to remove - a meaning that depends on which bash is running, since
+# none of the three exists on the floor.  A range is only ever matched inside
+# the byte locale enter_byte_locale sets, where both settings of
+# globasciiranges agree.  Every glob listing a directory drops '.' and '..' by
+# name, which is stated at dir_is_empty and held under both settings of
+# globskipdots by
+# test_meta_dot_globs_answer_the_same_under_both_glob_meanings.  And the third
+# only ever changes what '**' expands to: no glob in this script is one, and an
+# ignore file's '**' is refused by translate_segment before any matcher sees
+# it - so it is left alone rather than named, the name itself being one the
+# floor guard bans.
+#
+# Every name below exists on bash 3.2, so this cannot fail and no status has to
+# be dropped - which matters, errexit being inheritable through SHELLOPTS on
+# every bash there is and shale being written never to need it.
+#
+# The order is not arbitrary and the overlap in it is not redundancy.  'The
+# dotglob option is disabled when GLOBIGNORE is unset' - bash(1), the same
+# sentence in 3.2.57's page and 5.2's - so the line above already turns dotglob
+# off, and the case for it passes with 'dotglob' struck from the line below.
+# It stays anyway.  That sentence is a side effect of unsetting a variable -
+# and it fires whether or not GLOBIGNORE was ever set, which is more than the
+# sentence promises - rather than this script asking for dotglob off.  The day
+# the GLOBIGNORE line moves or goes, the option it was silently carrying goes
+# with it.  So the last word on each option is the line that names it.
+set +f
+unset GLOBIGNORE
+shopt -u dotglob extglob failglob nocaseglob nocasematch nullglob
+
 PROG=shale
 
 # Stripped once, here: "$HOME"/* matches nothing under a home that already ends
@@ -63,6 +146,26 @@ die() {
   emit "$@"
   exit 1
 }
+
+# The one line of the normalising block at the top of this file that can fail,
+# checked here because here is the first point at which die exists.  Nothing
+# between the two expands a glob, so the gap costs nothing.
+#
+# 'unset' cannot remove a readonly variable: it says so on stderr and leaves
+# the exit status of the script alone, so a GLOBIGNORE made readonly before
+# shale started stays in force over every listing below.  Measured on 3.2.57
+# and 5.2.21: a build then dropped two of a layer's files from the composed
+# tree, exited 0, and named neither.
+#
+# Which is a different thing from the hostile BASH_ENV that block declines to
+# defend against.  This is shale's own normalisation failing, and the choice
+# here is between stopping and losing files quietly.  An empty value is not a
+# failure: bash acts on GLOBIGNORE only while it is set and not null, so
+# whatever leaves it null has done what the unset was for.
+[ -z "${GLOBIGNORE-}" ] || die \
+  "GLOBIGNORE is set to '$GLOBIGNORE' and shale could not unset it" \
+  'it decides what every directory listing returns, so a build would drop layer files and name none of them' \
+  'unset it, or take the readonly off it, in whatever set it before shale ran'
 
 # 'cannot search' or 'cannot read' for the directory $1, in DENIED_VERB.  The
 # search bit is tested first, so mode 0000 - missing both - is reported as
@@ -1041,17 +1144,6 @@ derive_stow_alternations() {
 }
 derive_stow_alternations
 
-# Whether extglob was already on when shale started.  stow_default_covers turns
-# it on for the length of one 'case' and must leave the shell as it found it:
-# BASHOPTS is inheritable, and shale's own matching of an ignore file's patterns
-# is written for the ordinary meaning of '?(' and '!(' rather than extglob's.
-# Read once, because 'shopt -q' is a fork-free builtin but not a free one, and
-# this is consulted on every composed path.
-EXTGLOB_HAD=0
-if shopt -q extglob; then
-  EXTGLOB_HAD=1
-fi
-
 # Non-zero unless stow's default list covers $1, a path relative to the top of
 # the tree.  The same question path_is_stow_ignored answers, without saying
 # which rows answered it - which is all the two doctor walks need, and they run
@@ -1093,6 +1185,13 @@ fi
 # Locale is the caller's: path_is_stow_ignored runs this inside the byte locale
 # and home_conflict does not, which is the locale each of them matched in
 # before there was one matcher.
+#
+# The alternations below are the one place in this script that wants extglob,
+# so it is turned on for the length of this function and off again on the way
+# out.  Off is the state the startup block guarantees, whatever the caller's
+# shell had, which is what lets the restore be unconditional: everything else
+# that matches a pattern here - an ignore file's globs above all - is written
+# for the ordinary meaning of '@(', '+(' and '?('.
 stow_default_covers() {
   local rest=$1 raw seg top=1 hit=1
   shopt -s extglob
@@ -1132,7 +1231,7 @@ stow_default_covers() {
       *) break ;;
     esac
   done
-  [ "$EXTGLOB_HAD" -eq 1 ] || shopt -u extglob
+  shopt -u extglob
   return "$hit"
 }
 
