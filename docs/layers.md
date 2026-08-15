@@ -341,8 +341,19 @@ directory that starts out empty.
 
 ## What a layer must not ship
 
-Never a `.stow-local-ignore`. Shale writes the one in `current/` itself — it is the only file shale
-creates rather than copies — and a layer providing one fails the build, naming the layer.
+Never a `.stow-local-ignore` at the top of a layer. Shale writes the one in `current/` itself — it is
+the only file shale creates rather than copies — and a layer whose own top level holds one fails the
+build, naming the layer, whether it is a file or a directory. Further down it is an ordinary file:
+`~/.config/.stow-local-ignore` composes and gets linked like anything else.
+
+That refusal tests the exact name, and stow reserves the name at the top of the tree a shade more
+widely than the build does: stow adds it to whatever ignore list it reads, and matches it with one
+trailing newline on the end as well. So a layer whose top level holds `.stow-local-ignore` followed
+by a newline composes without a word and is linked by no apply, and a *directory* so named takes
+everything under it. `shale which` says so for those paths. Renaming that top-level entry is the
+only fix; there is no line to edit anywhere. None of it reaches below the top of the layer, where
+that name — with the trailing newline or without — is an ordinary file that gets linked, and where
+`which` rightly says nothing about it.
 
 Never shale itself: applying a layer that ships it would replace the script with a link into
 `current/`. `shale doctor` reports that, judged against the path the running shale was invoked by.
