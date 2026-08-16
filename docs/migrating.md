@@ -329,9 +329,18 @@ When a file leaves a layer, the next `shale apply` prunes its link. When an enti
 every layer, the links inside it are left dangling and the apply still exits 0: stow's unstow phase
 only visits directories the package still has.
 
-Nothing says so at the moment it happens — that apply prints its `composed layer` line per layer and
-nothing else, and exits 0 — so run `shale doctor` after a change that takes a whole directory out of
-every layer. It is what finds them:
+The apply says so, in one line and no more:
+
+```
+shale: 3 links in /home/you point at paths the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names them
+```
+
+It counts the links that apply itself left behind — the paths its own build took out of the tree —
+and stops there. An apply that stow then refuses says it too, as the last line under what stow
+reported, because the build has already taken those paths out of the tree; the apply after your fix
+will not mention them again. Run `shale doctor` for the rest: which links they are, that `current`
+is correct, and which remedy fits. Doctor is also what still reports them afterwards, where a second
+`shale apply` says nothing, having removed nothing. It is what finds them:
 
 ```
 shale: /home/you/.config/foo/a.conf points at /home/you/.dotfiles/current/.config/foo/a.conf, which the built tree no longer provides

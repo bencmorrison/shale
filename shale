@@ -4665,8 +4665,134 @@ cmd_build() {
   fi
 }
 
+# Every path the built tree holds below $CUR/$1, relative to $CUR, appended to
+# PREVIOUS_PATHS.  Apply calls it once on the tree a build is about to replace,
+# which is the only moment the paths that build removes can still be read: a
+# build reaps current.old unless it has a divergence to point at, so after one
+# there is nothing left holding them, and no walk of $HOME afterwards can tell a
+# link this apply orphaned from one an apply last year did.
+#
+# Neither dotglob nor nullglob is set here - cmd_build sets both, and this runs
+# before it - so both patterns are wanted and an unmatched one arrives as
+# itself, exactly as in doctor's walks.  '.' and '..' are dropped by name,
+# whatever the glob options say about them.
+scan_previous_tree() {
+  local rel=$1 here e base srel
+  here=$CUR${rel:+/$rel}
+  # A directory that cannot be listed answers every glob with nothing, exactly
+  # as an empty one does.  Nothing is said about it: what this feeds is a count
+  # of the links one apply left behind, and a subtree shale cannot read is one
+  # it can say nothing about - doctor walks $HOME itself and does.
+  { [ -r "$here" ] && [ -x "$here" ]; } || return 0
+  list_dir "$here" 1
+  for e in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
+    base=${e##*/}
+    case "$base" in
+      . | ..) continue ;;
+      '*' | '.*')
+        { [ -e "$e" ] || [ -L "$e" ]; } || continue
+        ;;
+    esac
+    srel=${rel:+$rel/}$base
+    PREVIOUS_PATHS+=("$srel")
+    # A symlink to a directory is a leaf here as it is in the composer, and
+    # descending one would walk out of the built tree.
+    if [ -d "$e" ] && [ ! -L "$e" ]; then
+      scan_previous_tree "$srel"
+    fi
+  done
+}
+
+# How many links in $HOME this apply has just left pointing at nothing, in
+# DANGLING.  Run after stow, and every answer is the filesystem's as it stands
+# rather than a prediction: a path counts only where the built tree has stopped
+# providing it, $HOME still holds a symlink at it, and that link resolves to
+# exactly the path the tree dropped.  So a link stow pruned a moment ago is not
+# counted - the ordinary case of a file leaving its layer, where the directory
+# holding it stays and stow walks in - and neither is a dangling link of the
+# user's own that happens to sit at one of these paths.
+#
+# What this is not is an audit of $HOME, which is doctor's and costs a walk of
+# it.  Measured on the container: chkstow takes 0.10s over a 20k-entry home and
+# 0.44s over a 100k-entry one, and $HOME's size has nothing to do with the size
+# of the tree being applied - so an apply of seven files would pay it in full,
+# on every run, for a report that is almost always empty.  The snapshot this
+# reads instead is a listing walk of the built tree alone: 60ms over 2200 paths
+# on bash 5.2 and 130ms on 3.2, against the 6s the same tree costs to compose.
+#
+# The price of that scope is that this speaks for one apply.  A link a previous
+# apply orphaned is not named again here, so a second apply over the same $HOME
+# is silent while the links are still there; doctor is the standing report, and
+# the line below points at it.
+#
+# Which is a promise about doctor, and it is kept in one case and not the other.
+# Where a name holds a newline the count skips it, below, doctor being unable to
+# name that one; where chkstow is not installed it is not skipped, because doctor
+# still answers for itself - it says chkstow is missing and what that costs, in
+# its own words, and chkstow ships with stow, which an apply needed to run at all.
+count_dangling_links() {
+  local i n rel target link dest
+  DANGLING=0
+  # The substitution below swallows a missing readlink - every link would arrive
+  # with an empty target and be passed over, and the count would be a 0 meaning
+  # 'not checked'.  Doctor is where the missing tool is reported.
+  command -v readlink >/dev/null 2>&1 || return 0
+  i=0
+  n=${#PREVIOUS_PATHS[@]}
+  while [ "$i" -lt "$n" ]; do
+    rel=${PREVIOUS_PATHS[$i]}
+    i=$((i + 1))
+    # A name holding a newline is passed over, and the line this feeds is the
+    # whole reason: it sends the reader to doctor, and doctor cannot name this
+    # one.  Doctor reads chkstow's output, which is one unquoted path per line,
+    # so a link whose name holds a newline arrives as two lines and is dropped -
+    # audit_broken_links says so where it parses them.  Counted here, an apply
+    # would report a link and doctor would then answer 'no problems found'.
+    # Silence is what shale said about this before there was a line at all, and
+    # it is the honest half of the two.
+    #
+    # Nothing else in this walk minds one: the paths come from PREVIOUS_PATHS
+    # rather than from any tool's output, so the count itself would be right.
+    case "$rel" in
+      *"$NL"*) continue ;;
+    esac
+    # Nothing under $DOTFILES, which is the exclusion doctor's own audit makes:
+    # this count is what sends a reader to that report, so a link counted here
+    # and declined there would send them to a clean one.  No apply puts a link
+    # under this path - stow refuses to link into the stow directory it was
+    # given, and says so - so the arm only ever answers for a link something
+    # else made, at a path a layer once composed a '.dotfiles' of its own into.
+    case "$rel" in
+      .dotfiles | .dotfiles/*) continue ;;
+    esac
+    target=$CUR/$rel
+    { [ ! -e "$target" ] && [ ! -L "$target" ]; } || continue
+    link=$HOME_PREFIX/$rel
+    [ -L "$link" ] || continue
+    # A link that still resolves is not pointing at the path above, which is not
+    # there - so this decides nothing on its own and is here to keep the fork
+    # below off every link the user has at a path a layer once provided.
+    [ ! -e "$link" ] || continue
+    dest=$(readlink "$link") || continue
+    [ -n "$dest" ] || continue
+    # A relative target is what stow writes, and it is relative to the directory
+    # holding the link rather than to anywhere shale is.
+    case "$dest" in
+      /*) ;;
+      *) dest=${link%/*}/$dest ;;
+    esac
+    normalise_path "$dest"
+    dest=$NORMALISED
+    # Both sides normalised, so the two spellings compare rather than the
+    # strings as they arrived: $HOME itself may hold a '.' or a '..'.
+    normalise_path "$target"
+    [ "$dest" = "$NORMALISED" ] || continue
+    DANGLING=$((DANGLING + 1))
+  done
+}
+
 cmd_apply() {
-  local status err had_xtrace i n rel bits pre have target failed kept
+  local status err had_xtrace i n rel bits pre have target failed kept lines
 
   parse_config || exit 1
 
@@ -4675,6 +4801,15 @@ cmd_apply() {
       'install it with your system package manager: shale installs nothing'
 
   acquire_lock
+
+  # Under the lock, so nothing else is rebuilding the tree being read, and
+  # before the build, which is what takes paths out of it.  A tree that is not a
+  # directory is left to the build to refuse, and a missing one - the state
+  # before the first build - leaves nothing to have orphaned.
+  PREVIOUS_PATHS=()
+  if [ -d "$CUR" ] && [ ! -L "$CUR" ]; then
+    scan_previous_tree ''
+  fi
 
   cmd_build || exit 1
 
@@ -4764,19 +4899,46 @@ cmd_apply() {
   if [ "$status" -ne 0 ] && [ -n "$err" ]; then
     printf '%s\n' "$err" >&2
   fi
+
+  # Counted before the three refusals below and not only after them, because the
+  # build is what leaves these links, not the stow: the tree lost the paths the
+  # moment it was installed, whether or not stow then ran or ran to the end.  A
+  # run that stopped here used to say nothing about them, and could not say it
+  # later either - the next apply snapshots a tree those paths have already left,
+  # so the reader fixed exactly what shale named, applied again, got silence, and
+  # was back at the state #132 exists to remove.
+  #
+  # Carried as a continuation line of the failure rather than as a line of its
+  # own, and last: what stow refused is the reader's first problem, and this is
+  # one more thing to know once it is fixed.  The wording is not the success
+  # one's either.  With stow refused, the count holds every link the tree stopped
+  # providing, including the ones an apply that had run would have pruned - so
+  # what is said is that the build took the paths out, which is true of all of
+  # them, rather than that stow declined to remove them, which is true of some.
+  count_dangling_links
+  lines=()
+  if [ "$DANGLING" -eq 1 ]; then
+    lines=("1 link in $HOME points at a path the built tree no longer provides: this build took that path out of the tree, and 'shale doctor' names it")
+  elif [ "$DANGLING" -gt 0 ]; then
+    lines=("$DANGLING links in $HOME point at paths the built tree no longer provides: this build took those paths out of the tree, and 'shale doctor' names them")
+  fi
+
   if [ "$status" -eq 125 ]; then
     die "could not enter $DOTFILES to run stow" \
-      "$CUR is built; nothing in $HOME was relinked"
+      "$CUR is built; nothing in $HOME was relinked" \
+      ${lines[@]+"${lines[@]}"}
   fi
   if [ "$status" -eq 1 ]; then
     die "stow failed; nothing in $HOME was relinked" \
       'stow plans the whole operation and abandons all of it rather than half-applying one' \
-      "$CUR is built and correct: fix what stow reported above, in $HOME or in a layer, then apply again"
+      "$CUR is built and correct: fix what stow reported above, in $HOME or in a layer, then apply again" \
+      ${lines[@]+"${lines[@]}"}
   fi
   [ "$status" -eq 0 ] ||
     die "stow failed part-way: $HOME may be partly relinked" \
       'stow changes nothing until the whole operation is planned, but nothing undoes the part it had carried out' \
-      "$CUR is built and correct: fix what stow reported above, in $HOME or in a layer, then apply again"
+      "$CUR is built and correct: fix what stow reported above, in $HOME or in a layer, then apply again" \
+      ${lines[@]+"${lines[@]}"}
 
   # Exit 0 with something written is the third outcome: stow linked most of the
   # tree and said so.  These lines claim only that stow wrote and what it would
@@ -4792,6 +4954,30 @@ cmd_apply() {
       'shale does not read what stow writes; its output follows unchanged' \
       "if it names a path stow skipped, that path is not linked from $CUR into $HOME"
     printf '%s\n' "$err" >&2
+  fi
+
+  # The links this apply has just left pointing at nothing, which stow neither
+  # removes nor mentions: its unstow phase walks only the directories the
+  # package still holds, so a directory that left every layer keeps every link
+  # inside it and the apply exits 0.  Measured on stow 2.3.1 and on 2.4.1, which
+  # agree about this and write nothing at all about it.  Counted above, in the
+  # one place both this and the failures share; stow having run to the end is
+  # the whole of what lets this wording name it as the cause.
+  #
+  # One line, whatever the count, and the detail is doctor's - the same split as
+  # the directory modes below.  Nothing here reproduces doctor's report: which
+  # links they are, that the built tree is correct and needs no rebuild, and
+  # which of the two remedies applies are what a reader acts on, and all of it
+  # is already there.  What was missing is that the command which created them
+  # said nothing, so the only route to that report was deciding to run doctor
+  # for no visible reason.
+  #
+  # A warning rather than a failure, and the status stays 0: the tree is built,
+  # $HOME is linked, and what is left over is a link stow declined to remove.
+  if [ "$DANGLING" -eq 1 ]; then
+    warn "1 link in $HOME points at a path the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names it"
+  elif [ "$DANGLING" -gt 0 ]; then
+    warn "$DANGLING links in $HOME point at paths the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names them"
   fi
 
   # The directory modes the build composed, put onto the directories in $HOME.

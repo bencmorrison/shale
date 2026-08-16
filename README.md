@@ -447,8 +447,10 @@ overwrites, and how to carry on from a block that stopped.
   — which a directory-heavy tree notices and an ordinary one does not. An `apply` adds one more read
   for each of those directories that was already in `$HOME`.
 - When a whole directory leaves every layer, stow does not visit it and the links inside it are left
-  dangling by an apply that still exits 0. `shale doctor` finds them and prints what to do about
-  them; [docs/migrating.md](docs/migrating.md) covers the case in full.
+  dangling by an apply that still exits 0. That apply counts them and says so in one line; `shale
+  doctor` names them and prints what to do about them, and goes on finding them on every later run,
+  which `apply` does not — it speaks only for the apply you just ran.
+  [docs/migrating.md](docs/migrating.md) covers the case in full.
 - A shale that is killed outright — `kill -9`, or the machine losing power — leaves its lock
   directory behind, and a `~/.dotfiles/current.new` as well if it died mid-build. Shale never
   reclaims a lock, because nothing it can read tells a live holder from a dead one. `doctor` reports
