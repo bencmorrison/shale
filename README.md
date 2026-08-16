@@ -438,7 +438,11 @@ overwrites, and how to carry on from a block that stopped.
   symlinks in `$HOME` point at nothing. Apply relinks immediately afterwards.
 - No build is incremental: every one composes every layer from scratch, so a one-character edit
   costs what a first build costs. Roughly two milliseconds a file — 4.1 seconds for a 2000-file
-  tree, 31 milliseconds for a seven-file one, on the container these were measured in.
+  tree, 31 milliseconds for a seven-file one, on the container these were measured in. A directory
+  costs more than a file, because its mode is read and set: budget about three milliseconds each —
+  once per directory and not once per layer providing it, since only the layer that wins a path pays
+  — which a directory-heavy tree notices and an ordinary one does not. An `apply` adds one more read
+  for each of those directories that was already in `$HOME`.
 - When a whole directory leaves every layer, stow does not visit it and the links inside it are left
   dangling by an apply that still exits 0. `shale doctor` finds them and prints what to do about
   them; [docs/migrating.md](docs/migrating.md) covers the case in full.
@@ -450,6 +454,16 @@ overwrites, and how to carry on from a block that stopped.
   still there, because that build will not run: clear the lock and doctor says so instead.
 - Git cannot store an empty directory, so a layer that needs one ships a `.gitkeep`, which will
   appear in `$HOME`.
+- Git records no permission bits for a directory, and only the executable bit for a file, so a
+  freshly cloned layer has whatever modes the clone's umask gave it — `755` on most machines, `775`
+  on Debian and Ubuntu, and `644` for a file you committed at `600`. Shale copies the working tree
+  faithfully, and the working tree after a clone is not what was committed. Where a mode matters,
+  `chmod` it in the layer: every build and apply reproduces it from there.
+- Shale sets the mode of a directory it creates in `$HOME`, and never widens one that was already
+  there. So a `~/.ssh` you keep at `700` survives a layer that a clone left at `755`. `apply` says
+  in one line that it left such a directory alone, `doctor` names each one and both ways to settle
+  it, and `doctor` stays green — nothing is broken, and the directory shale kept is the safer of
+  the two.
 
 ## Licence
 

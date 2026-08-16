@@ -339,6 +339,77 @@ Git cannot store an empty directory. Ship a `.gitkeep` in it, and expect it in `
 it like any other file and stow links it. `~/.config/zsh/rc.d/.gitkeep` is the price of a fragment
 directory that starts out empty.
 
+## Permissions on a directory
+
+A file arrives in `$HOME` with the mode it has in the layer, and so does the directory holding it, as
+long as shale is the one that created it. `~/.ssh` at `700` in a layer is `700` in
+`~/.dotfiles/current` and `700` in `$HOME`, on a machine at any umask. Nothing about the machine you
+build on decides it.
+
+One bit is shale's rather than the layer's: the owner's `rwx` is always on. A layer directory at
+`550` composes as `750`. Shale has to be able to write into a directory it has just created — the
+next layer composes into it, and an interrupted build has to be able to delete the tree it left
+behind — and a directory in `$HOME` you cannot enter is not an arrangement any dotfile wants. The
+group and world bits, which are the ones that decide whether `~/.ssh` is safe, are copied exactly.
+
+Where two layers provide the same directory, the mode is the last one's, exactly as its files are.
+That includes a layer that provides only one file inside it: a `local` layer adding
+`~/.ssh/known_hosts` hands the mode of `~/.ssh` to `local`, whatever the base layer says. Put the
+mode you want on the directory in every layer that has it.
+
+Directories in `$HOME` are set by `apply` after stow has run, because stow does not carry a mode:
+under `--no-folding` it creates each directory with the umask of whoever ran it and never with the
+mode of the built tree.
+
+**A directory that was already in `$HOME` before the apply is only ever narrowed.** Keep `~/.ssh` at
+`700` and add a layer whose `.ssh` is `755` — the mode a clone gives it — and the apply leaves your
+`700` alone. The same layer against a `~/.ssh` that does not exist yet, or one at `755`, gives you the
+layer's mode exactly. The rule is the asymmetry: a mode fix that quietly opens `~/.ssh` is worse than
+the mode being wrong.
+
+`apply` says so in one line, with the count and no more, because after a clone this is the ordinary
+state rather than a rare one and it lasts until you change something:
+
+```
+shale: 1 directory in /home/you was left as it is: shale never widens one that was already there; 'shale doctor' names it
+```
+
+`shale doctor` is where the detail is. It names each path, the mode it has and the mode the layer
+gives, as a note rather than a problem — the directory that survives is the *safer* of the two, so
+nothing here is broken and `doctor` still exits 0:
+
+```
+shale: an apply left 1 directory in /home/you as it is
+shale:   /home/you/.ssh is 0700, and the layer that provides it gives 0755
+shale:   shale sets the mode of a directory it creates in /home/you, and never widens one that was already there
+shale:   to take the mode the layer gives, chmod that directory yourself
+shale:   to keep the mode it has, set that mode on the directory in the layer: 'shale which' names the layer for a path
+shale: no problems found, but read the note above
+```
+
+`apply` exits 0 either way — nothing it was asked to do was left undone. A mode it cannot set at all
+is a different thing: that is named on stderr and `apply` exits 1 with the links in place.
+
+Nothing is set on a path an ignore list blocks, in `$HOME` or below it. No apply links anything
+there, so the `~/.cache` a layer names in `.shale-ignore` is yours and shale does not touch its mode
+— the same paths `shale which` reports as ignored.
+
+`setgid`, `setuid` and the sticky bit are copied with the rest. A layer directory that is `2775` makes
+`$HOME`'s `2775`, and everything created inside it afterwards takes that directory's group. That is
+rarely what anyone intends and is easy to acquire by accident, since a directory created inside a
+`setgid` parent inherits the bit: check with `ls -ld` if a layer of yours lives on a shared volume.
+
+**Git records none of this.** A tree entry has no permission bits at all, and a blob's are one
+executable bit, so a freshly cloned layer has whatever the clone's umask gave it — `755` on most
+machines, `775` on Debian and Ubuntu, and `644` for a `config` you committed at `600`. Shale copies
+what is in the working tree, faithfully, and what is in the working tree after a clone is not what
+you committed. Where a mode matters, set it after cloning:
+
+```sh
+chmod 700 ~/.dotfiles/personal/base/.ssh ~/.dotfiles/personal/base/.gnupg
+chmod 600 ~/.dotfiles/personal/base/.ssh/config
+```
+
 ## What a layer must not ship
 
 Never a `.stow-local-ignore` at the top of a layer. Shale writes the one in `current/` itself — it is
