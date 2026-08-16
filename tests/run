@@ -968,7 +968,7 @@ inherit_shell_option() {
 # redirects to a file, and reads that file with PATH restored.
 stub_path_without() {
   local all omit tool found
-  all=' env bash cat sed chkstow cp git mkdir mv readlink rm rmdir stow '
+  all=' env bash cat sed chkstow chmod cp git ls mkdir mv readlink rm rmdir stow '
   omit=" ${*-} "
   # First, and fatal: a name that is in no list matches nothing, leaves a
   # complete PATH, and passes the case having removed nothing at all - the one
@@ -1112,6 +1112,23 @@ assert_real_dir() {
   fi
   if [ ! -d "$path" ]; then
     fail "$label: not a directory: $path"
+  fi
+  return 0
+}
+
+# assert_mode PATH EXPECTED [LABEL] - the mode of PATH as the ten characters ls
+# writes at the head of a long listing, 'drwx------' and the like.
+#
+# ls rather than stat, whose format strings are not the same on the two
+# userlands this suite has to run on; the ten characters are, and an eleventh
+# column for an ACL or an extended attribute lands after them rather than in
+# them.  Nothing here follows a symlink: -d is what makes ls answer for the link
+# itself, and a mode assertion on the wrong file would otherwise pass.
+assert_mode() {
+  local path=$1 expected=$2 label=${3-mode} out
+  out=$(ls -ld "$path") || fail "$label: could not read the mode of $path"
+  if [ "${out:0:10}" != "$expected" ]; then
+    fail "$label: expected mode $expected, got ${out:0:10}: $path"
   fi
   return 0
 }
@@ -2255,6 +2272,191 @@ test_build_the_exec_bit_follows_the_winning_layer() {
   [ ! -x "$HOME/.dotfiles/current/.local/bin/down" ] ||
     fail 'down is executable: the winning layer did not have the exec bit'
   [ ! -x "$HOME/.dotfiles/current/.zshrc" ] || fail '.zshrc is executable'
+}
+
+# A layer's file modes are cp -RPp's to carry; its directory modes are shale's,
+# and before this they were nobody's - a directory was created by mkdir and took
+# whatever the caller's umask left, so the same layer produced a different tree
+# on every machine.  The four umasks are the ones people actually have: 0022 is
+# the common default and 0002 ships on Debian and Ubuntu with user-private
+# groups, which is the one that turns a 0700 .ssh into a group-writable
+# directory that OpenSSH's StrictModes then refuses.
+#
+# The file beside it is asserted in the same loop: cp -RPp already carried its
+# mode, and a directory pass that reached a file would be a regression nothing
+# else here would see.
+test_build_a_directory_mode_comes_from_the_layer_and_not_the_umask() {
+  local um saved
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  chmod 0600 "$sandbox_dir/config" || fail 'could not set the layer file mode'
+  saved=$(umask)
+  for um in 0022 0002 0077 0000; do
+    umask "$um"
+    run_shale build
+    umask "$saved"
+    assert_status 0 "$shale_status" "umask $um exit status"
+    assert_mode "$HOME/.dotfiles/current/.ssh" 'drwx------' "umask $um"
+    assert_mode "$HOME/.dotfiles/current/.ssh/config" '-rw-------' "umask $um"
+  done
+}
+
+# The file modes inside the directory whose mode is being set, pinned whole
+# rather than by the exec bit alone: the directory pass runs a chmod for every
+# directory it composes, and one written a level out - or a chmod -R - would
+# leave every file in the tree executable, or every private one readable, with
+# the build still exiting 0.  cp -RPp is what carries these, and nothing in the
+# directory pass may touch them.
+test_build_a_file_mode_is_untouched_by_the_directory_pass() {
+  local um saved
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  mklayer personal/base .local/bin/up
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  chmod 0600 "$sandbox_dir/config" || fail 'could not set the layer file mode'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.local/bin"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  chmod 0755 "$sandbox_dir/up" || fail 'could not set the layer file mode'
+  saved=$(umask)
+  for um in 0000 0077; do
+    umask "$um"
+    run_shale build
+    umask "$saved"
+    assert_status 0 "$shale_status" "umask $um exit status"
+    assert_mode "$HOME/.dotfiles/current/.ssh/config" '-rw-------' "umask $um"
+    assert_mode "$HOME/.dotfiles/current/.local/bin/up" '-rwxr-xr-x' "umask $um"
+  done
+}
+
+# The rule where two layers provide one directory, which is the rule their files
+# already have: the layer that wins is the last one listed that provides it.
+# Both directions, because a rule that only ever tightens and a rule that only
+# ever loosens would each pass half of this.
+#
+# The trap it pins is the one worth having a case for: a base layer with .ssh at
+# 0700 and a local layer that adds one file to the same directory hands the mode
+# to the local layer, whatever the base layer says.
+test_build_a_directory_mode_follows_the_winning_layer() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer local .config/nvim/init.lua
+  mklayer personal/base .ssh/config
+  mklayer local .ssh/known_hosts
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.dotfiles/local/.config"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.dotfiles/local/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_mode "$HOME/.dotfiles/current/.config" 'drwxr-xr-x' 'loosened by local'
+  assert_mode "$HOME/.dotfiles/current/.ssh" 'drwx------' 'tightened by local'
+}
+
+# The owner's rwx is the one part of a directory mode shale does not copy, and
+# this is what it buys: a layer directory shale cannot write into cannot be
+# composed into either, and the next layer, the next build and cleanup's rm -rf
+# all have to get inside the one this build made.  The group and world bits are
+# copied whole, which is the half that decides whether a directory is safe.
+test_build_a_layer_directory_the_owner_cannot_write_gets_the_write_bit() {
+  conf 'base personal/base'
+  mklayer personal/base .private/inner/f
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.private"
+  chmod 0550 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_mode "$HOME/.dotfiles/current/.private" 'drwxr-x---' 'the composed directory'
+  # The second build is the assertion that matters: it composes into the
+  # directory the first one made, and reaps that tree afterwards.
+  run_shale build
+  assert_status 0 "$shale_status" 'the second build'
+  assert_empty "$shale_err" 'the second build stderr'
+  assert_eq 'personal/base/.private/inner/f' \
+    "$(cat "$HOME/.dotfiles/current/.private/inner/f")" 'the composed file'
+  assert_missing "$HOME/.dotfiles/current.old"
+  # The layer's own directory, put back: the runner's own rm -rf cannot descend
+  # one the owner may not write, and says so on an otherwise green run.
+  chmod 0755 "$HOME/.dotfiles/personal/base/.private" ||
+    fail 'could not restore the layer directory mode'
+}
+
+# The same clamp from the other side, and the reason it is not a preference: a
+# scratch tree holding a directory its owner cannot write is a tree rm -rf
+# cannot remove, so a build interrupted after one had been composed would leave
+# current.new behind and every later build would die trying to reap it.
+test_build_an_interrupt_leaves_no_scratch_tree_it_cannot_remove() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .private/inner/f
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.private"
+  chmod 0500 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  # The copy of the file inside it: by then the directory above has been created
+  # and given its mode, which is the state this is about.
+  # shellcheck disable=SC2016  # the body runs in the stub, not here
+  stub_interrupt cp '*.private/inner/f' '"$real" "$@" || exit $?'
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  # 128 + SIGINT: shale re-raises the signal rather than inventing a status.
+  assert_status 130 "$shale_status"
+  assert_missing "$HOME/.dotfiles/current.new"
+  run_shale build
+  assert_status 0 "$shale_status" 'the build after the interrupt'
+  assert_empty "$shale_err" 'the build after the interrupt stderr'
+  chmod 0755 "$HOME/.dotfiles/personal/base/.private" ||
+    fail 'could not restore the layer directory mode'
+}
+
+# The two ways the mode of a composed directory can fail to be what the layer
+# says, both of which stop the build rather than leaving a tree whose modes
+# nobody can account for.  Neither tool is stubbed for the whole run: it is the
+# first call matching the built tree that fails, so the failure lands where the
+# message says it does.
+test_build_a_directory_mode_it_cannot_set_stops_the_build() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  # Set rather than inherited: the mode is in the message this asserts on, and
+  # the umask of whoever runs the suite must not decide what it says.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  stub_fail_once chmod '*current.new/.ssh'
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not set the mode 0755 on $HOME/.dotfiles/current.new/.ssh" 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
+}
+
+test_build_a_directory_mode_it_cannot_read_stops_the_build() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  stub_fail_once ls '*'
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale build
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not read the mode of $HOME/.dotfiles/personal/base/.ssh" 'stderr'
+  assert_contains "$shale_err" \
+    'shale:   shale copies a layer directory mode onto the one it composes' 'stderr'
+  assert_missing "$HOME/.dotfiles/current"
 }
 
 test_build_is_idempotent_and_drops_a_file_deleted_from_a_layer() {
@@ -5088,6 +5290,230 @@ test_apply_makes_real_directories_with_per_file_links() {
   assert_missing "$HOME/.dotfiles/current/.config/nvim/shada" 'the built tree'
 }
 
+# The other half of --no-folding: stow makes a real directory at every level,
+# and it makes it with mkdir and no mode, so what lands is 0777 against the
+# caller's umask and never the mode of the directory in the built tree.  That
+# was measured against GNU Stow 2.3.1 and 2.4.1, which agree on it, so the mode
+# in $HOME is shale's to set after stow has run and nobody else's.
+#
+# .ssh and .gnupg because they are where a reader meets this: 0700 in the layer
+# and 0775 in $HOME on an ordinary Ubuntu machine is a directory OpenSSH refuses
+# to use.  .config beside them at 0755 under a 0077 umask is the same claim
+# pointed the other way - the mode is the layer's, not the tightest thing going.
+test_apply_a_directory_mode_reaches_home_whatever_the_umask() {
+  local um saved
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  mklayer personal/base .gnupg/gpg.conf
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.gnupg"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  saved=$(umask)
+  for um in 0022 0002 0077 0000; do
+    umask "$um"
+    run_shale apply
+    umask "$saved"
+    assert_status 0 "$shale_status" "umask $um exit status"
+    assert_empty "$shale_err" "umask $um stderr"
+    assert_mode "$HOME/.ssh" 'drwx------' "umask $um"
+    assert_mode "$HOME/.gnupg" 'drwx------' "umask $um"
+    assert_mode "$HOME/.config" 'drwxr-xr-x' "umask $um"
+    assert_mode "$HOME/.dotfiles/current/.ssh" 'drwx------' "umask $um built tree"
+    assert_symlink_to "$HOME/.ssh/config" "$HOME/.dotfiles/current/.ssh/config"
+  done
+}
+
+# The two-layer rule as it lands in $HOME, which is the tree the rule is about.
+test_apply_a_directory_mode_follows_the_winning_layer() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .ssh/config
+  mklayer local .ssh/known_hosts
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.dotfiles/local/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_mode "$HOME/.ssh" 'drwx------' 'the last layer that provides it'
+  assert_symlink_to "$HOME/.ssh/config" "$HOME/.dotfiles/current/.ssh/config"
+  assert_symlink_to "$HOME/.ssh/known_hosts" \
+    "$HOME/.dotfiles/current/.ssh/known_hosts"
+}
+
+# A mode that could not be set is the failure this whole change exists to stop
+# being silent, so it is named and it costs the exit status - after every other
+# one has been attempted, so one directory shale does not own cannot hide the
+# rest.  The links are already in place at that point, and the message says so
+# rather than sending the reader to apply again.
+test_apply_a_mode_it_cannot_set_is_named_and_the_links_are_still_made() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  # The apply's chmod and not the build's: the sandbox home is the one path
+  # ending in '/home/.ssh', and the built tree's ends in 'current.new/.ssh'.
+  # One word, because the stub writes the pattern into a case arm.
+  stub_fail_once chmod '*/home/.ssh'
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale apply
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: could not set the mode 0700 on $HOME/.ssh" 'stderr'
+  assert_contains "$shale_err" \
+    "shale: could not set the mode on 1 directory; $HOME is linked" 'stderr'
+  assert_symlink_to "$HOME/.ssh/config" "$HOME/.dotfiles/current/.ssh/config"
+}
+
+# The clone case, which is the ordinary one rather than a corner: git records no
+# mode for a directory, so a freshly cloned .ssh layer is whatever the clone's
+# umask gave it - 0755 on most machines - while the ~/.ssh the user already has,
+# holding a private key, is 0700.  Copying the layer's mode there would open it
+# up, silently, on the path everybody takes.  So a directory that was in $HOME
+# before the apply is only ever narrowed, and shale says which ones it left.
+#
+# The status stays 0: nothing the apply was asked to do was left undone, and the
+# mode that survives is the safer of the two.
+test_apply_never_widens_a_directory_that_was_already_there() {
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the home directory mode'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_mode "$HOME/.ssh" 'drwx------' 'the directory that was already there'
+  # The links are made all the same: this is about the directory's mode and
+  # nothing else.
+  assert_symlink_to "$HOME/.ssh/config" "$HOME/.dotfiles/current/.ssh/config"
+  # The built tree keeps the layer's mode, because it is shale's own tree.
+  assert_mode "$HOME/.dotfiles/current/.ssh" 'drwxr-xr-x' 'the built tree'
+  # One line and no more.  What is left is the ordinary state of anyone who has
+  # cloned a layer with a .ssh in it, so it is printed on every apply for as
+  # long as it lasts, and a block of lines there would be a block on every
+  # apply.  The paths and the modes are doctor's, which is where a standing
+  # condition goes; this line is the pointer to it.
+  assert_contains "$shale_err" \
+    "shale: 1 directory in $HOME was left as it is: shale never widens one that was already there; 'shale doctor' names it" \
+    'stderr'
+  assert_not_contains "$shale_err" '0755' 'the mode detail belongs to doctor'
+  assert_eq 1 "$(printf '%s\n' "$shale_err" | grep -c '^shale: ')" 'lines shale printed'
+  # Twice, because a mode shale is deliberately not setting is a standing
+  # difference between the layer and $HOME rather than a one-run event, and the
+  # second apply is the one people run.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the second apply'
+  assert_mode "$HOME/.ssh" 'drwx------' 'the second apply'
+  assert_contains "$shale_err" \
+    "shale: 1 directory in $HOME was left as it is: shale never widens one that was already there; 'shale doctor' names it" \
+    'the second apply stderr'
+}
+
+# The other direction, which is #119's own case and is not a widening: a ~/.ssh
+# that is already there at 0755 and a layer that says 0700 is narrowed, without
+# a word, because that is the mode the layer asked for and nothing is lost by
+# it.
+test_apply_narrows_a_directory_that_was_already_there() {
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.ssh"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the home directory mode'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_mode "$HOME/.ssh" 'drwx------' 'the directory that was already there'
+}
+
+# A path an ignore file blocks is composed into the built tree and skipped by
+# stow, so nothing of shale's is ever linked into the $HOME directory of that
+# name: it is the user's, holding the user's files, and 'shale which' says so in
+# as many words.  Setting a mode on it would be shale acting on the one class of
+# path it promises not to touch.
+#
+# The pattern is anchored, so it matches '.cache' and not the 'inner' below it -
+# which is what makes this a case about the carry rather than about the matcher.
+# Without it, a descendant of a matched directory reads as unignored, and the
+# apply chmods a directory two levels inside one it was told to skip.
+test_apply_says_nothing_at_a_path_an_ignore_file_blocks() {
+  conf 'base personal/base'
+  mklayer personal/base .cache/inner/junk
+  mklayer personal/base .zshrc
+  mkignore personal /.cache
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.cache"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.cache/inner"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.cache/inner"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the home directory mode'
+  sandbox_mkdir "$HOME/.cache"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the home directory mode'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_mode "$HOME/.cache" 'drwx------' 'the ignored directory'
+  assert_mode "$HOME/.cache/inner" 'drwx------' 'below the ignored directory'
+  assert_missing "$HOME/.cache/inner/junk" 'the file no apply links'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
+# The same claim for the list stow ships, which no ignore file has to mention
+# and which every apply uses: .hg is on it, so nothing is linked into ~/.hg and
+# its mode is not shale's to set.
+test_apply_says_nothing_at_a_path_stows_own_list_blocks() {
+  conf 'base personal/base'
+  mklayer personal/base .hg/store/f
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.hg"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.hg/store"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.hg/store"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the home directory mode'
+  sandbox_mkdir "$HOME/.hg"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the home directory mode'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_mode "$HOME/.hg" 'drwx------' 'the ignored directory'
+  assert_mode "$HOME/.hg/store" 'drwx------' 'below the ignored directory'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
+# Everything stow wrote survives a mode shale could not set.  The two are
+# unrelated failures of one apply and the reader needs both: what stow says is
+# about which paths were linked, and it used to be swallowed whole - warning and
+# replayed text alike - by the exit that a failed chmod takes.
+#
+# The rig for stow's half is the .dotfiles path of
+# test_apply_a_layer_shipping_a_dotfiles_path_is_reported; the assertion here is
+# only that the lines are all present together.
+test_apply_a_mode_it_cannot_set_keeps_what_stow_wrote() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .dotfiles/notes
+  mklayer personal/base .config/nvim/init.lua
+  stub_fail_once chmod '*/home/.config'
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale apply
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: stow exited 0 and wrote output' 'stderr'
+  assert_contains "$shale_err" 'WARNING: skipping target' 'the replayed stow output'
+  assert_contains "$shale_err" \
+    "shale: could not set the mode on 1 directory; $HOME is linked" 'stderr'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
 # The generated list is stow's own built-in one, so an apply leaves out exactly
 # what plain stow leaves out.  Each name below is a different entry of that
 # list, and the two carrying an inline comment upstream - '.+~' and '\#.*\#' -
@@ -7670,7 +8096,7 @@ test_doctor_names_every_tool_shale_runs() {
   local tool saved
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  for tool in cp mkdir mv rm rmdir stow; do
+  for tool in chmod cp ls mkdir mv rm rmdir stow; do
     stub_path_without "$tool"
     saved=$PATH
     PATH=$stub_path
@@ -7689,23 +8115,23 @@ test_doctor_names_every_tool_shale_runs() {
 
 # The whole list at once, which is the state the issue this came from described:
 # a machine with a shell and nothing else.  The second layer has a url and no
-# directory, which is what puts git among the seven: on a machine with nothing
+# directory, which is what puts git among the nine: on a machine with nothing
 # there is a clone to do.
 # shellcheck disable=SC2123
 test_doctor_names_all_the_missing_tools_in_one_run() {
   local tool saved
   conf 'base personal/base' "vim vim $CASE_DIR/repos/absent"
   mklayer personal/base .zshrc
-  stub_path_without cp git mkdir mv rm rmdir stow
+  stub_path_without chmod cp git ls mkdir mv rm rmdir stow
   saved=$PATH
   PATH=$stub_path
   run_shale doctor
   PATH=$saved
   assert_status 1 "$shale_status"
-  for tool in cp git mkdir mv rm rmdir stow; do
+  for tool in chmod cp git ls mkdir mv rm rmdir stow; do
     assert_contains "$shale_out" "shale: $tool is not installed" "$tool"
   done
-  assert_contains "$shale_out" 'shale: 7 problems found' 'stdout'
+  assert_contains "$shale_out" 'shale: 9 problems found' 'stdout'
 }
 
 # chkstow degrades the report rather than being a defect in the setup, so it
@@ -7723,6 +8149,148 @@ test_doctor_a_missing_chkstow_warns_without_failing() {
   assert_status 0 "$shale_status"
   assert_contains "$shale_out" 'shale: chkstow is not installed' 'stdout'
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# ------------------------------------------ doctor's directory-mode cases
+#
+# The other half of the one line an apply prints when it leaves a directory as
+# it is.  doctor makes the same judgement from the two trees rather than from
+# anything the apply recorded, so these cases are what say the two agree.
+
+# The detail, and the standing condition it describes: a cloned .ssh layer is
+# 0755 because git records no mode for a directory, the ~/.ssh holding the key
+# is 0700, and no apply resolves that on its own.
+#
+# A note, and the exit status is the claim: the only difference that can persist
+# is the layer being looser than $HOME - the other direction is narrowed by the
+# next apply and gone - so what is left is a directory safer than the layer asks
+# for, which is shale working rather than a problem.  A finding would make
+# doctor red by default for everyone who has cloned a layer with a .ssh in it,
+# and a red doctor on a machine that is fine is a signal nobody reads twice.
+test_doctor_names_a_directory_an_apply_left_as_it_is() {
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the home directory mode'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_contains "$shale_out" \
+    "shale: an apply left 1 directory in $HOME as it is" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   $HOME/.ssh is 0700, and the layer that provides it gives 0755" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   shale sets the mode of a directory it creates in $HOME, and never widens one that was already there" \
+    'stdout'
+  assert_contains "$shale_out" \
+    'shale:   to take the mode the layer gives, chmod that directory yourself' 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   to keep the mode it has, set that mode on the directory in the layer: 'shale which' names the layer for a path" \
+    'stdout'
+  # One note for the class however many directories are in it, so the summary
+  # counts it once.
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+  # Standing rather than one-run: another apply changes nothing about it, and
+  # doctor says the same thing afterwards.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the second apply'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor after the second apply'
+  assert_contains "$shale_out" \
+    "shale:   $HOME/.ssh is 0700, and the layer that provides it gives 0755" 'the second report'
+  # And it ends when either side is changed, which is what makes it worth
+  # printing rather than nagging.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply after the layer was fixed'
+  assert_empty "$shale_err" 'the apply after the layer was fixed'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor after the layer was fixed'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  assert_not_contains "$shale_out" 'left 1 directory' 'stdout'
+}
+
+# The note may not swallow a real problem, and a real problem may not swallow
+# the note: one run holding both has to exit 1 for the finding, print the
+# finding's own count, and still carry every line of the note.
+#
+# The finding is a directory that left every layer, whose links an apply cannot
+# prune - the same rig test_doctor_the_built_tree_note_is_not_counted_as_a_problem
+# builds - because it is a finding that needs no missing tool and no lock.
+test_doctor_a_left_directory_note_sits_beside_a_real_finding() {
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the home directory mode'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that orphans the link'
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the leftover link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'doctor exit status'
+  # The finding decides the status and the count, and says so on its own terms.
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  # The note is still whole beside it.
+  assert_contains "$shale_out" \
+    "shale: an apply left 1 directory in $HOME as it is" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   $HOME/.ssh is 0700, and the layer that provides it gives 0755" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   to take the mode the layer gives, chmod that directory yourself' 'stdout'
+}
+
+# The other direction is not a finding: the built tree is tighter than $HOME, so
+# the next apply narrows the directory and says nothing.  Reporting it would be
+# doctor naming a difference that fixes itself.
+test_doctor_says_nothing_where_the_next_apply_narrows_the_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.ssh"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the home directory mode'
+  run_shale build
+  assert_status 0 "$shale_status"
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_not_contains "$shale_out" 'left as it is' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# doctor's walk has its own copy of the ignore carry, so it gets its own case: a
+# mode difference at a path no apply touches is not a difference doctor may
+# report, or the report sends a reader to fix something shale would never act
+# on.
+test_doctor_says_nothing_about_the_mode_of_an_ignored_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .cache/inner/junk
+  mklayer personal/base .zshrc
+  mkignore personal /.cache
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.cache"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.cache/inner"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.cache/inner"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the home directory mode'
+  sandbox_mkdir "$HOME/.cache"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the home directory mode'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_not_contains "$shale_out" 'left as it is' 'stdout'
+  assert_not_contains "$shale_out" "$HOME/.cache is" 'stdout'
 }
 
 # ------------------------------------------ doctor's apply-conflict cases
