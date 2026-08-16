@@ -5254,10 +5254,8 @@ cmd_which() {
   # whole of why 'unreached' is read here and why it is the component test
   # rather than the leaf one.  At or below either skipped name the composer
   # takes neither provider, sees no disagreement, and build exits 0 - measured,
-  # at the leaf and below a directory of the name - so suppressing a true note
-  # there would be dropping it on the strength of the collision note beside it,
-  # and that note is the false one: it says 'build' would fail and build does
-  # not.  It is left exactly as it stands, and is not this.
+  # at the name, one below it and three below it, on both names - so there is no
+  # refusal there to settle anything, and the note below is not printed either.
   #
   # The other spelling needs no such test: build's refusal is that a layer
   # provides anything at all at that path, and it holds where the only thing
@@ -5285,7 +5283,18 @@ cmd_which() {
     explained=1
   fi
 
-  if [ "$upper" -ge 0 ]; then
+  # Only where the composer reaches the path, on the same flag the refusal above
+  # is decided by: at or below either skipped name it takes neither provider,
+  # never sees the two kinds disagree, and exits 0 - measured - so the note
+  # would predict a failure that does not happen, two lines below the one saying
+  # the path never reaches the tree at all.  doctor's walk skips both names too
+  # and raises no finding at any of them, which is the other half of it: the two
+  # commands answer the same question about the same path.
+  #
+  # A component test and never a prefix of one: '.gitfoo' and
+  # 'sub/.shale-ignorex' are ordinary names the composer walks, and build exits
+  # 1 at a collision in either.
+  if [ "$upper" -ge 0 ] && [ "$unreached" -eq 0 ]; then
     emit "note: 'build' would fail here — $rel is a ${WHICH_KINDS[$lower]} in '${WHICH_NAMES[$lower]}' and a ${WHICH_KINDS[$upper]} in '${WHICH_NAMES[$upper]}'"
     # A tree built before the collision arrived can hold this path with nothing
     # at it in $HOME, and the residual note's remedy is an apply - which builds

@@ -13120,21 +13120,21 @@ shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfi
 }
 
 # A collision at a path the composer never reaches, which is not a refusal: it
-# takes neither provider, sees no disagreement, and exits 0.  So the notes
-# beside it stand - suppressing one here would be dropping a true note on the
-# strength of a false one.
+# takes neither provider, sees no disagreement, and exits 0.  So no prediction
+# is made about it - a build that succeeds is not one a note may call a failure,
+# and the note saying the path never reaches the built tree at all stood two
+# lines above the prediction that said it did.
 #
-# The false one is which's own, and is left exactly as it stands: 'build' would
-# fail here' is wrong at every path below, doctor reports nothing at any of
-# them, and that disagreement is not this one's to close.
+# The notes beside it do stand.  Each of them says an apply does not link this
+# path, which is true of a tree every build composes; only the prediction turned
+# on a build that never happens.
 #
 # Both names are read as components, not as leaves.  compose_dir drops each of
 # them by basename and does not descend, so a collision *below* a directory of
-# either is as invisible to build as one at the name itself - and reading the
-# leaf instead deleted a true note at every path in the second half of this
-# case, with build exiting 0 and doctor silent.  The leaf test that is right is
-# the note's: it says which layer's copy of this file is not composed.
-test_which_a_collision_the_composer_never_sees_settles_nothing() {
+# either is as invisible to build as one at the name itself - measured at the
+# name, one below it and three below it, on both names.  The leaf test that is
+# right is the note's: it says which layer's copy of this file is not composed.
+test_which_a_collision_the_composer_never_sees_is_not_predicted() {
   local trailing
   printf -v trailing '.stow-local-ignore\n'
   conf 'base personal/base' 'local local'
@@ -13143,6 +13143,12 @@ test_which_a_collision_the_composer_never_sees_settles_nothing() {
   mklayer local d/.git/c/inside
   mklayer personal/base e/.shale-ignore
   mklayer local e/.shale-ignore/inside
+  # The name itself, and three below it: the flag is a component test, so the
+  # depth of the collision under the skipped name changes nothing.
+  mklayer personal/base g/.git
+  mklayer local g/.git/inside
+  mklayer personal/base h/.git/x/y/z
+  mklayer local h/.git/x/y/z/inside
   # Below a directory of that name, at one depth and at three, with each of the
   # three notes a refusal would have taken: stow's own list, an ignore file's
   # pattern, and the trailing-newline name.
@@ -13153,11 +13159,13 @@ test_which_a_collision_the_composer_never_sees_settles_nothing() {
   mklayer personal/base "$trailing/.shale-ignore/note~/deep"
   mklayer local "$trailing/.shale-ignore/note~"
   mklayer personal/base .zshrc
-  # The build the note says would fail, which does not.
+  # The build no note now says would fail, which does not.
   run_shale build
   assert_status 0 "$shale_status" 'the build'
   assert_missing "$HOME/.dotfiles/current/d/.git" 'the skipped .git'
   assert_missing "$HOME/.dotfiles/current/e/.shale-ignore" 'the skipped ignore file'
+  assert_missing "$HOME/.dotfiles/current/g/.git" 'the skipped .git at the name'
+  assert_missing "$HOME/.dotfiles/current/h/.git" 'the skipped .git three above'
   assert_missing "$HOME/.dotfiles/current/sub/.shale-ignore" 'the skipped directory'
   run_shale which d/.git/c
   assert_status 0 "$shale_status" 'below a .git'
@@ -13165,41 +13173,156 @@ test_which_a_collision_the_composer_never_sees_settles_nothing() {
 shale: note: 'd/.git/c' is on stow's own ignore list — no apply links it
 shale:   stow's default ignore list: \\.git
 shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
-shale:   that list has no line to edit: nothing but a different name gets this path past it
-shale: note: 'build' would fail here — d/.git/c is a file in 'base' and a directory in 'local'" \
+shale:   that list has no line to edit: nothing but a different name gets this path past it" \
     "$shale_err" 'stderr below a .git'
+  run_shale which g/.git
+  assert_status 0 "$shale_status" 'at a .git'
+  assert_eq "shale: note: no build composes a .git — shale skips one at every depth, so this path never reaches $HOME/.dotfiles/current
+shale: note: 'g/.git' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: \\.git
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it" \
+    "$shale_err" 'stderr at a .git'
+  run_shale which h/.git/x/y/z
+  assert_status 0 "$shale_status" 'three below a .git'
+  assert_eq "shale: note: no build composes a .git — shale skips one at every depth, so this path never reaches $HOME/.dotfiles/current
+shale: note: 'h/.git/x/y/z' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: \\.git
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it" \
+    "$shale_err" 'stderr three below a .git'
   run_shale which e/.shale-ignore
   assert_status 0 "$shale_status" 'at an ignore file'
-  assert_eq "shale: note: 'build' would fail here — e/.shale-ignore is a file in 'base' and a directory in 'local'
-shale: note: no build composes a .shale-ignore — shale reads the one at the top of a clone root and copies none of them" \
+  assert_eq "shale: note: no build composes a .shale-ignore — shale reads the one at the top of a clone root and copies none of them" \
     "$shale_err" 'stderr at an ignore file'
   run_shale which 'sub/.shale-ignore/note~'
   assert_status 0 "$shale_status" 'below an ignore file, on stow list'
   assert_eq "shale: note: 'sub/.shale-ignore/note~' is on stow's own ignore list — no apply links it
 shale:   stow's default ignore list: .+~
 shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
-shale:   that list has no line to edit: nothing but a different name gets this path past it
-shale: note: 'build' would fail here — sub/.shale-ignore/note~ is a directory in 'base' and a file in 'local'" \
+shale:   that list has no line to edit: nothing but a different name gets this path past it" \
     "$shale_err" 'stderr below an ignore file, on stow list'
   run_shale which sub/.shale-ignore/secret
   assert_status 0 "$shale_status" 'below an ignore file, on a pattern'
   assert_eq "shale: note: 'sub/.shale-ignore/secret' is on the ignore list — no apply links it
 shale:   $HOME/.dotfiles/personal/.shale-ignore:1: secret*
-shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads
-shale: note: 'build' would fail here — sub/.shale-ignore/secret is a directory in 'base' and a file in 'local'" \
+shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-ignore, which is the list stow reads" \
     "$shale_err" 'stderr below an ignore file, on a pattern'
   run_shale which "$trailing/.shale-ignore/note~"
   assert_status 0 "$shale_status" 'below an ignore file below that name'
-  assert_eq "shale: note: 'build' would fail here — $trailing/.shale-ignore/note~ is a directory in 'base' and a file in 'local'
-shale: note: no apply links this — the top of its path is '.stow-local-ignore' and a trailing newline
+  assert_eq "shale: note: no apply links this — the top of its path is '.stow-local-ignore' and a trailing newline
 shale:   stow ignores its own ignore file's name at the top of the tree whatever a package's list holds, ignores that name with one trailing newline too, and goes nowhere below a directory it ignores
 shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfiles/current/.stow-local-ignore: nothing but a different name at the top of this path gets it linked" \
     "$shale_err" 'stderr below an ignore file below that name'
-  # doctor's side of the same three, which is what makes the note above false
-  # rather than merely early: it reports none of them.
+  # doctor's side of the same paths, which is what made the old prediction false
+  # rather than merely early: it reports none of them, and now neither does
+  # which.
   run_shale doctor
   assert_status 0 "$shale_status" 'the doctor'
   assert_not_contains "$shale_out" 'would fail at' 'the doctor stdout'
+}
+
+# The other half of the same flag, and the one that must not weaken: a name
+# beside a skipped one is an ordinary name, so the collision at it is one build
+# reaches.  A prefix test rather than a component test would take the prediction
+# off every path here, and build exits 1 at all four.
+test_which_predicts_a_collision_beside_the_skipped_names() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .gitfoo/p
+  mklayer local .gitfoo/p/inside
+  mklayer personal/base sub/.shale-ignorex
+  mklayer local sub/.shale-ignorex/inside
+  mklayer personal/base 'x/git/c'
+  mklayer local 'x/git/c/inside'
+  mklayer personal/base 'y/.gitignore'
+  mklayer local 'y/.gitignore/inside'
+  run_shale which .gitfoo/p
+  assert_status 0 "$shale_status" 'the .git prefix'
+  assert_eq "shale: note: 'build' would fail here — .gitfoo/p is a file in 'base' and a directory in 'local'" \
+    "$shale_err" 'stderr for the .git prefix'
+  run_shale which sub/.shale-ignorex
+  assert_status 0 "$shale_status" 'the ignore-name prefix'
+  assert_eq "shale: note: 'build' would fail here — sub/.shale-ignorex is a file in 'base' and a directory in 'local'" \
+    "$shale_err" 'stderr for the ignore-name prefix'
+  run_shale which x/git/c
+  assert_status 0 "$shale_status" 'the name without its dot'
+  assert_eq "shale: note: 'build' would fail here — x/git/c is a file in 'base' and a directory in 'local'" \
+    "$shale_err" 'stderr for the name without its dot'
+  run_shale which y/.gitignore
+  assert_status 0 "$shale_status" 'the neighbouring dotfile'
+  assert_eq "shale: note: 'build' would fail here — y/.gitignore is a file in 'base' and a directory in 'local'" \
+    "$shale_err" 'stderr for the neighbouring dotfile'
+  # The four predictions, against build's own four.
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" 'shale: conflict at .gitfoo/p' 'the build stderr'
+  assert_contains "$shale_err" 'shale: conflict at sub/.shale-ignorex' 'the build stderr'
+  assert_contains "$shale_err" 'shale: conflict at x/git/c' 'the build stderr'
+  assert_contains "$shale_err" 'shale: conflict at y/.gitignore' 'the build stderr'
+  assert_contains "$shale_err" "shale: 4 conflicts; $HOME/.dotfiles/current not rebuilt" 'the build stderr'
+}
+
+# The claim measured against the thing claimed, over a corpus holding both
+# kinds of collision at once: build names a conflict at exactly the paths which
+# predicts one at, and doctor raises a finding at exactly those.  Three answers
+# to one question, and the case fails if any pair of them parts company.
+#
+# build reports every conflict rather than stopping at the first, so one run
+# gives the whole set.
+test_which_build_and_doctor_name_the_same_collisions() {
+  local rel build_err doctor_out nl
+  # The needle for build's line ends at the newline: 'conflict at .git' is a
+  # prefix of 'conflict at .gitfoo/p', and the negative assertions below are the
+  # ones that would pass for the wrong reason without it.
+  printf -v nl '\n'
+  conf 'base personal/base' 'local local'
+  mkignore personal 'secret*'
+  # Reached: an ordinary path, one an ignore pattern covers, one on stow's own
+  # list, and two named beside the skipped names.
+  mklayer personal/base plain
+  mklayer local plain/inside
+  mklayer personal/base secretfile
+  mklayer local secretfile/inside
+  mklayer personal/base 'tilde~'
+  mklayer local 'tilde~/inside'
+  mklayer personal/base .gitfoo/p
+  mklayer local .gitfoo/p/inside
+  mklayer personal/base sub/.shale-ignorex
+  mklayer local sub/.shale-ignorex/inside
+  # Never reached: at and below both skipped names.
+  mklayer personal/base .git
+  mklayer local .git/inside
+  mklayer personal/base d/.git/c
+  mklayer local d/.git/c/inside
+  mklayer personal/base f/.shale-ignore
+  mklayer local f/.shale-ignore/inside
+  mklayer personal/base w/.shale-ignore/x/y
+  mklayer local w/.shale-ignore/x/y/inside
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" "shale: 5 conflicts; $HOME/.dotfiles/current not rebuilt" 'the build stderr'
+  build_err=$shale_err
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  doctor_out=$shale_out
+  # The two lists are written out rather than derived, so the case says which
+  # paths it expects on which side instead of restating the rule shale applies.
+  for rel in plain secretfile 'tilde~' .gitfoo/p sub/.shale-ignorex; do
+    run_shale which "$rel"
+    assert_status 0 "$shale_status" "which $rel"
+    assert_contains "$shale_err" \
+      "shale: note: 'build' would fail here — $rel is a file in 'base' and a directory in 'local'" \
+      "which stderr for $rel"
+    assert_contains "$build_err" "shale: conflict at $rel$nl" "build stderr for $rel"
+    assert_contains "$doctor_out" "shale: 'build' would fail at $rel — " "doctor stdout for $rel"
+  done
+  for rel in .git d/.git/c f/.shale-ignore w/.shale-ignore/x/y; do
+    run_shale which "$rel"
+    assert_status 0 "$shale_status" "which $rel"
+    assert_not_contains "$shale_err" "'build' would fail here" "which stderr for $rel"
+    assert_not_contains "$build_err" "shale: conflict at $rel$nl" "build stderr for $rel"
+    assert_not_contains "$doctor_out" "shale: 'build' would fail at $rel — " "doctor stdout for $rel"
+  done
 }
 
 # What the suppression costs, and where it is paid back.  report_ignored names a
