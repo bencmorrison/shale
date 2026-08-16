@@ -12,7 +12,7 @@ fi
 
 set -uo pipefail
 
-# What a pattern means, fixed here rather than left to the shell that started
+# What the shell means, fixed here rather than left to the shell that started
 # shale.  The glob subset an ignore file may use is a documented contract -
 # '*', '?', '[abc]', '[!abc]', and everything else a literal - and half of the
 # options below rewrite it.  Two of them are ordinary things to have in an rc
@@ -40,6 +40,25 @@ set -uo pipefail
 # boundary.
 #
 # Each name earns its place:
+#   set +e          errexit arrives the same way and ends the run at the first
+#                   command whose status this script reads rather than acts on -
+#                   which is most of them, shale being written to diagnose every
+#                   failure in its own words and a meta case pinning that it
+#                   never sets errexit itself.  Measured: doctor stopped after
+#                   the config check, printed no summary line, and exited 1 - a
+#                   report with three of its eight sections in it, a status that
+#                   looks right, and nothing saying the rest never ran.
+#   set +k          keyword makes a 'name=value' word an assignment wherever it
+#                   appears in a command rather than only ahead of one, so every
+#                   'local x=$1' below declared nothing and assigned into a
+#                   temporary environment instead.  On 5.2 that is a crash
+#                   naming a line number.  On the 3.2 floor, which is what macOS
+#                   ships, it is worse: the config parser read its own 'local' as
+#                   the layer path and refused a shale.conf that is correct, by
+#                   name and line number, with nothing in the message hinting at
+#                   the shell.  It is a parse-time option, so this line has to
+#                   run before the functions below are read - bash parses one
+#                   complete command at a time, so it does.
 #   set +f          noglob arrives through an exported SHELLOPTS on every bash
 #                   there is, the floor included, and stops every listing below
 #                   from expanding at all.
@@ -78,9 +97,46 @@ set -uo pipefail
 # it - so it is left alone rather than named, the name itself being one the
 # floor guard bans.
 #
-# Every name below exists on bash 3.2, so this cannot fail and no status has to
-# be dropped - which matters, errexit being inheritable through SHELLOPTS on
-# every bash there is and shale being written never to need it.
+# Four 'set -o' options reach shale and are not turned off here.
+#
+# noexec and onecmd are the two that cannot be, and they fail the same way: a
+# shale started under either exits 0 having composed nothing, linked nothing and
+# said nothing.  Under noexec bash reads the whole script and executes none of
+# it, so the line that would clear it does not run either.  onecmd looks
+# defendable and is not: bash runs one command and exits, and a comment line
+# spends it - so the '#!' on line 1 of this file is the one command every run of
+# it gets, and nothing below here executes at all.  Measured on 3.2.57 and
+# 5.2.21: a two-line script of 'set +t' and an echo prints the echo, and the
+# same script with any '#' line above it prints nothing.  Both are named here so
+# that the next reader does not go looking for the guard that would work.
+#
+# verbose and xtrace are the two that could be and deliberately are not.  They
+# add lines about the run - to stderr, and on doctor to stdout as well, that
+# being where a status is read through a '2>&1' - and change nothing else:
+# measured on both bashes, the composed tree and every exit status are identical
+# with each of them on and off.  Turning them off would defeat 'bash -x shale
+# build', which is how this script gets debugged.
+#
+# xtrace had one consequence beyond the noise, and it is fixed where it happens
+# rather than by clearing the option here.  The subshell that runs stow has both
+# its streams captured, so the trace of that subshell arrived as stow's output
+# and shale reported 'stow exited 0 and wrote output' over its own '++ cd' and
+# '++ stow' lines.  cmd_apply clears xtrace over that capture alone and puts it
+# back, which leaves every other command in the run traced.
+#
+# That leaves 20 of the 27 'set -o' options both bashes carry, and not one of
+# them changes anything shale does.  Two are shale's own - nounset and pipefail
+# - and the rest are readline and job-control settings a non-interactive shell
+# does not act on.  Measured rather than assumed, each of the 20 over a build,
+# an apply, a which and three doctors on both bashes, and the nine that could
+# plausibly reach a file operation over the whole suite as well.  Two of them
+# harden shale by accident, which is worth knowing and not worth relying on:
+# posix and privileged each stop bash reading BASH_ENV, the route this block
+# declines to defend against.
+#
+# Every name below exists on bash 3.2, so no line here can fail on a status -
+# and 'set +e' is the first of them, so an inherited errexit is gone before any
+# of the rest could be acted on.
 #
 # The order is not arbitrary and the overlap in it is not redundancy.  'The
 # dotglob option is disabled when GLOBIGNORE is unset' - bash(1), the same
@@ -91,6 +147,8 @@ set -uo pipefail
 # sentence promises - rather than this script asking for dotglob off.  The day
 # the GLOBIGNORE line moves or goes, the option it was silently carrying goes
 # with it.  So the last word on each option is the line that names it.
+set +e
+set +k
 set +f
 unset GLOBIGNORE
 shopt -u dotglob extglob failglob nocaseglob nocasematch nullglob
@@ -4055,7 +4113,7 @@ cmd_build() {
 }
 
 cmd_apply() {
-  local status err
+  local status err had_xtrace
 
   parse_config || exit 1
 
@@ -4096,13 +4154,40 @@ cmd_apply() {
   # apply that linked everything from one that linked most of it.  Both streams
   # go into the one capture, because letting stdout past means duplicating fd 1,
   # and that dup fails outright on a 'shale apply >&-' - no stow, nothing linked.
+  #
+  # Which makes this the one place in the script where an inherited xtrace is
+  # not merely loud.  The trace of the subshell goes to that subshell's stderr,
+  # which is the capture, so 'shale apply' under one reported 'stow exited 0 and
+  # wrote output' and printed shale's own '++ cd' and '++ stow' lines back as
+  # stow's.  Everything else the option does is a line about shale prefixed by
+  # PS4; this was shale asserting something untrue about another program.
+  #
+  # So it is cleared over the capture and put back, rather than in the block at
+  # the top of the file that clears the options which change an answer.  The
+  # narrow window is the point: 'bash -x shale apply' still traces every other
+  # command, which is what the trace is for.  The price is the cd and the stow
+  # inside the window, which now have no trace line anywhere - paid for a
+  # capture holding what stow wrote and nothing else.  Read from $- because that
+  # is the only spelling of the question that works on the 3.2 floor and does
+  # not cost a fork.
+  #
+  # No restore is owed on the paths that do not reach it: every trap that can
+  # fire in this window exits.
   status=0
+  had_xtrace=0
+  case $- in
+    *x*)
+      had_xtrace=1
+      set +x
+      ;;
+  esac
   err=$(
     (
       cd "$DOTFILES" 2>/dev/null || exit 125
       stow -d "$DOTFILES" -t "$HOME" -R --no-folding current
     ) 2>&1
   ) || status=$?
+  [ "$had_xtrace" -eq 0 ] || set -x
   # Before every message below, all of which point at what stow reported
   # 'above'.  Nothing was written under 125 - stow never ran - so that arm is
   # covered by this being empty.

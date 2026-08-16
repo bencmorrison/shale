@@ -127,10 +127,12 @@ component, `[abc]` and `[!abc]` match one character, and everything else is lite
 no `/` matches a path component at any depth; one with a `/` anywhere is anchored at the top of the
 tree. A directory that matches takes everything under it. Anything shale cannot translate — a
 backslash, a `**`, a trailing `/`, an unclosed `[` — is refused by name, with the file and line, and
-stops the build rather than reaching stow. That subset does not change with the shell you run shale
-from: a shell that exports `SHELLOPTS`, `BASH_ENV`, or `BASHOPTS` on bash 4.1 and later, passes its
-own `extglob` or `nocasematch` to every script it starts, and shale turns those off for itself
-before reading a pattern.
+stops the build rather than reaching stow. Nothing about what shale does changes with the shell you
+run it from: a shell that exports `SHELLOPTS`, `BASH_ENV`, or `BASHOPTS` on bash 4.1 and later
+passes its own options to every script it starts, and shale turns off the ones that would change an
+answer — the `extglob` and `nocasematch` that rewrite a pattern, and the `keyword` and `errexit`
+that rewrite what the script itself means — before it does anything. `set -v` and `set -x` are left
+alone, so `bash -x shale build` still works.
 
 The file is still composed into `current/`; the pattern changes only what stow links. So a pattern
 that matches more than it was meant to leaves a real file unlinked with `shale apply` exiting 0, and
