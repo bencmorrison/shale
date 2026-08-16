@@ -4685,7 +4685,7 @@ cmd_doctor() {
 # layers say, so it is the same before the first build as after it.
 cmd_which() {
   local arg=${1-} rel path i n lower upper keyword column width obscured ignored
-  local explained
+  local explained refused dot_git own_ignore unreached
 
   parse_config || exit 1
   # Refused rather than answered around: a pattern shale will not read is one it
@@ -4830,13 +4830,73 @@ cmd_which() {
   # that it did: the residual note at the end is the one for a path none of them
   # can account for, and two notes making the one point read as two problems.
   explained=0
+
+  # The two names the composer skips, read once and before anything is printed:
+  # the notes below are decided from them as well as reported by them, and a
+  # second copy of either test is a place for the two answers to drift apart.
+  dot_git=0
   case "/$rel/" in
-    */.git/*)
-      emit "note: no build composes a .git — shale skips one at every depth, so this path never reaches $CUR"
-      explained=1
-      ;;
+    */.git/*) dot_git=1 ;;
   esac
-  if [ "$ignored" -ne 0 ]; then
+  own_ignore=0
+  [ "${rel##*/}" != "$IGNORE_NAME" ] || own_ignore=1
+
+  # Whether the composer reaches this path at all, which is a component test
+  # where the note about the second name is a leaf test - deliberately, and the
+  # two must not be confused.  compose_dir drops both names by basename at every
+  # depth and does not descend, so nothing below a directory of either is
+  # composed either, while the note below says which layer's copy of *this*
+  # file is not composed and reads the leaf to say it.
+  unreached=0
+  case "/$rel/" in
+    */.git/* | */"$IGNORE_NAME"/*) unreached=1 ;;
+  esac
+
+  # Whether the next build exits 1 at this path, decided before a line is
+  # printed because it settles what the notes below may say rather than adding
+  # to them.  With no built tree and no apply, a note prescribing a name or a
+  # line of the built list sends the reader to a file the next build will not
+  # write.  The two it suppresses are the two carrying such a remedy -
+  # report_ignored's 'nothing but a different name gets this path past it' and
+  # the trailing-newline note's 'nothing but a different name at the top of this
+  # path gets it linked' - and a reader who acts on either still has a build
+  # that refuses to run.
+  #
+  # The two it leaves alone say the composer skips a name, which a refusal makes
+  # no less true: they name what would not reach the tree were there a build at
+  # all.
+  #
+  # A collision counts only where the composer reaches the path, which is the
+  # whole of why 'unreached' is read here and why it is the component test
+  # rather than the leaf one.  At or below either skipped name the composer
+  # takes neither provider, sees no disagreement, and build exits 0 - measured,
+  # at the leaf and below a directory of the name - so suppressing a true note
+  # there would be dropping it on the strength of the collision note beside it,
+  # and that note is the false one: it says 'build' would fail and build does
+  # not.  It is left exactly as it stands, and is not this.
+  #
+  # The other spelling needs no such test: build's refusal is that a layer
+  # provides anything at all at that path, and it holds where the only thing
+  # under a directory of the name is a '.git' or a '.shale-ignore', file or
+  # directory - measured too, the composer making the directory whatever it
+  # declines to put in it.
+  #
+  # One thing goes with the suppressed note and is not said again: a link an
+  # earlier apply left at an ignored path, which stow does not unstow.  doctor
+  # names every one of them as a finding and exits 1 - checked, in the state
+  # where a collision and such a link stand together - and the refusal here is
+  # a finding of doctor's too, so the reader sent to fix it is told.
+  refused=0
+  if [ "$upper" -ge 0 ] && [ "$unreached" -eq 0 ]; then
+    refused=1
+  fi
+  [ "${rel%%/*}" != .stow-local-ignore ] || refused=1
+
+  if [ "$dot_git" -ne 0 ]; then
+    emit "note: no build composes a .git — shale skips one at every depth, so this path never reaches $CUR"
+    explained=1
+  fi
+  if [ "$ignored" -ne 0 ] && [ "$refused" -eq 0 ]; then
     report_ignored "$rel"
     explained=1
   fi
@@ -4866,18 +4926,23 @@ cmd_which() {
     # linked it: stow reads it and leaves it where it is.  Accounted for by the
     # line above, whose remedy is the layer rather than another apply.
     explained=1
-  elif [ "${rel%%/*}" = ".stow-local-ignore$NL" ]; then
+  elif [ "${rel%%/*}" = ".stow-local-ignore$NL" ] && [ "$refused" -eq 0 ]; then
     report_stow_local_ignore_newline
     # The name beside that one, and the reachable half of the pair: every build
     # composes this path without a word and no apply links it, so the residual
     # note below would send the reader to run an apply that answers the same
     # thing again for as long as the name stands.  The first component, because
     # a directory of that name takes everything under it.
+    #
+    # 'refused' can only be the collision arm by here, the component test above
+    # having answered no: with one, no build composes this path either and the
+    # remedy this note names is a rename the collision survives.  The arm above
+    # accounted for the path in that case.
     explained=1
   fi
   # At any depth, which is where the composer drops it: the table above names
   # the layer holding this file truthfully, and no build puts it in the tree.
-  if [ "${rel##*/}" = "$IGNORE_NAME" ]; then
+  if [ "$own_ignore" -ne 0 ]; then
     emit "note: no build composes a $IGNORE_NAME — shale reads the one at the top of a clone root and copies none of them"
     # Accounted for, like the three above: only a hand puts one of these in the
     # built tree, and the line above says why no build did.
