@@ -2258,9 +2258,23 @@ shell_quote() {
 # cannot open is one stow does not read either.  STOWRC_PATHS is 1 when one of
 # them is --dir or --target, and STOWRC_DOTFILES is 1 when one of them is
 # --dotfiles - the one option that decides where a path lands rather than
-# whether it lands, which which reads to know it cannot follow the rename.  Both
-# are set from the canonical name rather than from the token, an abbreviation
-# being what the file may spell it as.
+# whether it lands, which which reads to know it cannot follow the rename.
+#
+# STOWRC_NO_LINKS is 1 when one of them can leave an apply having linked nothing
+# at all while exiting 0, which is the state audit_unapplied_tree would
+# otherwise report as a build nobody had applied, for ever, with a remedy that
+# cannot work.  Four of stow's options can, under five long names and three
+# short ones: --ignore, whose patterns shale will not read and one of which is
+# enough to cover a whole tree; --simulate, with its --no alias and -n, every
+# run of which is a dry run; and --help and --version, with -h and -V, which
+# make stow print and exit before it links anything.  Measured on 2.3.1 and
+# 2.4.1, one option per file against a package of one file: all eight spellings
+# leave $HOME with no link and stow exiting 0 on both versions, and --defer,
+# --override, --adopt, --compat and --verbose link it on both.  --dir and
+# --target are not among them because apply passes its own.
+#
+# All three are set from the canonical name rather than from the token, an
+# abbreviation being what the file may spell it as.
 #
 # An option is in the set for what it is, not for what one version or one of
 # shale's own code paths makes of it: --verbose changes no link and is named,
@@ -2283,6 +2297,7 @@ stowrc_options() {
   STOWRC_OPTIONS=()
   STOWRC_PATHS=0
   STOWRC_DOTFILES=0
+  STOWRC_NO_LINKS=0
   { [ -f "$file" ] && [ -r "$file" ]; } || return 1
   lineno=0
   skip=0
@@ -2333,7 +2348,14 @@ EOF
                 [ -n "$rest" ] || skip=1
                 rest=
                 ;;
-              h | n | p | v | V)
+              # The three that leave an apply having linked nothing, apart from
+              # the rest so that the set is read off the code rather than
+              # inferred: -n is a dry run, -h and -V print and exit.
+              h | n | V)
+                STOWRC_OPTIONS[${#STOWRC_OPTIONS[@]}]="line $lineno: -$ch"
+                STOWRC_NO_LINKS=1
+                ;;
+              p | v)
                 STOWRC_OPTIONS[${#STOWRC_OPTIONS[@]}]="line $lineno: -$ch"
                 ;;
             esac
@@ -2355,6 +2377,7 @@ EOF
             [ "$eq" -eq 1 ] || skip=1
             case "$name" in
               dir | target) STOWRC_PATHS=1 ;;
+              ignore) STOWRC_NO_LINKS=1 ;;
             esac
             break
             ;;
@@ -2366,6 +2389,9 @@ EOF
             "$word"*)
               matched=1
               [ "$name" != dotfiles ] || STOWRC_DOTFILES=1
+              case "$name" in
+                help | no | simulate | version) STOWRC_NO_LINKS=1 ;;
+              esac
               break
               ;;
           esac
@@ -3129,6 +3155,138 @@ audit_built_tree() {
   if [ "$n" -gt "$cap" ]; then
     rest=$((n - cap))
     lines[${#lines[@]}]="and $rest more, not named here"
+  fi
+  note ${lines[@]+"${lines[@]}"}
+}
+
+# Non-zero unless some path in the built tree under $1 - relative to $CUR, and
+# '' for the whole of it - is one an apply would link.  That is the other half
+# of the note below: 'nothing is linked' means nothing only where there was
+# something to link, and a tree every pattern covers is a tree an apply leaves
+# alone by design.
+#
+# The first such path ends the walk, so the ordinary tree costs the descent to
+# its first file; the whole tree is read only where the answer is 'none', which
+# is the answer that pays for it.
+#
+# Neither list is consulted below a directory either of them covers, and that is
+# why nothing is carried down: a pattern matches on any component, so everything
+# under a covered directory is covered too, and descending it would test paths
+# whose answer is already known.  scan_ignored_links descends one because the
+# links it is looking for are at the leaves; there is nothing below one here.
+#
+# Directories are walked and never counted.  An apply makes them rather than
+# linking them - shale passes --no-folding - so a tree of empty directories is
+# one no link ever appears for, and counting them would leave the note firing
+# for ever on a machine that had applied.
+#
+# A path shale cannot read counts as nothing, which leaves this saying 'none'
+# where it might have said otherwise: silence is the safe answer for a note, and
+# audit_built_tree has already reported the directory it could not read.
+built_tree_has_linkable_path() {
+  local rel=$1 here e base srel
+  here=$CUR${rel:+/$rel}
+  { [ -r "$here" ] && [ -x "$here" ]; } || return 1
+  # Both patterns, and '.' and '..' dropped by name, whatever the glob options
+  # say about them.
+  list_dir "$here" 1
+  for e in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
+    base=${e##*/}
+    case "$base" in
+      . | ..) continue ;;
+    esac
+    # Also where an unmatched glob lands, its literal being at no path.
+    { [ -e "$e" ] || [ -L "$e" ]; } || continue
+    # The one file shale writes into the tree itself, at the top of it and
+    # nowhere else: stow ignores its own ignore file's name there whatever a
+    # package's list holds, so no apply ever links it and a tree holding only it
+    # is a tree with nothing to link.  Both spellings home_conflict carries, and
+    # for its reason: stow's entry for this name is anchored and ends in '$', so
+    # the trailing-newline trim covers the second, and a tree whose only other
+    # entry was that one would be reported unapplied for ever.
+    if [ -z "$rel" ]; then
+      case "$base" in
+        .stow-local-ignore | ".stow-local-ignore$NL") continue ;;
+      esac
+    fi
+    srel=${rel:+$rel/}$base
+    # Guarded on the count rather than left to the loop inside, because the
+    # ordinary config has no ignore line at all and the call still pays for two
+    # locale switches.
+    if [ "${#IGNORE_PATTERNS[@]}" -gt 0 ] && path_is_ignored "$srel"; then
+      continue
+    fi
+    # The gate rather than the row loop, as home_conflict asks the identical
+    # question: nothing here reads STOW_IGNORED_BY, and asking the loop instead
+    # would make a future divergence between the two a note on a working setup
+    # rather than nothing at all.
+    ! stow_default_covers "$srel" || continue
+    if [ -d "$e" ] && [ ! -L "$e" ]; then
+      ! built_tree_has_linkable_path "$srel" || return 0
+      continue
+    fi
+    return 0
+  done
+  return 1
+}
+
+# The machine-wide state which answers one path at a time: a built tree with
+# nothing from it linked in $HOME, which is what a build that has never been
+# applied leaves.  Without it doctor reports 'no problems found' on a $HOME
+# holding nothing but ~/.dotfiles, which is the state a reader runs doctor in
+# and the one thing they need told.
+#
+# A note and never a finding.  Nothing is broken - the build is complete and
+# correct - and the whole of it is one command away, so exit 1 would be shale
+# calling its own documented sequence a fault.
+#
+# Silent where there is no tree at all: that is audit_broken_links' note, in the
+# words that offer a build, and two notes about one machine reading as two
+# problems is what this ordering avoids.  Silent, too, where anything at all is
+# linked - one apply landing is the whole of what this is asking about, and a
+# link the reader removed by hand afterwards is not this note's business.
+#
+# A stow resource file is where the question stops being answerable, and it is
+# also a reason the report has already given: the note naming that file is
+# printed above this one, and it is what the reader has instead.  Two sets of
+# options in it silence this.  --dotfiles is report_unlinked's, and is about
+# where a path lands: stow links 'dot-zshrc' as '.zshrc', so an applied tree has
+# nothing in $HOME at any path this walk compares.  STOWRC_NO_LINKS' four are
+# about whether anything lands at all, and --ignore is the one that matters
+# most - a machine that applies successfully every time, with one pattern in
+# that file covering the tree, would otherwise be told for ever to run the apply
+# it just ran.  In both sets the option name is read and no pattern in the file
+# is, which is the line #96 drew.
+audit_unapplied_tree() {
+  local entry lines
+  { [ -d "$CUR" ] && [ ! -L "$CUR" ]; } || return 0
+  [ -n "${HOME-}" ] || return 0
+  # doctor's two, in doctor's order and spelt as doctor spells them.
+  for entry in "${HOME-}/.stowrc" "$DOTFILES/.stowrc"; do
+    if stowrc_options "$entry"; then
+      [ "$STOWRC_DOTFILES" -eq 0 ] || return 0
+      [ "$STOWRC_NO_LINKS" -eq 0 ] || return 0
+    fi
+  done
+  # The cheaper question first: it ends at the first file an apply would link,
+  # which is one descent on any tree that has one.
+  built_tree_has_linkable_path '' || return 0
+  BUILT_TREE_UNREAD=0
+  ! built_tree_is_linked '' || return 0
+  # Where the walk could not look it does not conclude, exactly as which does
+  # not: a directory that cannot be listed answers every glob with nothing, and
+  # the link this note would deny may be inside it.
+  [ "$BUILT_TREE_UNREAD" -eq 0 ] || return 0
+  lines=("nothing in the built tree at $CUR is linked in $HOME"
+    "build composes that tree and apply is what links it into $HOME, so until an apply runs none of it is in use")
+  # Offered only where it would work, which is audit_broken_links' rule for the
+  # build it offers.  An apply builds before it stows, so everything that stops
+  # a build stops it; a path in $HOME that a layer provides stops the stow half,
+  # in a finding that says what to move aside.
+  if [ "$BUILD_BLOCKED" -gt 0 ] || [ "$APPLY_CONFLICTS" -gt 0 ]; then
+    lines[${#lines[@]}]='no apply will finish until the problems above are fixed'
+  else
+    lines[${#lines[@]}]='apply it with: shale apply'
   fi
   note ${lines[@]+"${lines[@]}"}
 }
@@ -5108,6 +5266,13 @@ cmd_doctor() {
 
   # The two walks, in size order: the built tree, then the whole of $HOME.
   audit_built_tree
+
+  # Ahead of the three checks below, all of which are about the links an apply
+  # made: on a machine that has never applied there are none, and silence from
+  # them means something different from a clean report.  After audit_built_tree
+  # because that is where a tree shale could not read whole is named, and this
+  # says nothing about one.
+  audit_unapplied_tree
 
   # The built tree again, and only where there are patterns: what the ignore
   # list covers, against what $HOME still links.

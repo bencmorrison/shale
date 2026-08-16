@@ -143,7 +143,8 @@ unstowing it — so `doctor` names those leftover links too, and removing them i
 [docs/layers.md](docs/layers.md#blocking-a-file-without-removing-it) has the detail.
 
 Every transcript below was produced from that config, in a home directory at `/home/you` that had
-been applied once already — `doctor` says more before the first build than after one. Where a
+been applied once already — `doctor` says more before the first build, and more before the first
+apply, than after both. Where a
 transcript needed a fault to show, the text says what was broken first.
 
 ## Commands
@@ -341,7 +342,9 @@ directory, or a link of your own, none of which stow will write over — that no
 directory rather than a file or a link to one, that the
 build lock is neither held nor uncreatable, that nothing in `~/.dotfiles` is a stray, that neither
 `current.new` nor `current.old` has been left beside `current`, and that no
-link in `$HOME` points into the built tree at a path it no longer provides. Where a `.stowrc` exists
+link in `$HOME` points into the built tree at a path it no longer provides, and that something from
+that tree is linked in `$HOME` at all — a built tree with nothing linked is what a machine that has
+never been applied looks like, and nothing in it is in use. Where a `.stowrc` exists
 it names the stow options that file sets, because several of them change an apply and three of them
 make it do nothing at all. It changes nothing itself.
 
