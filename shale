@@ -181,6 +181,49 @@ OLD=$DOTFILES/current.old
 # every configured path component start with a letter, digit or '_'.
 LOCK=$DOTFILES/.lock
 
+# The mode of every directory shale makes for itself: the lock, the tree a build
+# composes into, and - by the two renames that install it - $CUR and the $OLD it
+# replaced.  Every one of them was 0777 against the caller's umask, so on the
+# Debian and Ubuntu default the directory every symlink in $HOME resolves
+# through was group-writable, and anyone sharing the group could replace what
+# those links point at.
+#
+# Fixed rather than taken from the umask because shale creates these: unlike a
+# layer's directory there is no intent to honour, and the only question is what
+# shale should pick.  0700 rather than any other fixed mode because it is the
+# only one no umask can narrow - 0755 would open the tree on a machine at
+# 'umask 077', which is the direction #119's rule in $HOME exists to refuse.
+#
+# What it buys is not only the write bit.  The built tree holds a copy of every
+# file of every layer at whatever mode the layer has, and git records no mode
+# but the executable bit, so a .ssh/config committed at 0600 arrives from a
+# clone at 0644 - measured, under 'umask 002', with the directory above it at
+# 0775.  This mode is the whole of what keeps that off the rest of the machine.
+#
+# What it costs is a built tree no other user can walk.  Nothing shale runs
+# needs to - stow, chkstow and every command here run as the owner - but a
+# $HOME that is group-readable by design, with something else reading a file
+# shale linked, resolves that link through this directory and stops here.  There
+# is no flag to relax it and a chmod does not hold, the next build renaming a
+# fresh tree into place; doctor says so where it finds one.
+#
+# The permission bits are the whole of what this decides.  A set-id or sticky bit
+# is the parent's: no umask masks one, mkdir(2) takes the set-group-ID bit from
+# the directory it is created in, and a rename carries it across - so under a
+# setgid ~/.dotfiles every tree here is 2700, and shale neither chose that bit
+# nor can clear it.  GNU chmod will not either, given a four-digit octal: 'chmod
+# 0700' on a setgid directory leaves 2700 and only 'chmod 00700' clears it,
+# measured on coreutils 9.4.  Nothing here tries to, and doctor compares the
+# permission bits alone for the same reason.
+OWN_DIR_MODE=0700
+# The same permission bits as a umask, which is how make_own_dir applies them.
+# Derived rather than written, so those bits cannot drift apart in a later edit -
+# and only those: the mask discards anything above them, which is right because a
+# umask cannot carry a set-id or sticky bit anyway.
+printf -v OWN_DIR_UMASK '%04o' "$((0777 & ~8#$OWN_DIR_MODE))"
+# make_own_dir's cache of the umask it has to put back.  Empty until one is read.
+UMASK_SAVED=
+
 # First line prefixed 'shale: ', continuation lines 'shale:   ', on stdout.
 report() {
   local line prefix
@@ -1553,6 +1596,34 @@ defer_signals() {
 DEFERRED=
 arm_traps
 
+# ----------------------------------------------------- shale's own directories
+
+# mkdir at $OWN_DIR_MODE.  Every directory shale creates goes through this, and
+# the mode is not negotiable at any of them: see OWN_DIR_MODE.  Non-zero exactly
+# as mkdir's own status, and mkdir's own stderr, so each caller keeps the arms it
+# had.
+#
+# The umask rather than a chmod after the mkdir, because the kernel applies the
+# umask inside mkdir(2): there is no instant at which the directory exists at a
+# wider mode.  A chmod one command later would leave one, and $NEW is what a
+# build composes into - a file planted in that window is a file the build renames
+# into $CUR.
+#
+# Put back immediately, because the umask is also what decides the mode of the
+# .stow-local-ignore this build writes, of the tree git clone lands, and of every
+# directory stow creates in $HOME.  Read back once and cached rather than read at
+# each call: this runs once per directory of the composed tree per layer, and
+# '$(umask)' is a fork where the two builtins around it are not.
+make_own_dir() {
+  local path=$1 status
+  [ -n "$UMASK_SAVED" ] || UMASK_SAVED=$(umask)
+  umask "$OWN_DIR_UMASK"
+  mkdir "$path"
+  status=$?
+  umask "$UMASK_SAVED"
+  return "$status"
+}
+
 # -------------------------------------------------------------------- the lock
 
 # mkdir is the atomic primitive - it fails when the directory exists, on every
@@ -1580,7 +1651,7 @@ acquire_lock() {
       'install it with your system package manager: shale installs nothing'
   # mkdir's own diagnostic is suppressed because each arm below says more about
   # this particular directory, and its remedy, than 'File exists' does.
-  if mkdir "$LOCK" 2>/dev/null; then
+  if make_own_dir "$LOCK" 2>/dev/null; then
     LOCKED=$LOCK
     return 0
   fi
@@ -1614,7 +1685,7 @@ acquire_lock() {
   # Nothing is there, so the holder released between the mkdir above and these
   # tests.  One more attempt, so that only a mkdir that fails against an empty
   # path reaches the message below, which is about permissions.
-  if mkdir "$LOCK" 2>/dev/null; then
+  if make_own_dir "$LOCK" 2>/dev/null; then
     LOCKED=$LOCK
     return 0
   fi
@@ -1963,7 +2034,7 @@ compose_dir() {
           continue
         fi
       else
-        mkdir "$dpath" || die "could not create $dpath"
+        make_own_dir "$dpath" || die "could not create $dpath"
       fi
       # The ignore lists, in scan_ignored_links's order and with its carry.
       # Guarded on the pattern count for the reason that one is: the ordinary
@@ -1984,12 +2055,13 @@ compose_dir() {
       # losing layer would set is overwritten by the winner a moment later, and
       # a build's whole answer for the path is the winner's.
       #
-      # Which leaves a directory a losing layer created holding mkdir's own
+      # Which leaves a directory a losing layer created holding make_own_dir's
       # mode until the winner reaches it, and that is writable by construction
-      # rather than by luck: it is 0777 against the same umask that made the
-      # parent this mkdir has just written into, so a umask that took the
-      # owner's bits off would have stopped the build at current.new.  Measured
-      # under 'umask 0700', where it does, on this and on the version before it.
+      # rather than by luck: $OWN_DIR_MODE carries the owner's rwx whatever the
+      # caller's umask, so the next layer can compose into it and cleanup's
+      # rm -rf can delete it.  It was mkdir's own 0777-against-the-umask until
+      # every directory shale creates became a fixed mode, and a 'umask 0700'
+      # run stopped at current.new there.
       #
       # Written before the recursion rather than after it, which is safe only
       # because dir_mode forces the owner's rwx on: the entries below are
@@ -2914,6 +2986,47 @@ scan_built_tree() {
       common_ancestor "$e"
     fi
   done
+}
+
+# The mode of the built tree itself, which is shale's own and not a layer's: it
+# is the one directory in the whole design that every symlink shale makes in
+# $HOME resolves through, so what may be read out of the tree - and, group-write
+# being the shape #124 was raised for, what may be swapped underneath those
+# links - is decided here and nowhere else.
+#
+# A note and never a finding, for the reason the mode notes in $HOME are notes:
+# nothing is broken and no build or apply is blocked.  What the reader is owed is
+# that the chmod they just made will not survive, because $CUR is not chmodded by
+# a build - it is a fresh tree renamed over the old one, and the fresh one is
+# made at $OWN_DIR_MODE.  Whoever widened it deliberately, to let something else
+# read a linked file, has to know that; whoever finds it widened has to know it
+# fixes itself.
+#
+# The raw mode, not dir_mode's owner-forced one: this reports what is there.
+# Silent where ls cannot read it, that being the walks' business rather than
+# this one's - and $CUR unreadable is a note of its own from audit_built_tree.
+audit_current_mode() {
+  { [ -d "$CUR" ] && [ ! -L "$CUR" ]; } || return 0
+  dir_mode "$CUR" 2>/dev/null || return 0
+  # The permission bits and not the whole mode, because the set-id and sticky
+  # bits are not shale's to choose and comparing them made this report fire on
+  # shale's own output: no umask masks the set-group-ID bit, mkdir takes it from
+  # the parent, so a ~/.dotfiles on a shared volume gives every tree a build
+  # makes 2700 rather than 0700 - and the rename carries it across, so the note
+  # said a build would settle it and no build could.  Measured, and it is the
+  # ~/.dotfiles with a shared group - the setup this whole mode is for - that
+  # got the false note.  8# because 2700 has no leading zero and bash would
+  # otherwise read it as decimal.
+  [ $((8#$DIR_MODE_RAW & 0777)) -ne $((8#$OWN_DIR_MODE & 0777)) ] || return 0
+  # The raw mode in the message even so: a 2755 is genuinely wide and the reader
+  # needs the digit shale is not talking about as well as the ones it is.  The
+  # last line says what the next build actually leaves rather than $OWN_DIR_MODE
+  # flat, because against a 2755 it leaves 2700 - the bits shale chose, and the
+  # one it inherited - and a remedy a reader can disprove in one command is
+  # worse than none.
+  note "$CUR is mode $DIR_MODE_RAW, and shale builds its permission bits at $OWN_DIR_MODE" \
+    "every symlink shale makes in $HOME resolves through that directory, so its mode decides who can read what they point at and who can replace it" \
+    "the next build renames a fresh tree over it, made with $OWN_DIR_MODE and with whatever set-id or sticky bit $DOTFILES gives a new directory, so a chmod here does not hold"
 }
 
 # The report #66 put in build, moved here because build is the loop a user runs
@@ -4146,7 +4259,7 @@ cmd_build() {
   # SCRATCH still empty and orphan the scratch tree.  Naming a path that does
   # not exist yet costs nothing - cleanup's rm -rf is a no-op on it.
   SCRATCH=$NEW
-  mkdir "$NEW" || die "could not create $NEW"
+  make_own_dir "$NEW" || die "could not create $NEW"
 
   DIVERGED_PATHS=()
   DIVERGED_LAYERS=()
@@ -4356,6 +4469,26 @@ cmd_build() {
   if [ "$n" -eq 0 ] && [ "$OLDER_COUNT" -eq 0 ]; then
     rm -rf "$OLD" || warn "could not remove $OLD"
   else
+    # The one directory of shale's own that no mkdir here made: it is the whole
+    # of the last build's $CUR, arrived by rename with the mode that build gave
+    # it.  A no-op on every build but the first after an upgrade, where the tree
+    # it renames was made at 0777 against a umask and would sit group-writable
+    # for the one build this keeps it - holding a copy of every file in every
+    # layer, which is the whole of what $OWN_DIR_MODE is for.  Set only where
+    # the tree is kept, because the arm above deletes it unread.
+    #
+    # A warning rather than a die: the build is done and correct, and this is a
+    # mode on a tree the next build removes.
+    #
+    # The permission bits only, like everything else here: GNU chmod given a
+    # four-digit octal leaves a directory's set-group-ID bit alone - 'chmod 0700'
+    # on one holding it yields 2700, and only 'chmod 00700' clears it, measured
+    # on coreutils 9.4 - so this cannot strip a bit that came from $DOTFILES, and
+    # is not meant to.
+    if [ -d "$OLD" ] && [ ! -L "$OLD" ]; then
+      chmod "$OWN_DIR_MODE" "$OLD" ||
+        warn "could not set the mode $OWN_DIR_MODE on $OLD"
+    fi
     # The older direction keeps current.old and says nothing; only this one is
     # reported here.  See older_than_layer.
     i=0
@@ -4967,6 +5100,11 @@ cmd_doctor() {
       note ${lines[@]+"${lines[@]}"}
     fi
   done
+
+  # Ahead of the walk below it, and of everything that walk says about what is
+  # inside the built tree: the mode of the tree itself is what decides who else
+  # can see any of it.
+  audit_current_mode
 
   # The two walks, in size order: the built tree, then the whole of $HOME.
   audit_built_tree

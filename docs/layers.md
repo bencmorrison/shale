@@ -410,6 +410,41 @@ chmod 700 ~/.dotfiles/personal/base/.ssh ~/.dotfiles/personal/base/.gnupg
 chmod 600 ~/.dotfiles/personal/base/.ssh/config
 ```
 
+## Permissions on the built tree itself
+
+`~/.dotfiles/current` is `700`, and so are `current.new`, any `current.old` and the lock at
+`~/.dotfiles/.lock`. No layer provides those, so there is no mode to copy: shale picks one, and picks
+the narrowest, on every machine at every umask.
+
+It matters more than it looks. Every symlink shale makes in `$HOME` resolves *through* that
+directory, so its mode is what decides who may read the file at the end of the link and who may
+replace it — and what is inside it is a copy of every file of every layer, at whatever mode the layer
+has. Read the paragraph above again: a clone gives you `644` on a `config` you committed at `600`.
+`700` on the tree is what contains that mistake.
+
+The cost is that nothing but you can walk the built tree. Nothing shale runs needs to — stow reads it
+as you, and so does every other command here — but if your `$HOME` is group-readable by design and
+something else reads a file shale linked, it resolves the link into this directory and stops. There
+is no option to relax it, and a `chmod` will not hold: a build does not chmod `current`, it renames a
+fresh `700` tree over the old one. `shale doctor` says so where it finds one that is not `700`, as a
+note:
+
+```
+shale: /home/you/.dotfiles/current is mode 0755, and shale builds its permission bits at 0700
+shale:   every symlink shale makes in /home/you resolves through that directory, so its mode decides who can read what they point at and who can replace it
+shale:   the next build renames a fresh tree over it, made with 0700 and with whatever set-id or sticky bit /home/you/.dotfiles gives a new directory, so a chmod here does not hold
+```
+
+Only the permission bits are shale's. A `setgid`, `setuid` or sticky bit on the built tree came from
+`~/.dotfiles` and shale neither sets nor clears it: no umask masks one, a new directory takes the
+set-group-ID bit from the directory it is made in, and the rename that installs a build carries it
+across. So a `~/.dotfiles` on a shared volume gives you `2700` here rather than `0700`, on every
+build, and `doctor` says nothing about it — that bit is yours. It is the mode of a genuinely wide
+tree, `2755` say, that `doctor` reports, and it reports the whole of it so you can see both halves.
+
+The modes *inside* the tree are the layers' and are untouched by this: `current/.ssh` is whatever the
+section above says it is.
+
 ## What a layer must not ship
 
 Never a `.stow-local-ignore` at the top of a layer. Shale writes the one in `current/` itself — it is

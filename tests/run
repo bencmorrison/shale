@@ -2459,6 +2459,105 @@ test_build_a_directory_mode_it_cannot_read_stops_the_build() {
   assert_missing "$HOME/.dotfiles/current"
 }
 
+# The other half of the mode question, and the half no layer has a say in: the
+# directories shale makes for itself.  Every one of them was 0777 against the
+# caller's umask, so on the 0002 that ships with Debian and Ubuntu the directory
+# every symlink in $HOME resolves through was group-writable - and what is
+# inside it is a copy of every file of every layer, at whatever mode a clone gave
+# them.  The four umasks are the ones the case above uses, for its reasons.
+#
+# current.old is asserted beside current because it is the one of the four that
+# no mkdir makes: it is the last build's current, arrived by rename, and a
+# rename carries the mode the tree already had rather than taking a new one.
+test_build_shale_s_own_directories_have_one_mode_whatever_the_umask() {
+  local um saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # Dated into the past so that the touch below is newer by a whole second:
+  # bash 3.2 compares -nt in seconds, and a same-second edit is not newer there
+  # however it is written.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  saved=$(umask)
+  for um in 0022 0002 0077 0000; do
+    umask "$um"
+    run_shale build
+    umask "$saved"
+    assert_status 0 "$shale_status" "umask $um first build"
+    assert_mode "$HOME/.dotfiles/current" 'drwx------' "umask $um current"
+    # The divergence that makes the build keep the tree it replaced, so that
+    # there is a current.old to read a mode off at all.
+    sandbox_mkdir "$HOME/.dotfiles/current"
+    touch "$sandbox_dir/.zshrc" || fail 'could not date the built copy'
+    umask "$um"
+    run_shale build
+    umask "$saved"
+    assert_status 0 "$shale_status" "umask $um second build"
+    assert_mode "$HOME/.dotfiles/current" 'drwx------' "umask $um current"
+    assert_mode "$HOME/.dotfiles/current.old" 'drwx------' "umask $um current.old"
+  done
+}
+
+# The scratch tree, which no build that finishes leaves behind: a stub mv is what
+# stops one with it still standing.  The reap at the end is the constraint the
+# mode has to satisfy as well as being narrow - a directory its owner cannot
+# enter is one rm -rf cannot remove, so a mode without the owner's rwx in it
+# would wedge every later build on 'could not remove current.new'.  The loop
+# proves it four times over before the last build proves it again from clean.
+# shellcheck disable=SC2123  # PATH is prefixed on purpose and restored below
+test_build_the_scratch_tree_has_that_mode_whatever_the_umask() {
+  local um saved_path saved_umask
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/git/config
+  stub_mv '*/current.new' 1
+  saved_path=$PATH
+  saved_umask=$(umask)
+  PATH=$stub_path:$PATH
+  for um in 0022 0002 0077 0000; do
+    umask "$um"
+    run_shale build
+    umask "$saved_umask"
+    assert_status 1 "$shale_status" "umask $um exit status"
+    assert_mode "$HOME/.dotfiles/current.new" 'drwx------' "umask $um"
+  done
+  PATH=$saved_path
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that reaps the scratch tree'
+  assert_empty "$shale_err" 'the build that reaps the scratch tree stderr'
+  assert_missing "$HOME/.dotfiles/current.new"
+}
+
+# The umask that used to stop a build outright, and the reason it no longer can:
+# every directory shale creates now carries the owner's rwx whatever the caller
+# masked off, so the scratch tree, the lock and each directory a losing layer
+# composes are enterable by construction.  Against 0200 the built tree used to
+# be 0577 - a directory shale had created a moment earlier and could not write
+# into - and the build died on 'cannot create directory .../current.new/.config'
+# with mkdir's own line in front of it.
+#
+# 0200 rather than the 0700 that shows it loudest, because the harness opens its
+# own capture files under whatever umask the case leaves in force, and one that
+# masks the owner's read makes them unreadable to the assertions.  0200 masks
+# only the write, which is the bit this is about.
+test_build_survives_a_umask_that_masks_off_the_owner() {
+  local saved
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer local .config/nvim/init.lua
+  mklayer personal/base .zshrc
+  saved=$(umask)
+  umask 0200
+  run_shale build
+  umask "$saved"
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'stderr'
+  assert_mode "$HOME/.dotfiles/current" 'drwx------'
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built tree'
+  assert_eq 'local/.config/nvim/init.lua' \
+    "$(cat "$HOME/.dotfiles/current/.config/nvim/init.lua")" 'the built tree'
+}
+
 test_build_is_idempotent_and_drops_a_file_deleted_from_a_layer() {
   local first
   conf 'base personal/base'
@@ -4090,6 +4189,52 @@ test_lock_a_second_concurrent_build_refuses_and_leaves_current_whole() {
   assert_missing "$HOME/.dotfiles/.lock"
 }
 
+# The lock is the fourth of shale's own directories and the only one a finished
+# run never leaves behind, so a hold is what makes it readable at all - and it
+# reads the scratch tree in the same instant, which is the only moment both
+# exist.  0000 rather than the four-umask loop the build cases run: the lock
+# comes from the same mkdir they do, and what this has to show is that the widest
+# umask a machine can have does not reach it.
+#
+# Recorded between the hold and the release rather than asserted there, for the
+# reason the case above records: an assertion that fails inside the window leaves
+# the held build spinning until its own bound expires.
+# shellcheck disable=SC2123  # PATH is prefixed on purpose and restored below
+test_lock_has_shale_s_own_mode_and_not_the_umask() {
+  local saved saved_umask first first_status lock_seen scratch_seen out err
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/git/config
+  stub_hold mkdir '*/current.new'
+  sandbox_leaf "$CASE_DIR" held.out new
+  out=$sandbox_path
+  sandbox_leaf "$CASE_DIR" held.err new
+  err=$sandbox_path
+  saved=$PATH
+  saved_umask=$(umask)
+  PATH=$stub_path:$PATH
+  umask 0000
+  shale build >"$out" 2>"$err" &
+  first=$!
+  umask "$saved_umask"
+  if ! wait_for "$stub_path/holding"; then
+    release_hold
+    PATH=$saved
+    fail 'the build never reached its hold'
+  fi
+  lock_seen=$(ls -ld "$HOME/.dotfiles/.lock" 2>&1)
+  scratch_seen=$(ls -ld "$HOME/.dotfiles/current.new" 2>&1)
+  release_hold
+  first_status=0
+  wait "$first" || first_status=$?
+  PATH=$saved
+  assert_status 0 "$first_status" 'the held build'
+  assert_eq 'drwx------' "${lock_seen:0:10}" 'the lock while the build held it'
+  assert_eq 'drwx------' "${scratch_seen:0:10}" 'the scratch tree while the build held it'
+  assert_missing "$HOME/.dotfiles/.lock"
+  assert_mode "$HOME/.dotfiles/current" 'drwx------' 'the built tree'
+}
+
 test_lock_is_released_on_success() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
@@ -5325,6 +5470,42 @@ test_apply_a_directory_mode_reaches_home_whatever_the_umask() {
     assert_mode "$HOME/.dotfiles/current/.ssh" 'drwx------' "umask $um built tree"
     assert_symlink_to "$HOME/.ssh/config" "$HOME/.dotfiles/current/.ssh/config"
   done
+}
+
+# Twice, because an apply reads the built tree and the second one reads it again
+# through a $HOME full of links into it: stow runs as the owner and so does
+# everything else here, which is the whole of what makes a built tree nobody but
+# the owner can enter workable.  A first apply that succeeded and a second that
+# could not descend current/ is the shape a mode that only looked tight enough
+# would leave.
+#
+# The modes in $HOME are asserted beside it, and they are the layer's rather than
+# the built tree's: the two trees are owned by different people, and shale's own
+# mode may not leak into the one it does not own.  .config at 0755 is what says
+# so - 0700 in $HOME would be this fix reaching a directory it has no business in.
+test_apply_works_twice_over_a_built_tree_only_its_owner_can_enter() {
+  conf 'base personal/base'
+  mklayer personal/base .ssh/config
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  chmod 0755 "$sandbox_dir" || fail 'could not set the layer directory mode'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the first apply'
+  assert_empty "$shale_err" 'the first apply stderr'
+  assert_mode "$HOME/.dotfiles/current" 'drwx------' 'the built tree'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the second apply'
+  assert_empty "$shale_err" 'the second apply stderr'
+  assert_mode "$HOME/.dotfiles/current" 'drwx------' 'the built tree'
+  assert_mode "$HOME/.ssh" 'drwx------' 'the layer mode in the home directory'
+  assert_mode "$HOME/.config" 'drwxr-xr-x' 'the layer mode in the home directory'
+  # Read through the links rather than only listed: the mode of the directory
+  # they resolve through is what decides whether any of this is reachable.
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.zshrc")" 'through the link'
+  assert_eq 'personal/base/.ssh/config' "$(cat "$HOME/.ssh/config")" 'through the link'
 }
 
 # The two-layer rule as it lands in $HOME, which is the tree the rule is about.
@@ -6793,6 +6974,11 @@ test_doctor_notes_nothing_it_accounts_for() {
   mklayer personal/base .zshrc
   mklayer local .zshrc
   sandbox_mkdir "$HOME/.dotfiles/current"
+  # Made by hand, so it has the suite's umask rather than the mode a build gives
+  # it, and the whole-report assertion below would catch the note that says so.
+  # That note is another check's, with a case of its own; this one is about the
+  # names the stray scan skips.
+  chmod 0700 "$sandbox_dir" || fail 'could not set the built tree mode'
   run_shale doctor
   assert_status 0 "$shale_status"
   assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
@@ -8291,6 +8477,112 @@ test_doctor_says_nothing_about_the_mode_of_an_ignored_directory() {
   assert_status 0 "$shale_status" 'doctor exit status'
   assert_not_contains "$shale_out" 'left as it is' 'stdout'
   assert_not_contains "$shale_out" "$HOME/.cache is" 'stdout'
+}
+
+# The built tree's own mode, which is shale's rather than any layer's and is the
+# one directory every symlink in $HOME resolves through.  A note and never a
+# finding: nothing is blocked, and the reader who chmodded it deliberately is
+# owed the fact that the next build will not keep it.
+test_doctor_names_a_built_tree_whose_mode_was_changed_by_hand() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  chmod 0755 "$sandbox_dir" || fail 'could not widen the built tree'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current is mode 0755, and shale builds its permission bits at 0700" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   the next build renames a fresh tree over it, made with 0700 and with whatever set-id or sticky bit $HOME/.dotfiles gives a new directory, so a chmod here does not hold" \
+    'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+  # The claim the last line of the note makes, run rather than quoted.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build after the chmod'
+  assert_mode "$HOME/.dotfiles/current" 'drwx------' 'after the build'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor after the build'
+  assert_not_contains "$shale_out" 'shale builds its permission bits at' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The setgid digit, which is not a permission bit and is what a directory
+# inherits from a setgid parent: doctor reports the mode it read rather than the
+# nine bits of it, so a reader chasing why a build keeps replacing the directory
+# is shown the whole thing.
+test_doctor_names_the_whole_mode_of_a_built_tree_it_did_not_make() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  chmod 2750 "$sandbox_dir" || fail 'could not set the built tree mode'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current is mode 2750, and shale builds its permission bits at 0700" \
+    'stdout'
+}
+
+# The other side of the case above, and the one it could not reach: a mode shale
+# produced itself must never be reported.  No umask masks the set-group-ID bit -
+# mkdir(2) takes it from the parent - so a ~/.dotfiles on a shared volume gives
+# every tree shale builds a bit shale did not choose, and a whole-mode compare
+# nagged about shale's own output on every doctor run for ever.  The note's last
+# line made it worse by promising a build would settle it, which a build does
+# not: the rename carries the bit across.
+#
+# A ~/.dotfiles with a shared group is the setup this whole issue is about, so
+# the false note landed on exactly the people the fix is for.
+#
+# Whether mkdir propagates the bit is the kernel's business rather than shale's,
+# and this case does not assert that it did: it asserts the report, which is the
+# claim.  The case below pins the compare itself on every machine.
+test_doctor_says_nothing_about_a_tree_it_built_under_a_setgid_dotfiles() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles"
+  chmod 2755 "$sandbox_dir" || fail 'could not set the set-group-ID bit'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_empty "$shale_err" 'the build stderr'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+  # The line the note used to make, run rather than quoted: a second build must
+  # not be able to change what the first one left, or the remedy is a lie.
+  run_shale build
+  assert_status 0 "$shale_status" 'the second build'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor after the second build'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# The compare itself, on every machine rather than only where a kernel hands the
+# bit down: 2700 is the exact shape a build under a setgid ~/.dotfiles leaves,
+# made here by hand so nothing about it depends on mkdir(2).  The permission bits
+# are shale's and are all doctor may compare; the set-id and sticky bits are the
+# parent's, and shale neither sets nor clears them.
+test_doctor_compares_only_the_permission_bits_of_the_built_tree() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  chmod 2700 "$sandbox_dir" || fail 'could not set the built tree mode'
+  assert_mode "$HOME/.dotfiles/current" 'drwx--S---' 'the built tree'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+  # And the sticky bit, which reaches the same digit by another route.
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  chmod 1700 "$sandbox_dir" || fail 'could not set the built tree mode'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status, sticky'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report, sticky'
 }
 
 # ------------------------------------------ doctor's apply-conflict cases

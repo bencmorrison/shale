@@ -459,6 +459,13 @@ overwrites, and how to carry on from a block that stopped.
   on Debian and Ubuntu, and `644` for a file you committed at `600`. Shale copies the working tree
   faithfully, and the working tree after a clone is not what was committed. Where a mode matters,
   `chmod` it in the layer: every build and apply reproduces it from there.
+- The built tree is `700`, so nothing but you can walk it. Nothing shale runs needs to — stow reads
+  it as you — but if your `$HOME` is group-readable by design and something else reads a file shale
+  linked, it resolves the link into `~/.dotfiles/current` and stops there. There is no option to
+  relax it, and a `chmod` does not hold: a build renames a fresh tree over the old one rather than
+  chmodding it. `shale doctor` notes a `current` whose permission bits are not `700`. Only those
+  bits are shale's — a setgid bit inherited from `~/.dotfiles` gives you `2700` on every build, and
+  `doctor` says nothing about that.
 - Shale sets the mode of a directory it creates in `$HOME`, and never widens one that was already
   there. So a `~/.ssh` you keep at `700` survives a layer that a clone left at `755`. `apply` says
   in one line that it left such a directory alone, `doctor` names each one and both ways to settle
