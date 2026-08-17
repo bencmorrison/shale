@@ -221,6 +221,21 @@ OWN_DIR_MODE=0700
 # and only those: the mask discards anything above them, which is right because a
 # umask cannot carry a set-id or sticky bit anyway.
 printf -v OWN_DIR_UMASK '%04o' "$((0777 & ~8#$OWN_DIR_MODE))"
+
+# The mode of every directory a build composes that no .shale-modes line names.
+# Not the layer's: git records no permission bits for a directory at all, so on
+# any cloned layer the mode in the working tree is the clone umask's rather than
+# anything anybody committed, and reproducing it reproduces the umask.  Fixed
+# rather than taken from this machine's umask for the same reason the tree's own
+# mode is - the same layers must compose the same tree on every machine - and
+# 0755 rather than 0700 because these are the user's directories once stow has
+# made them in $HOME, where a home directory's own furniture is ordinarily
+# world-readable and a tighter default would be shale deciding otherwise for
+# every path nobody asked about.  A path that wants another mode says so in a
+# line.
+COMPOSED_DIR_MODE=0755
+printf -v COMPOSED_DIR_UMASK '%04o' "$((0777 & ~8#$COMPOSED_DIR_MODE))"
+
 # make_own_dir's cache of the umask it has to put back.  Empty until one is read.
 UMASK_SAVED=
 
@@ -297,7 +312,8 @@ usage() {
     "PATH is relative to ~/.dotfiles.  URL says how to clone PATH's top-level" \
     'directory; give it once per directory and leave it off the other lines.' \
     '' \
-    'A .shale-ignore file at the top of a clone root blocks paths from every apply.'
+    'A .shale-ignore file at the top of a clone root blocks paths from every apply.' \
+    'A .shale-modes file there declares modes, one "700  .ssh" per line.'
 }
 
 usage_error() {
@@ -1436,6 +1452,404 @@ path_is_stow_ignored() {
   [ "${#STOW_IGNORED_BY[@]}" -gt 0 ]
 }
 
+# ---------------------------------------------------------------- the mode list
+
+# The file shale reads at the top of each clone root, and never composes, on the
+# terms $IGNORE_NAME is read on.
+#
+# It exists because git carries no mode worth having.  A tree entry has no
+# permission bits at all and a blob has one executable bit, so a layer cloned
+# onto a second machine has whatever that clone's umask gave it - 0755 on most,
+# 0775 on Debian and Ubuntu, 0644 for a config committed at 0600 - and a mode
+# read off the working tree is that umask rather than anybody's intent.  A line
+# of plain text is the one thing about a mode git reproduces exactly, which is
+# why the declaration is the mechanism and the working tree is not.
+MODES_NAME=.shale-modes
+
+# Every declaration read, in the order the files were read: the three octal
+# digits, the path, and where it came from.  The path is relative to the layer
+# root, and a layer root mirrors $HOME - so one spelling names the path in the
+# layer, in the built tree and in $HOME alike, and nothing here translates
+# between them.
+#
+# Set here as well as in parse_mode_files, because doctor and which consult them
+# and a parse that failed before reaching them must leave something to consult.
+MODE_BITS=()
+MODE_PATHS=()
+MODE_FILES=()
+MODE_LINES=()
+MODE_ERRORS=0
+
+# Collected like config_error and ignore_error, and for the same reason: doctor
+# calls the reader bare and counts these into its own findings.
+mode_error() {
+  MODE_ERRORS=$((MODE_ERRORS + 1))
+  emit "$@"
+}
+
+# Records the declaration $1, read from line $3 of file $2.  Non-zero when it is
+# one shale refuses, having said so.
+#
+# 'MODE  PATH', in chmod's order, and that is the whole syntax.
+#
+# Three octal digits and never four.  A layer that could declare setgid on a
+# directory in someone's $HOME is a different proposition from one declaring
+# 700 - everything created inside such a directory afterwards takes its group,
+# including files no layer ever named - so the three bits above the permission
+# bits are refused rather than quietly dropped, because a mode somebody wrote
+# and shale ignored is the one outcome that teaches nothing.
+#
+# The path is exact and holds no glob.  '600 .ssh/*' invites the translation
+# problem #96 records the cost of, and an exact path is also the whole of what
+# makes two roots declaring one path a thing a reader can see: 'shale which'
+# names the line that wins because there is a line to name.
+add_mode_declaration() {
+  local raw=$1 file=$2 lineno=$3 bits rest c seg part meta
+  # The digits are everything up to the first blank, so a path with a space in
+  # it needs no quoting: only the first run of whitespace separates the two.
+  bits=
+  rest=$raw
+  while [ -n "$rest" ]; do
+    c=${rest:0:1}
+    case "$c" in
+      ' ' | "$TAB") break ;;
+    esac
+    bits=$bits$c
+    rest=${rest#?}
+  done
+  while :; do
+    case "$rest" in
+      ' '* | "$TAB"*) rest=${rest#?} ;;
+      *) break ;;
+    esac
+  done
+  # The reader has already trimmed both ends, so a line with anything after the
+  # digits has a path here and a line with nothing after them has none.
+  if [ -z "$rest" ]; then
+    mode_error "$file:$lineno: '$raw' is a mode with no path after it" \
+      "a declaration is a mode, whitespace and one path: '700  .ssh'"
+    return 1
+  fi
+  # Enumerated rather than ranged: '[0-7]' is a range, and what a range holds is
+  # the collation's business in a way an eight-character set is not.  Nothing
+  # here has to enter the byte locale as a result.
+  case "$bits" in
+    [01234567][01234567][01234567]) ;;
+    [01234567][01234567][01234567][01234567])
+      mode_error "$file:$lineno: '$bits' is four octal digits, and shale takes three" \
+        'setuid, setgid and the sticky bit are refused rather than set on a path in your home directory' \
+        "write the permission bits alone: '${bits#?}'"
+      return 1
+      ;;
+    *)
+      mode_error "$file:$lineno: '$bits' is not a mode" \
+        "a mode is three octal digits, in chmod's own order: '700', '755', '600'"
+      return 1
+      ;;
+  esac
+  meta=
+  case "$rest" in
+    *'*'*) meta='*' ;;
+    *'?'*) meta='?' ;;
+    *'['*) meta='[' ;;
+    *']'*) meta=']' ;;
+  esac
+  if [ -n "$meta" ]; then
+    mode_error "$file:$lineno: '$rest' contains '$meta'" \
+      'a declaration names one exact path, and there is no glob syntax here' \
+      'write one line for each path that needs a mode'
+    return 1
+  fi
+  case "$rest" in
+    /*)
+      mode_error "$file:$lineno: '$rest' begins with '/'" \
+        'a path is relative to the layer root, which is the top of the tree a layer mirrors'
+      return 1
+      ;;
+    */)
+      mode_error "$file:$lineno: '$rest' ends in '/'" \
+        'a path names one file or one directory, and a mode on a directory says nothing about what is inside it'
+      return 1
+      ;;
+  esac
+  part=$rest
+  while :; do
+    seg=${part%%/*}
+    case "$seg" in
+      '')
+        mode_error "$file:$lineno: '$rest' has an empty path component" \
+          "a '//' names nothing, and a path is one or more names joined by '/'"
+        return 1
+        ;;
+      . | ..)
+        mode_error "$file:$lineno: '$rest' has a '$seg' component" \
+          'a path is spelled out from the layer root, with nothing relative in it'
+        return 1
+        ;;
+    esac
+    case "$part" in
+      */*) part=${part#*/} ;;
+      *) break ;;
+    esac
+  done
+  MODE_BITS+=("$bits")
+  MODE_PATHS+=("$rest")
+  MODE_FILES+=("$file")
+  MODE_LINES+=("$lineno")
+  return 0
+}
+
+# Reads the mode file at the top of every clone root the config names, in config
+# order, into the MODE_* arrays.  Returns non-zero when any of them holds
+# something shale refuses; like parse_config and parse_ignore_files it never
+# exits, because doctor calls it bare and goes on reporting.
+#
+# One list, from every root together, as the ignore list is - and for a
+# different reason.  A mode names one path in one tree, and two roots naming the
+# same path is a precedence question rather than a scoping one: the last
+# declaration read wins, which is config order, which is the order everything
+# else in shale resolves in.
+#
+# A blank line and a line whose first character is '#' are skipped, and
+# whitespace comes off both ends, which is also what makes a file with CRLF line
+# endings read the same as any other.
+parse_mode_files() {
+  local i root seen file line lineno raw
+  MODE_BITS=()
+  MODE_PATHS=()
+  MODE_FILES=()
+  MODE_LINES=()
+  MODE_ERRORS=0
+  seen=' '
+  i=0
+  while [ "$i" -lt "${#LAYER_PATHS[@]}" ]; do
+    root=${LAYER_PATHS[$i]%%/*}
+    i=$((i + 1))
+    # A layer path component holds no whitespace, so this is a word list.
+    case "$seen" in
+      *" $root "*) continue ;;
+    esac
+    seen=$seen$root' '
+    file=$DOTFILES/$root/$MODES_NAME
+    { [ -e "$file" ] || [ -L "$file" ]; } || continue
+    if [ ! -f "$file" ]; then
+      mode_error "$file is not a regular file" \
+        'shale reads one mode file per clone root, and reads that one as lines of declarations'
+      continue
+    fi
+    if [ ! -r "$file" ]; then
+      mode_error "cannot read $file: permission denied" \
+        'shale reads it on every build, and will not compose a tree whose modes it cannot set' \
+        'check the permissions on that file'
+      continue
+    fi
+    lineno=0
+    # shellcheck disable=SC2094  # $file is passed below to be named in a message, never written
+    while IFS= read -r line || [ -n "$line" ]; do
+      lineno=$((lineno + 1))
+      raw=$line
+      while :; do
+        case "$raw" in
+          ' '* | "$TAB"* | "$CR"*) raw=${raw#?} ;;
+          *) break ;;
+        esac
+      done
+      while :; do
+        case "$raw" in
+          *' ' | *"$TAB" | *"$CR") raw=${raw%?} ;;
+          *) break ;;
+        esac
+      done
+      case "$raw" in
+        '' | '#'*) continue ;;
+      esac
+      add_mode_declaration "$raw" "$file" "$lineno" || continue
+    done <"$file"
+  done
+  [ "$MODE_ERRORS" -eq 0 ] || return 1
+  return 0
+}
+
+# Non-zero unless declaration $1 is the one that decides its path.  The last one
+# read wins - config order between two roots, line order inside one file - and
+# every earlier declaration for the same path is shadowed exactly as a lower
+# layer's copy of a file is.
+#
+# Every declaration is still checked against the tree whether or not it wins: a
+# line naming a path nothing provides is stale in whichever file holds it, and a
+# shadowed one that went unchecked would be a line nobody is ever told about.
+mode_wins() {
+  local i=$1 rel=${MODE_PATHS[$1]} j
+  j=$((i + 1))
+  while [ "$j" -lt "${#MODE_PATHS[@]}" ]; do
+    [ "${MODE_PATHS[$j]}" != "$rel" ] || return 1
+    j=$((j + 1))
+  done
+  return 0
+}
+
+# $1 with the owner's rwx forced on, in DECLARED_BITS.  What a declaration gives
+# a directory; a file gets its three digits as written.
+#
+# Shale has to write into a directory it has just created - the next layer
+# composes into it, and cleanup's rm -rf has to be able to delete a tree an
+# interrupted build left behind, which it cannot do through a directory it may
+# not read.  A directory in $HOME its owner cannot enter is also not an
+# arrangement any dotfile wants, and stow could not descend one to link what is
+# inside it.  So '500 .private' composes as 0700, and the group and world bits -
+# which are the whole of what makes a .ssh directory unsafe - are exactly as
+# declared.
+declared_dir_bits() {
+  DECLARED_BITS=7${1#?}
+}
+
+# Non-zero unless some component of $2, below the directory $1, is a symlink,
+# leaving the first one found in CROSSED_LINK as a path relative to $1.  The
+# leaf counts: it is one component like any other.
+#
+# chmod resolves the whole path, not just its last component, so a link
+# *anywhere* above a declared path takes the mode somewhere else.  A layer
+# holding '.ssh' as a link outside $HOME and a line reading '666 .ssh/secret'
+# set that file to 0666 with the build exiting 0 and saying nothing - measured,
+# with the target spelled both ways, on a file outside $HOME entirely.  The leaf
+# was tested and nothing above it was, which is the same reasoning applied to
+# one component out of however many the path has.
+#
+# Each prefix is tested from the top down, so the shallowest link is the one
+# named: that is the component to change, and the ones below it are only where
+# the path happened to end up.  There is no portable lchmod to do the other
+# thing with, and resolving the path first and checking where it landed would be
+# shale deciding which directories outside its trees are acceptable to write to.
+CROSSED_LINK=
+path_crosses_a_symlink() {
+  local root=$1 rel=$2 part prefix
+  CROSSED_LINK=
+  prefix=
+  part=$rel
+  while :; do
+    prefix=${prefix:+$prefix/}${part%%/*}
+    if [ -L "$root/$prefix" ]; then
+      CROSSED_LINK=$prefix
+      return 0
+    fi
+    case "$part" in
+      */*) part=${part#*/} ;;
+      *) break ;;
+    esac
+  done
+  return 1
+}
+
+# The two lines that go under either refusal above, so that build and doctor
+# refuse a declaration in the same words.  $1 is the whole declared path and $2
+# the component that is a link, which is $1 itself where the leaf is the link.
+declared_link_lines() {
+  MODE_LINK_HEAD="'$2' is a symlink"
+  [ "$1" = "$2" ] || MODE_LINK_HEAD="'$2' is a symlink, and '$1' is below it"
+  MODE_LINK_WHY='shale sets a mode with chmod, which resolves every symlink on the way down and would set the mode of whatever the path ends at, outside both trees'
+  MODE_LINK_FIX='declare a path with no symlink on it: a symlink carries no mode of its own that shale can set'
+}
+
+# What the layers make of the declared path $1, in MODE_PATH_STATE, with the
+# component at fault in CROSSED_LINK where there is one:
+#
+#   ok       every component is provided and none of them is a symlink
+#   link     CROSSED_LINK is the shallowest component that is a symlink
+#   missing  no layer provides some component, so no build composes the path
+#   unknown  a layer directory could not be searched on the way to it
+#
+# Read from the layers rather than from a composed tree, so doctor and which
+# both answer on a machine that has never run a build, and one whose tree is
+# older than the file gets the answer the next build will give rather than the
+# last one's.  One reader for both, because the two commands answering the same
+# question differently is the defect this shape exists to prevent.
+#
+# Component by component, from the top down.  The composer takes each directory
+# from the highest layer providing it, so a link two levels up is composed as a
+# link and a chmod below it resolves through - and the walk is also what makes
+# the shallowest link the one named, that being the component to change.  A
+# prefix nothing provides means nothing provides the path either, and the walk
+# stops there.
+#
+# The three names the composer skips at every depth answer 'missing', because
+# that is what they are: no build composes a path at or below a '.git' or either
+# of shale's own two files, so the tree holds nothing there however many layers
+# hold one - and build, which tests the tree, refuses such a line in exactly
+# those words.
+declared_path_state() {
+  local rel=$1 part prefix j path winner obscured
+  CROSSED_LINK=
+  MODE_PATH_STATE='missing'
+  case "/$rel/" in
+    */.git/* | */"$IGNORE_NAME"/* | */"$MODES_NAME"/*) return 0 ;;
+  esac
+  prefix=
+  part=$rel
+  while :; do
+    prefix=${prefix:+$prefix/}${part%%/*}
+    winner=
+    obscured=0
+    j=${#LAYER_PATHS[@]}
+    while [ "$j" -gt 0 ]; do
+      j=$((j - 1))
+      path=$DOTFILES/${LAYER_PATHS[$j]}/$prefix
+      if [ -e "$path" ] || [ -L "$path" ]; then
+        winner=$path
+        break
+      fi
+      ! obscured_ancestor "$DOTFILES" "${LAYER_PATHS[$j]}/$prefix" || obscured=1
+    done
+    if [ -z "$winner" ]; then
+      MODE_PATH_STATE='missing'
+      [ "$obscured" -eq 0 ] || MODE_PATH_STATE='unknown'
+      return 0
+    fi
+    if [ -L "$winner" ]; then
+      CROSSED_LINK=$prefix
+      MODE_PATH_STATE='link'
+      return 0
+    fi
+    case "$part" in
+      */*) part=${part#*/} ;;
+      *) break ;;
+    esac
+  done
+  MODE_PATH_STATE='ok'
+  return 0
+}
+
+# Non-zero unless the path $1 or some directory above it is on either ignore
+# list.  Nothing is set on such a path in $HOME: it is composed into the built
+# tree and stow is told to skip it, so no apply links anything into the $HOME
+# directory of that name - it is the user's, holding their files and nothing of
+# shale's, and a chmod there would be shale acting on the one class of path
+# 'which' reports as never touched.
+#
+# The ancestors are tested here because a declaration arrives as a whole path
+# with no walk behind it, where compose_dir and the doctor's walks carry the
+# answer down from the directory that matched.  A pattern matching a directory
+# covers everything under it, and a per-path test alone would call a descendant
+# of a matched directory unignored.
+declared_path_is_ignored() {
+  local rel=$1 prefix part
+  prefix=
+  part=$rel
+  while :; do
+    prefix=${prefix:+$prefix/}${part%%/*}
+    if [ "${#IGNORE_PATTERNS[@]}" -gt 0 ] && path_is_ignored "$prefix"; then
+      return 0
+    fi
+    if path_is_stow_ignored "$prefix"; then
+      return 0
+    fi
+    case "$part" in
+      */*) part=${part#*/} ;;
+      *) break ;;
+    esac
+  done
+  return 1
+}
+
 # ------------------------------------------------------------- listing a tree
 
 # The entries of one directory, as full paths.  Written by list_dir and read by
@@ -1615,9 +2029,16 @@ arm_traps
 # each call: this runs once per directory of the composed tree per layer, and
 # '$(umask)' is a fork where the two builtins around it are not.
 make_own_dir() {
-  local path=$1 status
+  make_dir_at "$OWN_DIR_UMASK" "$1"
+}
+
+# The same, at the umask $1, for the directories a build composes - which are
+# not shale's own and take COMPOSED_DIR_UMASK.  Two callers and one mkdir, so
+# that neither can acquire a mode the other did not mean to give it.
+make_dir_at() {
+  local mask=$1 path=$2 status
   [ -n "$UMASK_SAVED" ] || UMASK_SAVED=$(umask)
-  umask "$OWN_DIR_UMASK"
+  umask "$mask"
   mkdir "$path"
   status=$?
   umask "$UMASK_SAVED"
@@ -1928,10 +2349,17 @@ mode_triad() {
   return 0
 }
 
-# The permission bits of the directory $1, as the four octal digits chmod takes:
-# DIR_MODE_RAW is what is there, DIR_MODE is that with the owner's rwx forced on.
-# Non-zero when they could not be read, which the caller reports: a mode nobody
-# can name is not one to guess at.
+# The mode of the directory $1, as the four octal digits chmod takes, in
+# DIR_MODE_RAW.  Non-zero when it could not be read, which the caller reports: a
+# mode nobody can name is not one to guess at.
+#
+# A reader and nothing more.  Nothing infers a mode from a layer's working tree:
+# git records none for a directory, so what is there after a clone is the
+# clone's umask, and a .shale-modes line is what says what a path should be.
+# What is left for this is the two questions about a mode that is already on
+# disk - whether the directory in $HOME is narrower than a declaration asks for,
+# which is what never-widen turns on, and whether the built tree's own mode is
+# still the one shale builds at.
 #
 # ls, because there is no other portable reader.  No shell builtin gives a mode;
 # 'test' answers for this process's access and says nothing about the group's or
@@ -1946,16 +2374,6 @@ mode_triad() {
 # neither a strange one nor an eleventh column - the '+' or '@' a system with
 # ACLs or extended attributes adds - moves them.  The path is absolute at every
 # call site, so no operand here can be read as an option.
-#
-# The owner's rwx is forced on rather than copied, and that is the one bit of
-# this that is not the layer's mode.  Shale has to write into the directory it
-# has just created - the next layer composes into it, and cleanup has to be able
-# to delete a tree an interrupted build left behind, which 'rm -rf' cannot do
-# through a directory it may not read.  A directory in $HOME that its owner
-# cannot enter is also not an arrangement any dotfile wants, and stow could not
-# descend one to link what is inside it.  So 0500 in a layer arrives as 0700,
-# and the group and world bits - which are the whole of what makes a .ssh
-# directory unsafe - arrive exactly as the layer has them.
 #
 # ls keeps its own stderr, as chmod does at the two call sites that run one: on
 # the paths that reach either, which errno it is - the tool missing, the path
@@ -1983,19 +2401,13 @@ dir_mode() {
   mode_triad "${perm:6:3}" || return 1
   other=$TRIAD
   DIR_MODE_RAW=$hi$owner$group$other
-  DIR_MODE=$hi'7'$group$other
   return 0
 }
 
 # Copies one layer directory over the composed tree, entry by entry, last write
 # winning per path.  No bulk cp: it would name neither layer in a collision.
-#
-# $4 is 1 where a directory above this one is on an ignore list, which is
-# scan_ignored_links's carry and is here for the same reason: a pattern matches
-# a directory and covers everything under it, so a per-path test at each entry
-# would call a descendant of a matched directory unignored.
 compose_dir() {
-  local src=$1 dst=$2 rel=$3 inherited=$4 e base srel dpath here mode ignored
+  local src=$1 dst=$2 rel=$3 e base srel dpath here
   here=$src${rel:+/$rel}
   # nullglob makes a directory that cannot be listed indistinguishable from an
   # empty one, so without this its whole subtree is dropped from the build and
@@ -2023,6 +2435,8 @@ compose_dir() {
     # may be named as a layer itself, which would otherwise put that file in
     # $HOME.  One deeper is read by nobody, and doctor says so.
     [ "$base" = "$IGNORE_NAME" ] && continue
+    # The other file shale reads and composes nowhere, on the same terms.
+    [ "$base" = "$MODES_NAME" ] && continue
     srel=${rel:+$rel/}$base
     dpath=$dst/$srel
     # A symlink to a directory is a leaf.  Recursing into one would put a
@@ -2034,56 +2448,26 @@ compose_dir() {
           continue
         fi
       else
-        make_own_dir "$dpath" || die "could not create $dpath"
+        # $COMPOSED_DIR_MODE, and no layer has a say in it.  A directory's mode
+        # was copied from whichever layer won the path, which reproduced the
+        # umask of whoever cloned that layer - git records no mode for a
+        # directory - and made adding one file inside a directory reassign that
+        # directory's permissions, the winner of ~/.ssh being any layer that
+        # contributes a known_hosts to it.  A .shale-modes line is what says a
+        # path should be something other than this, and it names the path it is
+        # about.
+        #
+        # The umask rather than a chmod after the mkdir, for make_own_dir's
+        # reason: there is no instant at which the directory exists at a wider
+        # mode.  It also keeps the cost of a composed directory at one mkdir,
+        # where the copied mode cost an ls and a chmod on top of it.
+        #
+        # Created once and left alone by every later layer, so the mode does not
+        # move with which layer happens to provide the directory last.
+        make_dir_at "$COMPOSED_DIR_UMASK" "$dpath" ||
+          die "could not create $dpath"
       fi
-      # The ignore lists, in scan_ignored_links's order and with its carry.
-      # Guarded on the pattern count for the reason that one is: the ordinary
-      # config has no ignore line at all, and the call would still pay for two
-      # locale switches at every directory of every layer.
-      ignored=$inherited
-      if [ "$ignored" -eq 0 ]; then
-        if [ "${#IGNORE_PATTERNS[@]}" -gt 0 ] && path_is_ignored "$srel"; then
-          ignored=1
-        elif path_is_stow_ignored "$srel"; then
-          ignored=1
-        fi
-      fi
-      # A directory's mode is copied from the layer, where a file's comes with
-      # it in cp -RPp.  Only the layer that wins the path does either half of
-      # it, and that is what makes the cost one read and one chmod per composed
-      # directory rather than one of each per directory per layer: the mode a
-      # losing layer would set is overwritten by the winner a moment later, and
-      # a build's whole answer for the path is the winner's.
-      #
-      # Which leaves a directory a losing layer created holding make_own_dir's
-      # mode until the winner reaches it, and that is writable by construction
-      # rather than by luck: $OWN_DIR_MODE carries the owner's rwx whatever the
-      # caller's umask, so the next layer can compose into it and cleanup's
-      # rm -rf can delete it.  It was mkdir's own 0777-against-the-umask until
-      # every directory shale creates became a fixed mode, and a 'umask 0700'
-      # run stopped at current.new there.
-      #
-      # Written before the recursion rather than after it, which is safe only
-      # because dir_mode forces the owner's rwx on: the entries below are
-      # composed into this directory a moment later.
-      #
-      # Recorded for apply at the same point, and this is the whole of what
-      # apply acts on in $HOME.  An ignored path is kept out of it, because no
-      # apply links anything into one: the directory is composed and stow is
-      # told to skip it, so a $HOME directory of that name is the user's,
-      # holding their files and nothing of shale's, and setting a mode on it
-      # would be shale acting on a path 'which' reports as never touched.
-      if wins_this_path "$srel"; then
-        dir_mode "$e" || die "could not read the mode of $e" \
-          'shale copies a layer directory mode onto the one it composes'
-        mode=$DIR_MODE
-        chmod "$mode" "$dpath" || die "could not set the mode $mode on $dpath"
-        if [ "$ignored" -eq 0 ]; then
-          DIR_MODE_PATHS+=("$srel")
-          DIR_MODE_BITS+=("$mode")
-        fi
-      fi
-      compose_dir "$src" "$dst" "$srel" "$ignored"
+      compose_dir "$src" "$dst" "$srel"
     else
       if [ -d "$dpath" ] && [ ! -L "$dpath" ]; then
         conflict "$srel" file "$e"
@@ -2435,12 +2819,14 @@ layer_denied() {
     'check the permissions on that file'
 }
 
-# The ignore files that walk finds inside a layer and nothing reads, capped like
+# The files of shale's own that walk finds inside a layer and nothing reads -
+# an ignore file or a mode file below the top of a clone root - capped like
 # every other list doctor keeps: the cap changes what is printed and never what
-# is counted.
-STRAY_IGNORE_CAP=10
-STRAY_IGNORE_COUNT=0
-STRAY_IGNORE_PATHS=()
+# is counted.  One list for the two names, because the report is per file and
+# the name in it is read back off the path.
+STRAY_CAP=10
+STRAY_COUNT=0
+STRAY_PATHS=()
 
 # The paths in $HOME that stow will refuse to write over, collected by the layer
 # walk below.  Capped like every other list doctor keeps: the cap changes what is
@@ -2690,12 +3076,12 @@ scan_layer_trees() {
       # At every depth, as in the composer: a build composes no .git, so nothing
       # inside one is ever a collision.
       [ "$base" = .git ] && continue
-      # Composed by no build either, so it collides with nothing and stands at
-      # no path in $HOME - and read by nothing unless it is the one at the top
-      # of a clone root, which this walk meets only where the layer *is* that
-      # root.  Every other one is a file of patterns doing nothing, which is
-      # silence a reader cannot tell from a working setup.
-      if [ "$base" = "$IGNORE_NAME" ]; then
+      # Composed by no build either, so either name collides with nothing and
+      # stands at no path in $HOME - and read by nothing unless it is the one at
+      # the top of a clone root, which this walk meets only where the layer *is*
+      # that root.  Every other one is a file doing nothing, which is silence a
+      # reader cannot tell from a working setup.
+      if [ "$base" = "$IGNORE_NAME" ] || [ "$base" = "$MODES_NAME" ]; then
         if [ -n "$rel" ] ||
           [ "${LAYER_PATHS[$i]}" != "${LAYER_PATHS[$i]%%/*}" ]; then
           # Deduplicated, because one file is reached once per layer whose tree
@@ -2706,14 +3092,14 @@ scan_layer_trees() {
           # the line that replaces the names says only 'and more' - the same
           # bargain unreachable makes.
           k=0
-          while [ "$k" -lt "${#STRAY_IGNORE_PATHS[@]}" ]; do
-            [ "${STRAY_IGNORE_PATHS[$k]}" != "$e" ] || break
+          while [ "$k" -lt "${#STRAY_PATHS[@]}" ]; do
+            [ "${STRAY_PATHS[$k]}" != "$e" ] || break
             k=$((k + 1))
           done
-          if [ "$k" -eq "${#STRAY_IGNORE_PATHS[@]}" ]; then
-            STRAY_IGNORE_COUNT=$((STRAY_IGNORE_COUNT + 1))
-            [ "$STRAY_IGNORE_COUNT" -gt "$STRAY_IGNORE_CAP" ] ||
-              STRAY_IGNORE_PATHS+=("$e")
+          if [ "$k" -eq "${#STRAY_PATHS[@]}" ]; then
+            STRAY_COUNT=$((STRAY_COUNT + 1))
+            [ "$STRAY_COUNT" -gt "$STRAY_CAP" ] ||
+              STRAY_PATHS+=("$e")
           fi
         fi
         continue
@@ -3447,122 +3833,209 @@ ignored_link_finding() {
   fi
 }
 
-# The directories an apply is leaving as they are, in WIDE_DIR_*, walking the
-# built tree with scan_ignored_links's carry: an ignored path is not one any
-# apply sets a mode on, so it is not one to report a mode for either.
+# build's two refusals of a mode declaration, in build's own words and against
+# the layers rather than against a composed tree - so doctor answers them on a
+# machine that has never run a build, and a machine whose tree is older than the
+# file gets the answer the next build will give rather than the last one's.
 #
-# The test is apply's own, made from the two trees rather than from anything an
-# apply recorded, so doctor answers this without a build: a bit the built tree
-# has and the $HOME directory has not is a widening, and a widening is what an
-# apply declines.  The other direction needs no report - the next apply narrows
-# the directory and says nothing, which is what it is for.
+# What the layers say is what the tree will hold: the highest layer providing a
+# path is the copy that lands, and the composer reaches neither a '.git' nor
+# either of shale's own two file names at any depth, so a declaration at or
+# below one of those names has no path in any tree however many layers hold it.
 #
-# Two reads for each directory that is in both trees, which is what this check
-# costs and where doctor's time goes on a wide tree.  Paid here rather than in
-# apply, which is the everyday command and now prints only a count.
-#
-# Either read may fail and neither failure is doctor's to report: a directory
-# that goes while a walk is in flight is the one shape that reaches it, and this
-# check has nothing to say about a path that is no longer there.  The two other
-# walks answer the same way, by returning where they cannot read.
-scan_home_dir_modes() {
-  local rel=$1 inherited=$2 cap=$3 here e base srel ignored target want have
-  here=$CUR${rel:+/$rel}
-  { [ -r "$here" ] && [ -x "$here" ]; } || return 0
-  list_dir "$here" 1
-  for e in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
-    base=${e##*/}
-    case "$base" in
-      . | ..) continue ;;
-      '*' | '.*')
-        { [ -e "$e" ] || [ -L "$e" ]; } || continue
+# Silent on 'unknown', where a layer cannot be searched.  The existence test is
+# then false about a path that may well be there, and the directory that cannot
+# be read is a blocking finding of its own a few lines above; a second finding
+# derived from it would be one shale cannot stand behind.
+audit_mode_declarations() {
+  local i n rel file lineno
+  n=${#MODE_PATHS[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    rel=${MODE_PATHS[$i]}
+    file=${MODE_FILES[$i]}
+    lineno=${MODE_LINES[$i]}
+    i=$((i + 1))
+    declared_path_state "$rel"
+    case "$MODE_PATH_STATE" in
+      link)
+        declared_link_lines "$rel" "$CROSSED_LINK"
+        blocking_finding "$file:$lineno: $MODE_LINK_HEAD" \
+          "$MODE_LINK_WHY" "$MODE_LINK_FIX"
+        ;;
+      missing)
+        blocking_finding "$file:$lineno: no layer provides '$rel'" \
+          'a mode declaration names a path in the tree a build composes, and nothing composes one at that path' \
+          'correct the path, or remove the line'
         ;;
     esac
-    # Directories only: a file in $HOME is a link into this tree and has no mode
-    # of its own to compare.
-    { [ -d "$e" ] && [ ! -L "$e" ]; } || continue
-    srel=${rel:+$rel/}$base
-    ignored=$inherited
-    if [ "$ignored" -eq 0 ]; then
-      if [ "${#IGNORE_PATTERNS[@]}" -gt 0 ] && path_is_ignored "$srel"; then
-        ignored=1
-      elif path_is_stow_ignored "$srel"; then
-        ignored=1
-      fi
-    fi
-    if [ "$ignored" -eq 0 ]; then
-      target=$HOME_PREFIX/$srel
-      if [ -d "$target" ] && [ ! -L "$target" ] && dir_mode "$e" 2>/dev/null; then
-        want=$DIR_MODE_RAW
-        if dir_mode "$target" 2>/dev/null; then
-          have=$DIR_MODE_RAW
-          if [ "$want" != "$have" ] && [ $(((8#$want) & ~(8#$have))) -ne 0 ]; then
-            WIDE_DIR_COUNT=$((WIDE_DIR_COUNT + 1))
-            if [ "$WIDE_DIR_COUNT" -le "$cap" ]; then
-              WIDE_DIR_PATHS+=("$target")
-              WIDE_DIR_HAVE+=("$have")
-              WIDE_DIR_WANT+=("$want")
-            fi
-          fi
-        fi
-      fi
-    fi
-    scan_home_dir_modes "$srel" "$ignored" "$cap"
   done
 }
 
-# What apply's one line points at.  Each of these is a directory whose mode the
-# built tree and $HOME disagree about in the one direction an apply will not
-# resolve, and it stays that way until somebody changes one of them - which is
-# the ordinary state after a clone rather than a rare one, git recording no mode
-# for a directory and a cloned .ssh layer therefore arriving at the umask's.
+# What apply's one line points at, and the other half of it: a declaration the
+# machine does not have.  Two shapes, both reported as notes and neither of them
+# a problem to fix in a hurry.
 #
-# A note, and this is the one thing about it worth arguing over.  The direction
-# decides it: where the layer is the tighter of the two, an apply narrows the
-# directory and no difference is left, so the only state that can persist is the
-# layer being looser - which is to say the directory in $HOME is safer than the
-# layer asks for, and shale declining to open it is shale working.  Nothing is
-# broken, nothing is blocked, and the apply exits 0.  A finding here would make
-# doctor red by default for everyone who has cloned a layer with a .ssh in it,
-# and #92's guarantee runs the other way: a green doctor means a green apply,
-# which spends the signal on a machine that is fine.
+# The first is never-widen.  A declaration is a layer author's intent and the
+# mode on the machine is the user's, and where they disagree in the one
+# direction an apply will not resolve - the declaration being the looser of the
+# two - the directory in $HOME stays as it is and stays that way until somebody
+# changes one side.  The direction is the whole argument for it being a note:
+# where the declaration is the tighter, an apply narrows the directory and no
+# difference is left, so the only state that can persist is the one in which the
+# directory in $HOME is *safer* than the layer asks for, and shale declining to
+# open it is shale working.  A finding here would make doctor red on a machine
+# that is fine, and #92's guarantee runs the other way - a green doctor means a
+# green apply.
 #
-# One note rather than one per path, in the shape the .stowrc and built-tree
-# notes use, so the summary counts this class once however many directories are
-# in it.
-audit_home_dir_modes() {
-  local cap n i rest lines
+# The second is a declaration whose path never reached $HOME at all: the build
+# composed it and stow did not link it.  Also a note, for a plainer reason -
+# every cause of it is something else's finding or something else's note, and
+# the reader is owed the fact that the mode they wrote is not on the machine
+# rather than a second copy of why.
+#
+# The test in both halves is made from what is on disk rather than from anything
+# an apply recorded, so doctor answers without a build.  Two reads per declared
+# directory that is in both trees is the whole cost, where the mode of every
+# directory of the tree used to be compared with the mode of every directory of
+# $HOME.
+#
+# Either read may fail and neither failure is doctor's to report: a directory
+# that goes while doctor is running is the one shape that reaches it, and this
+# has nothing to say about a path that is no longer there.
+#
+# Nothing at all is said about a path on either ignore list.  No apply links into
+# one and no apply sets a mode on one, so a $HOME directory of that name is the
+# user's and its mode is not shale's business to have an opinion about.
+#
+# One note per shape rather than one per path, in the form the .stowrc and
+# built-tree notes take, so the summary counts each class once however many
+# paths are in it.
+audit_declared_modes() {
+  local cap n i idx rel bits target have rest lines linked
+  local wide_count wide_paths wide_have wide_want
+  local miss_count miss_paths miss_bits miss_where
   [ -d "$CUR" ] || return 0
   [ ! -L "$CUR" ] || return 0
   [ -n "${HOME-}" ] || return 0
 
-  WIDE_DIR_COUNT=0
-  WIDE_DIR_PATHS=()
-  WIDE_DIR_HAVE=()
-  WIDE_DIR_WANT=()
   # audit_ignored_links' cap, for its reasons.
   cap=10
-  scan_home_dir_modes '' 0 "$cap"
-  n=$WIDE_DIR_COUNT
-  [ "$n" -gt 0 ] || return 0
+  wide_count=0
+  wide_paths=()
+  wide_have=()
+  wide_want=()
+  miss_count=0
+  miss_paths=()
+  miss_bits=()
+  miss_where=()
 
-  if [ "$n" -eq 1 ]; then
-    lines=("an apply left 1 directory in $HOME as it is")
+  n=${#MODE_PATHS[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    idx=$i
+    rel=${MODE_PATHS[$i]}
+    bits=${MODE_BITS[$i]}
+    target=$HOME_PREFIX/$rel
+    i=$((i + 1))
+    mode_wins "$idx" || continue
+    ! declared_path_is_ignored "$rel" || continue
+    # apply's guard, and silent here for the reason it is silent there: a $HOME
+    # path a layer provides that is not shale's link is home_conflict's finding,
+    # which this must not report a second time in weaker words.  It also keeps
+    # the mode read below off a directory somewhere else entirely.
+    ! path_crosses_a_symlink "$HOME_PREFIX" "$rel" || continue
+    # Nothing is claimed about a declaration the built tree does not answer for.
+    # A tree older than the .shale-modes file is the ordinary way in, and the
+    # next build is what settles it - by composing the path, or by refusing.
+    { [ -e "$CUR/$rel" ] || [ -L "$CUR/$rel" ]; } || continue
+    if [ -d "$CUR/$rel" ] && [ ! -L "$CUR/$rel" ]; then
+      # A declared directory is honoured by a real directory in $HOME, stow
+      # making one at every level under --no-folding.
+      if [ -d "$target" ] && [ ! -L "$target" ]; then
+        declared_dir_bits "$bits"
+        dir_mode "$target" 2>/dev/null || continue
+        have=$DIR_MODE_RAW
+        [ $(((8#$have) & 0777)) -ne $((8#$DECLARED_BITS)) ] || continue
+        # apply's own test: a bit the declaration has and the directory has not
+        # is a widening, and a widening is what an apply declines.
+        [ $(((8#$DECLARED_BITS) & ~(8#$have))) -ne 0 ] || continue
+        wide_count=$((wide_count + 1))
+        if [ "$wide_count" -le "$cap" ]; then
+          wide_paths+=("$target")
+          # The permission bits of what is there, three digits, because that is
+          # the width of the thing it is printed beside and of the file the
+          # reader edits.  Under #119 both sides were a mode read off a
+          # directory and both were four digits; a declaration cannot carry a
+          # set-id or sticky bit at all - four digits are refused - so showing
+          # one here would invite the reader to think shale compares it, and
+          # the test two lines above masks it off.  dir_mode's digits are fixed
+          # in number, so the leading one comes off by name.
+          wide_have+=("${have#?}")
+          wide_want+=("$DECLARED_BITS")
+        fi
+        continue
+      fi
+    else
+      # A declared file is honoured by a link in $HOME resolving to the copy in
+      # the built tree, which is where the mode the build set actually lives.
+      [ ! "$target" -ef "$CUR/$rel" ] || continue
+    fi
+    miss_count=$((miss_count + 1))
+    if [ "$miss_count" -le "$cap" ]; then
+      miss_paths+=("$target")
+      miss_bits+=("$bits")
+      miss_where+=("${MODE_FILES[$idx]}:${MODE_LINES[$idx]}")
+    fi
+  done
+
+  if [ "$wide_count" -gt 0 ]; then
+    if [ "$wide_count" -eq 1 ]; then
+      lines=("an apply left 1 directory in $HOME as it is")
+    else
+      lines=("an apply left $wide_count directories in $HOME as they are")
+    fi
+    i=0
+    while [ "$i" -lt "${#wide_paths[@]}" ]; do
+      lines+=("${wide_paths[$i]} is ${wide_have[$i]}, and shale is asked for ${wide_want[$i]}")
+      i=$((i + 1))
+    done
+    if [ "$wide_count" -gt "$cap" ]; then
+      rest=$((wide_count - cap))
+      lines+=("and $rest more, not named here")
+    fi
+    lines+=("shale sets the mode of a directory it creates in $HOME, and never widens one that was already there")
+    lines+=('to take the mode the declaration asks for, chmod that directory yourself')
+    lines+=("to keep the mode it has, change the declaration: 'shale which' names the line that decides a path")
+    note ${lines[@]+"${lines[@]}"}
+  fi
+
+  [ "$miss_count" -gt 0 ] || return 0
+  # Said only where something of the tree is linked at all.  On a machine that
+  # has built and never applied every declaration is in this state, and
+  # audit_unapplied_tree has already said the one thing there is to say about
+  # that tree - a list of paths under it would be the same fact per declaration.
+  BUILT_TREE_UNREAD=0
+  linked=0
+  ! built_tree_is_linked '' || linked=1
+  [ "$linked" -eq 1 ] || return 0
+
+  if [ "$miss_count" -eq 1 ]; then
+    lines=("1 declared mode is not on anything in $HOME")
   else
-    lines=("an apply left $n directories in $HOME as they are")
+    lines=("$miss_count declared modes are not on anything in $HOME")
   fi
   i=0
-  while [ "$i" -lt "${#WIDE_DIR_PATHS[@]}" ]; do
-    lines+=("${WIDE_DIR_PATHS[$i]} is ${WIDE_DIR_HAVE[$i]}, and the layer that provides it gives ${WIDE_DIR_WANT[$i]}")
+  while [ "$i" -lt "${#miss_paths[@]}" ]; do
+    lines+=("${miss_where[$i]} declares ${miss_bits[$i]}, and nothing in $HOME is at ${miss_paths[$i]}")
     i=$((i + 1))
   done
-  if [ "$n" -gt "$cap" ]; then
-    rest=$((n - cap))
+  if [ "$miss_count" -gt "$cap" ]; then
+    rest=$((miss_count - cap))
     lines+=("and $rest more, not named here")
   fi
-  lines+=("shale sets the mode of a directory it creates in $HOME, and never widens one that was already there")
-  lines+=('to take the mode the layer gives, chmod that directory yourself')
-  lines+=("to keep the mode it has, set that mode on the directory in the layer: 'shale which' names the layer for a path")
+  lines+=("the built tree holds each of these paths with the declared mode on it, and an apply is what puts one in $HOME")
+  lines+=("'shale which PATH' says why a path in the tree is not linked")
   note ${lines[@]+"${lines[@]}"}
 }
 
@@ -4139,6 +4612,72 @@ report_ignored() {
   emit ${lines[@]+"${lines[@]}"}
 }
 
+# The declaration that decides the mode of $1, with the file and the line it is
+# on, and every earlier one it shadows.  $2 is the kind the winning layer
+# provides it as, and $3 is 1 where an apply would set a mode at this path in
+# $HOME.  Nothing is printed where no line names the path, which is every
+# ordinary one.
+#
+# Two clone roots declaring one path resolve by config order, as everything else
+# in shale does, and this is the whole of what makes that visible: two lines a
+# reader can be sent to, rather than an emergent consequence of which layer
+# happened to provide a file inside a directory.
+#
+# What it may not do is claim a chmod that does not happen.  Every line below
+# about a tree is conditional on shale acting on that tree: the build refuses
+# the whole declaration in two of the states, no apply sets a mode at a path
+# either ignore list covers - which the note under this one says in as many
+# words, so an unconditional claim here contradicted it two lines later - and a
+# declared file has no mode of its own in $HOME at all, what is there being a
+# link into the built tree.
+report_declared_mode() {
+  local rel=$1 kind=${2-} in_home=${3-0} i winner lines
+  winner=-1
+  i=0
+  while [ "$i" -lt "${#MODE_PATHS[@]}" ]; do
+    [ "${MODE_PATHS[$i]}" != "$rel" ] || winner=$i
+    i=$((i + 1))
+  done
+  [ "$winner" -ge 0 ] || return 0
+  lines=("note: '$rel' is declared mode ${MODE_BITS[$winner]} at ${MODE_FILES[$winner]}:${MODE_LINES[$winner]}")
+  i=0
+  while [ "$i" -lt "$winner" ]; do
+    [ "${MODE_PATHS[$i]}" != "$rel" ] ||
+      lines[${#lines[@]}]="shadowed: ${MODE_FILES[$i]}:${MODE_LINES[$i]} declares ${MODE_BITS[$i]}"
+    i=$((i + 1))
+  done
+  declared_path_state "$rel"
+  case "$MODE_PATH_STATE" in
+    # The two states build refuses, said as refusals rather than as a mode: a
+    # line shale will not act on is a line to correct or remove, and every build
+    # says so until one of those happens.
+    missing)
+      lines[${#lines[@]}]="no layer provides that path, so no build composes one at it and 'shale build' refuses the line"
+      ;;
+    link)
+      declared_link_lines "$rel" "$CROSSED_LINK"
+      lines[${#lines[@]}]="$MODE_LINK_HEAD, so 'shale build' refuses the line"
+      lines[${#lines[@]}]=$MODE_LINK_WHY
+      ;;
+    # 'unknown' says nothing more: cmd_which has already refused an answer where
+    # a layer could not be searched.
+    ok)
+      lines[${#lines[@]}]="shale sets that mode on $CUR/$rel"
+      if [ "$in_home" -eq 1 ] && [ -n "${HOME-}" ]; then
+        if [ "$kind" = directory ]; then
+          lines[${#lines[@]}]="and on $HOME_PREFIX/$rel, where it never widens a directory that was already there"
+        elif [ -L "$HOME_PREFIX/$rel" ] && [ "$HOME_PREFIX/$rel" -ef "$CUR/$rel" ]; then
+          # Only where the link is actually there.  Where it is not, the
+          # residual note at the end of the answer is the one that speaks, and
+          # doctor carries the same fact as a note of its own.
+          lines[${#lines[@]}]="$HOME_PREFIX/$rel is a link into that tree, so that is the mode read through it"
+        fi
+      fi
+      ;;
+  esac
+  emit ${lines[@]+"${lines[@]}"}
+}
+
 # The one path no apply links that neither list can be made to account for:
 # '.stow-local-ignore' with a trailing newline.  Stow adds
 # '^/\.stow-local-ignore$' to whatever a package's list holds rather than
@@ -4372,7 +4911,7 @@ check_layers() {
 }
 
 cmd_build() {
-  local i dir n had_current qcur qold
+  local i dir n had_current qcur qold rel file lineno bits errors
 
   parse_config || exit 1
 
@@ -4398,6 +4937,10 @@ cmd_build() {
   # composed, because a pattern shale refuses stops the build and composing a
   # tree first would only be work to throw away.
   parse_ignore_files || exit 1
+  # The mode declarations, on the same terms and in the same window: committed
+  # inside a clone root, and a line shale refuses stops the build before a tree
+  # is composed for it to be refused against.
+  parse_mode_files || exit 1
 
   if [ -L "$CUR" ]; then
     die "$CUR is a symlink" \
@@ -4421,10 +4964,6 @@ cmd_build() {
 
   DIVERGED_PATHS=()
   DIVERGED_LAYERS=()
-  # Blanked here rather than at the top of the file, so that the list apply
-  # replays is this build's and never a previous one's.
-  DIR_MODE_PATHS=()
-  DIR_MODE_BITS=()
   OLDER_COUNT=0
   CONFLICT_PATHS=()
   CONFLICT_MINE=()
@@ -4434,7 +4973,7 @@ cmd_build() {
     SRC_INDEX=$i
     SRC_NAME=${LAYER_NAMES[$i]}
     dir=$DOTFILES/${LAYER_PATHS[$i]}
-    compose_dir "$dir" "$NEW" '' 0
+    compose_dir "$dir" "$NEW" ''
     report "composed layer '$SRC_NAME' from $dir"
     i=$((i + 1))
   done
@@ -4469,6 +5008,66 @@ cmd_build() {
     done
     die "$CUR not rebuilt"
   fi
+
+  # The mode declarations, against the tree they name.  Every one is checked
+  # before any of them is set, and a line shale cannot act on stops the build.
+  #
+  # A declared path that nothing composes is the case that decides this, and the
+  # precedent is an ignore pattern shale cannot translate: that stops a build
+  # rather than being dropped, because a line somebody wrote and shale silently
+  # did nothing with is worse than either acting on it or refusing it.  A path
+  # renamed in a layer leaves its declaration behind, and the mode then goes
+  # missing on the next machine that clones the layer, with every command
+  # exiting 0.  Named with its file and its line, which is what makes it one
+  # edit.
+  #
+  # A symlink on the path is the other shape, and the same argument: chmod
+  # resolves every component, so honouring the line would set the mode of
+  # whatever the path ends at, somewhere else entirely.  Tested before the
+  # existence check, because a link to nothing answers that one with the wrong
+  # cause, and every component is tested rather than the leaf alone - see
+  # path_crosses_a_symlink for what testing the leaf alone let through.
+  errors=0
+  n=${#MODE_PATHS[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    rel=${MODE_PATHS[$i]}
+    file=${MODE_FILES[$i]}
+    lineno=${MODE_LINES[$i]}
+    i=$((i + 1))
+    if path_crosses_a_symlink "$NEW" "$rel"; then
+      declared_link_lines "$rel" "$CROSSED_LINK"
+      emit "$file:$lineno: $MODE_LINK_HEAD" "$MODE_LINK_WHY" "$MODE_LINK_FIX"
+      errors=$((errors + 1))
+    elif [ ! -e "$NEW/$rel" ]; then
+      emit "$file:$lineno: no layer provides '$rel'" \
+        'a mode declaration names a path in the tree a build composes, and nothing composes one at that path' \
+        'correct the path, or remove the line'
+      errors=$((errors + 1))
+    fi
+  done
+  if [ "$errors" -eq 1 ]; then
+    die "1 mode declaration shale cannot act on; $CUR not rebuilt"
+  elif [ "$errors" -gt 0 ]; then
+    die "$errors mode declarations shale cannot act on; $CUR not rebuilt"
+  fi
+  # Only the winner is set, so two roots declaring one path leave one chmod
+  # rather than two in an order nobody chose.  A file gets the three digits as
+  # written; a directory gets declared_dir_bits' clamp, for the reason there.
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    rel=${MODE_PATHS[$i]}
+    bits=${MODE_BITS[$i]}
+    if mode_wins "$i"; then
+      if [ -d "$NEW/$rel" ]; then
+        declared_dir_bits "$bits"
+        bits=$DECLARED_BITS
+      fi
+      chmod "$bits" "$NEW/$rel" ||
+        die "could not set the mode $bits on $NEW/$rel"
+    fi
+    i=$((i + 1))
+  done
 
   # A package-local ignore list replaces stow's built-in one wholesale rather
   # than adding to it, so whatever is missing here is linked into $HOME with
@@ -4792,7 +5391,7 @@ count_dangling_links() {
 }
 
 cmd_apply() {
-  local status err had_xtrace i n rel bits pre have target failed kept lines
+  local status err had_xtrace i n idx rel bits pre have target failed kept lines
 
   parse_config || exit 1
 
@@ -4861,19 +5460,19 @@ cmd_apply() {
   #
   # No restore is owed on the paths that do not reach it: every trap that can
   # fire in this window exits.
-  # Which of the directories the build recorded are already in $HOME, taken
-  # before stow runs because afterwards there is no telling one stow has just
-  # made from one that was there all along - and that is the whole of what
-  # decides whether the mode below may widen it.  Tests only, no fork.
-  DIR_MODE_PRE=()
+  # Which of the declared paths are already directories in $HOME, taken before
+  # stow runs because afterwards there is no telling one stow has just made from
+  # one that was there all along - and that is the whole of what decides whether
+  # the mode below may widen it.  Tests only, no fork.
+  MODE_PRE=()
   i=0
-  n=${#DIR_MODE_PATHS[@]}
+  n=${#MODE_PATHS[@]}
   while [ "$i" -lt "$n" ]; do
-    target=$HOME_PREFIX/${DIR_MODE_PATHS[$i]}
+    target=$HOME_PREFIX/${MODE_PATHS[$i]}
     if [ -d "$target" ] && [ ! -L "$target" ]; then
-      DIR_MODE_PRE+=(1)
+      MODE_PRE+=(1)
     else
-      DIR_MODE_PRE+=(0)
+      MODE_PRE+=(0)
     fi
     i=$((i + 1))
   done
@@ -4980,45 +5579,66 @@ cmd_apply() {
     warn "$DANGLING links in $HOME point at paths the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names them"
   fi
 
-  # The directory modes the build composed, put onto the directories in $HOME.
-  # Stow does not carry them: it creates each directory with mkdir and no mode,
-  # so what lands is 0777 against the caller's umask whatever $CUR holds -
-  # measured on 2.3.1 and on 2.4.1, which agree.  So without this the mode a
-  # layer puts on .ssh reaches the built tree and stops there, and $HOME gets
-  # 0755 on a machine at the common umask and 0775 - group writable, which
-  # OpenSSH's StrictModes refuses - on a Debian or Ubuntu one.
+  # The declared modes, put onto the directories in $HOME.  Stow does not carry
+  # one: it creates each directory with mkdir and no mode, so what lands is 0777
+  # against the caller's umask whatever $CUR holds - measured on 2.3.1 and on
+  # 2.4.1, which agree.  So without this a '700 .ssh' reaches the built tree and
+  # stops there, and $HOME gets 0755 on a machine at the common umask and 0775 -
+  # group writable, which OpenSSH's StrictModes refuses - on a Debian or Ubuntu
+  # one.
   #
-  # In the order the build recorded them, which is the order the layers were
-  # composed in.  Parents come before their children, and every mode has the
-  # owner's rwx in it, so nothing here can shut the walk out of a directory
-  # below it.
+  # A declaration reaches both trees because they are two trees.  The built one
+  # is shale's own and gets the mode as declared; $HOME is the user's, and there
+  # the declaration is what a layer author asked for while the mode on disk is
+  # what the person at the machine has.
   #
-  # A directory that was already in $HOME before this apply is only ever
+  # So a directory that was already in $HOME before this apply is only ever
   # narrowed, never widened, and that asymmetry is the point of the whole pass.
-  # Git records no mode for a directory, so a freshly cloned layer has whatever
-  # the clone's umask gave it - 0755, or 0775 on Debian and Ubuntu - and a
-  # ~/.ssh the user keeps at 0700 with a private key in it would be opened up by
-  # an apply, silently, on the ordinary clone-and-apply path.  A mode fix that
-  # exposes ~/.ssh is worse than the bug it fixes.  A directory stow made in
-  # this apply has no such history and gets the layer's mode exactly, which is
-  # what keeps the built tree and $HOME agreeing on every path shale created.
+  # A '755 .ssh' against a ~/.ssh the user keeps at 0700, with a private key in
+  # it, would be opened up by an apply on the ordinary clone-and-apply path,
+  # silently; a mode fix that exposes ~/.ssh is worse than the bug it fixes.  A
+  # directory stow made in this apply has no such history and gets the declared
+  # mode exactly, which is what keeps the built tree and $HOME agreeing on every
+  # path shale created.
   #
-  # Two shapes are passed over, and neither is silence about a mode that was
-  # meant to land: a path that is not a directory now was never linked into -
-  # stow skipped it, or nothing of the tree reached it - and a symlink at the
-  # path is not shale's directory, chmod would follow it and change the mode of
-  # whatever it points at, somewhere else entirely.
+  # In the order the declarations were read, which is config order, so a path
+  # two roots declare is settled the way everything else in shale is.  Only the
+  # winner is acted on, and every mode carries the owner's rwx, so nothing here
+  # can shut the pass out of a path below it.
+  #
+  # Three shapes are passed over, and none of them is silence about a mode that
+  # was meant to land.  A path on either ignore list is not one any apply links
+  # into, so the $HOME directory of that name is the user's entirely.  A symlink
+  # at the path is a declared file, arriving in $HOME as a link into the built
+  # tree, where the mode the build set on the copy is the mode a reader gets
+  # through the link - and chmod would follow the link to that same file.  And a
+  # path with nothing at it was not linked at all: stow skipped it, or nothing
+  # of the tree reached it, which doctor reports.
   failed=0
   kept=0
   i=0
-  n=${#DIR_MODE_PATHS[@]}
+  n=${#MODE_PATHS[@]}
   while [ "$i" -lt "$n" ]; do
-    rel=${DIR_MODE_PATHS[$i]}
-    bits=${DIR_MODE_BITS[$i]}
-    pre=${DIR_MODE_PRE[$i]}
+    idx=$i
+    rel=${MODE_PATHS[$i]}
+    bits=${MODE_BITS[$i]}
+    pre=${MODE_PRE[$i]}
     target=$HOME_PREFIX/$rel
     i=$((i + 1))
+    mode_wins "$idx" || continue
+    ! declared_path_is_ignored "$rel" || continue
+    # Every component, not the leaf alone, for build's reason: chmod resolves
+    # the whole path.  Nothing shale created is below a link in $HOME - stow
+    # refuses to stow into one and this apply would have died before reaching
+    # here - so this guards a path shale has no business writing to rather than
+    # one it made, and it says nothing: a $HOME path a layer provides that is
+    # not shale's link is a finding of doctor's own, in home_conflict's words.
+    ! path_crosses_a_symlink "$HOME_PREFIX" "$rel" || continue
     { [ -d "$target" ] && [ ! -L "$target" ]; } || continue
+    # A directory, so the clamp, and the same bits the build put on the copy in
+    # the tree.
+    declared_dir_bits "$bits"
+    bits=$DECLARED_BITS
     if [ "$pre" -eq 1 ]; then
       if ! dir_mode "$target"; then
         emit "could not read the mode of $target"
@@ -5028,12 +5648,14 @@ cmd_apply() {
       have=$DIR_MODE_RAW
       # Nothing to do, and the commonest case by far: every directory of the
       # last apply arrives here already holding the mode this one would set.
-      [ "$have" != "$bits" ] || continue
-      # A bit the layer has and the directory has not is a widening, and every
-      # one of them is refused together: a mode is one answer rather than nine,
-      # and half of one is a directory neither side asked for.  8# because a
-      # leading 1 through 7 in the set-id digit is not a leading zero, and bash
-      # would read the whole thing as decimal.
+      # The permission bits alone, because the declaration has nothing to say
+      # about a set-id or sticky bit and 'chmod 700' would not clear one anyway.
+      # 8# because a leading 1 through 7 in the set-id digit is not a leading
+      # zero, and bash would read the whole thing as decimal.
+      [ $(((8#$have) & 0777)) -ne $((8#$bits)) ] || continue
+      # A bit the declaration has and the directory has not is a widening, and
+      # every one of them is refused together: a mode is one answer rather than
+      # nine, and half of one is a directory neither side asked for.
       if [ $(((8#$bits) & ~(8#$have))) -ne 0 ]; then
         kept=$((kept + 1))
         continue
@@ -5047,13 +5669,12 @@ cmd_apply() {
   done
 
   # One line, whatever the count, and the detail is doctor's.  This is a
-  # standing condition rather than an event: after a clone the layer's .ssh is
-  # 0755 - git having recorded no mode for it - and a ~/.ssh the user keeps at
-  # 0700 diverges from it on every apply until one side is changed, which is the
-  # default state for anyone with a .ssh layer rather than a rare one.  A block
-  # of lines there would be a block on every apply, which is #75's rule; saying
-  # nothing at all would be an apply quietly declining what a layer asked for,
-  # which is #92's.  So: the count here, the paths and the modes in doctor.
+  # standing condition rather than an event: a layer declaring '755 .ssh' and a
+  # ~/.ssh the user keeps at 0700 disagree on every apply until one side is
+  # changed, and neither side has any reason to change.  A block of lines there
+  # would be a block on every apply, which is #75's rule; saying nothing at all
+  # would be an apply quietly declining what a layer asked for, which is #92's.
+  # So: the count here, the paths and the modes in doctor.
   #
   # A warning rather than a failure, and the status stays 0: what shale declined
   # to do leaves the safer of the two modes in place and nothing about the apply
@@ -5240,6 +5861,13 @@ cmd_doctor() {
   FINDINGS=$((FINDINGS + IGNORE_ERRORS))
   BUILD_BLOCKED=$((BUILD_BLOCKED + IGNORE_ERRORS))
 
+  # The mode declarations, on the same terms: build calls this as
+  # 'parse_mode_files || exit 1' too, so each refusal is blocking.  The paths
+  # they name are checked below, once the layers have been looked at.
+  parse_mode_files 2>&1
+  FINDINGS=$((FINDINGS + MODE_ERRORS))
+  BUILD_BLOCKED=$((BUILD_BLOCKED + MODE_ERRORS))
+
   # The layers as build composes them, once the loop above has said which of
   # them there is anything to walk.  A root that is missing, unreadable or not a
   # directory is that loop's finding and is left out here rather than reported
@@ -5257,8 +5885,8 @@ cmd_doctor() {
   APPLY_CONFLICTS=0
   APPLY_CONFLICT_PATHS=()
   HOME_CONFLICT_SKIP=
-  STRAY_IGNORE_COUNT=0
-  STRAY_IGNORE_PATHS=()
+  STRAY_COUNT=0
+  STRAY_PATHS=()
   [ -z "$layers" ] || scan_layer_trees '' "${layers# }"
   # Under the cap every one of them is printed above and this says nothing.
   if [ "$LAYER_DENIED" -gt "$LAYER_DENIED_CAP" ]; then
@@ -5283,6 +5911,10 @@ cmd_doctor() {
     fi
     i=$((i + 1))
   done
+
+  # build's other refusal of a line, after the layers above have said which of
+  # them there is anything to read.
+  audit_mode_declarations
 
   # Everything in ~/.dotfiles that shale does not account for, a file as much as
   # a directory: an editor left a 'shale.conf.bak' beside the config and nothing
@@ -5400,25 +6032,34 @@ cmd_doctor() {
     note ${lines[@]+"${lines[@]}"}
   fi
 
-  # An ignore file shale does not read: beside the config, where the config is,
-  # or anywhere inside a layer, which the walk above found at any depth.
-  # Neither is read by anything and neither is composed, so without this the
-  # patterns in it are silence a reader cannot tell from a working setup.
-  if [ -e "$DOTFILES/$IGNORE_NAME" ] || [ -L "$DOTFILES/$IGNORE_NAME" ]; then
-    note "$DOTFILES/$IGNORE_NAME is read by nothing" \
-      "shale reads one $IGNORE_NAME per clone root, at $DOTFILES/<root>/$IGNORE_NAME" \
+  # One of shale's own two files where shale does not read it: beside the
+  # config, where the config is, or anywhere inside a layer, which the walk
+  # above found at any depth.  Neither is read by anything and neither is
+  # composed, so without this what is in it is silence a reader cannot tell from
+  # a working setup.
+  for entry in "$IGNORE_NAME" "$MODES_NAME"; do
+    { [ -e "$DOTFILES/$entry" ] || [ -L "$DOTFILES/$entry" ]; } || continue
+    note "$DOTFILES/$entry is read by nothing" \
+      "shale reads one $entry per clone root, at $DOTFILES/<root>/$entry" \
       'move it into the clone root whose layers it is about'
-  fi
-  i=0
-  while [ "$i" -lt "${#STRAY_IGNORE_PATHS[@]}" ]; do
-    note "${STRAY_IGNORE_PATHS[$i]} is read by nothing" \
-      "shale reads one $IGNORE_NAME per clone root, at $DOTFILES/<root>/$IGNORE_NAME" \
-      'one list covers the whole built tree, so a layer cannot have patterns of its own'
-    i=$((i + 1))
   done
-  if [ "$STRAY_IGNORE_COUNT" -gt "$STRAY_IGNORE_CAP" ]; then
-    i=$((STRAY_IGNORE_COUNT - STRAY_IGNORE_CAP))
-    note "and $i more $IGNORE_NAME files read by nothing, not named here"
+  i=0
+  while [ "$i" -lt "${#STRAY_PATHS[@]}" ]; do
+    entry=${STRAY_PATHS[$i]##*/}
+    i=$((i + 1))
+    if [ "$entry" = "$MODES_NAME" ]; then
+      note "${STRAY_PATHS[$((i - 1))]} is read by nothing" \
+        "shale reads one $entry per clone root, at $DOTFILES/<root>/$entry" \
+        'one list covers the whole built tree, so a layer cannot have declarations of its own'
+    else
+      note "${STRAY_PATHS[$((i - 1))]} is read by nothing" \
+        "shale reads one $entry per clone root, at $DOTFILES/<root>/$entry" \
+        'one list covers the whole built tree, so a layer cannot have patterns of its own'
+    fi
+  done
+  if [ "$STRAY_COUNT" -gt "$STRAY_CAP" ]; then
+    i=$((STRAY_COUNT - STRAY_CAP))
+    note "and $i more files of shale's own read by nothing, not named here"
   fi
 
   # The two files stow reads: '~/.stowrc', and './.stowrc' from the directory it
@@ -5464,10 +6105,10 @@ cmd_doctor() {
   # list covers, against what $HOME still links.
   audit_ignored_links
 
-  # The built tree once more, against the modes of the same directories in
-  # $HOME: the detail behind the one line an apply prints when it leaves one as
-  # it is.
-  audit_home_dir_modes
+  # The declarations against $HOME: the detail behind the one line an apply
+  # prints when it leaves a directory as it is, and the declarations that never
+  # reached $HOME at all.
+  audit_declared_modes
 
   # Last, because it is the only check that walks the whole of $HOME and the only
   # one that means anything only once everything above it is sound.
@@ -5557,14 +6198,17 @@ cmd_doctor() {
 # Reads no build output but the one note at the end: the answer is what the
 # layers say, so it is the same before the first build as after it.
 cmd_which() {
-  local arg=${1-} rel path i n lower upper keyword column width obscured ignored
-  local explained refused dot_git own_ignore unreached
+  local arg=${1-} rel path i n lower upper keyword column width obscured ignored home_modes
+  local explained refused dot_git own_ignore own_modes unreached
 
   parse_config || exit 1
   # Refused rather than answered around: a pattern shale will not read is one it
   # cannot say whether this path matches, and an answer that left it out would
   # be the silent half of the same mistake.  Every build refuses it too.
   parse_ignore_files || exit 1
+  # The same, for the same reason: a line shale will not read is one it cannot
+  # say what mode this path gets from, and every build refuses it too.
+  parse_mode_files || exit 1
   which_normalise "$arg" || exit 1
   rel=$WHICH_REL
 
@@ -5573,6 +6217,16 @@ cmd_which() {
   # provides it, and the reader arrives asking about a file that is missing
   # rather than about which layer wins.
   #
+  # Whether an apply would set a mode at this path in $HOME at all, which is
+  # apply's own test and takes the ancestors with it - nothing is set below a
+  # directory an ignore list covers either.
+  #
+  # Before the pair below and never after, because it runs those same two
+  # matchers on each prefix and leaves their answers holding the last prefix it
+  # tested; what report_ignored prints is what the pair below leaves.
+  home_modes=1
+  ! declared_path_is_ignored "$rel" || home_modes=0
+
   # Both lists, and both answers kept: stow reads them out of one file and a
   # path can be on either or on both, while what to do about it differs.
   ignored=0
@@ -5618,6 +6272,9 @@ cmd_which() {
     # has just moved the file out of a layer to stop it being linked is owed the
     # pattern that was already doing it.
     [ "$ignored" -eq 0 ] || report_ignored "$rel"
+    # And here above all: a declaration outliving the path it names is what the
+    # reader has, and the next build refuses it.
+    report_declared_mode "$rel" '' "$home_modes"
     # Said here for the same reason, and beside the stale note rather than
     # instead of it: the tree holding this path and no layer providing it is
     # where a reader lands the moment after renaming the file, and 'run build'
@@ -5687,6 +6344,13 @@ cmd_which() {
     i=$((i + 1))
   done
 
+  # Directly under the table and ahead of every note about $HOME, because it is
+  # about the same question the table answers - what this path gets, and which
+  # line decides it - rather than about why the path is or is not linked.  It
+  # accounts for nothing: a path with a declared mode is otherwise an ordinary
+  # path, and the notes below run exactly as they would without one.
+  report_declared_mode "$rel" "${WHICH_KINDS[0]}" "$home_modes"
+
   # First among the notes: the table above says which layer's copy lands in the
   # built tree, which is true and is not the answer to why the file is not in
   # $HOME.
@@ -5704,25 +6368,28 @@ cmd_which() {
   # can account for, and two notes making the one point read as two problems.
   explained=0
 
-  # The two names the composer skips, read once and before anything is printed:
-  # the notes below are decided from them as well as reported by them, and a
-  # second copy of either test is a place for the two answers to drift apart.
+  # The three names the composer skips, read once and before anything is
+  # printed: the notes below are decided from them as well as reported by them,
+  # and a second copy of any of the tests is a place for the answers to drift
+  # apart.
   dot_git=0
   case "/$rel/" in
     */.git/*) dot_git=1 ;;
   esac
   own_ignore=0
   [ "${rel##*/}" != "$IGNORE_NAME" ] || own_ignore=1
+  own_modes=0
+  [ "${rel##*/}" != "$MODES_NAME" ] || own_modes=1
 
   # Whether the composer reaches this path at all, which is a component test
-  # where the note about the second name is a leaf test - deliberately, and the
-  # two must not be confused.  compose_dir drops both names by basename at every
-  # depth and does not descend, so nothing below a directory of either is
-  # composed either, while the note below says which layer's copy of *this*
-  # file is not composed and reads the leaf to say it.
+  # where the notes about the other two names are leaf tests - deliberately, and
+  # they must not be confused.  compose_dir drops all three names by basename at
+  # every depth and does not descend, so nothing below a directory of any of
+  # them is composed either, while the notes below say which layer's copy of
+  # *this* file is not composed and read the leaf to say it.
   unreached=0
   case "/$rel/" in
-    */.git/* | */"$IGNORE_NAME"/*) unreached=1 ;;
+    */.git/* | */"$IGNORE_NAME"/* | */"$MODES_NAME"/*) unreached=1 ;;
   esac
 
   # Whether the next build exits 1 at this path, decided before a line is
@@ -5828,6 +6495,11 @@ cmd_which() {
     emit "note: no build composes a $IGNORE_NAME — shale reads the one at the top of a clone root and copies none of them"
     # Accounted for, like the three above: only a hand puts one of these in the
     # built tree, and the line above says why no build did.
+    explained=1
+  fi
+  # The other file of shale's own, on the same terms and for the same reason.
+  if [ "$own_modes" -ne 0 ]; then
+    emit "note: no build composes a $MODES_NAME — shale reads the one at the top of a clone root and copies none of them"
     explained=1
   fi
 

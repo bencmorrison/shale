@@ -142,6 +142,30 @@ pattern does not unlink what an earlier apply already linked — stow skips an i
 unstowing it — so `doctor` names those leftover links too, and removing them is the whole of the fix.
 [docs/layers.md](docs/layers.md#blocking-a-file-without-removing-it) has the detail.
 
+## Declaring the mode of a path
+
+Git records no permission bits for a directory and only the executable bit for a file, so a cloned
+layer has whatever the clone's umask gave it — `755` on most machines, `775` on Debian and Ubuntu,
+and `644` for a `config` you committed at `600`. A mode you want is a mode you declare, in a
+`.shale-modes` beside the `.shale-ignore` at the top of the clone root:
+
+```
+# ~/.dotfiles/personal/.shale-modes
+700  .ssh
+600  .ssh/config
+700  .gnupg
+```
+
+The mode first, in `chmod` order, then one exact path relative to the layer root — no globs, and
+three octal digits, setuid and setgid and sticky being refused rather than set on a path in your
+home directory. `build` puts that mode on the path in `current/`, and `apply` puts it on the
+directory stow makes in `$HOME`, which is the only way one reaches `$HOME` at all: stow creates each
+directory with `mkdir` and the caller's umask. A directory nobody declares is `755` in `current/`
+and stow's business in `$HOME`. A path no layer provides, a path with a symlink anywhere on it, and
+any line shale cannot read all stop the build with the file and the line. Two clone roots declaring
+one path resolve by config order, and `shale which` names the line that wins.
+[docs/layers.md](docs/layers.md) has the whole of it.
+
 Every transcript below was produced from that config, in a home directory at `/home/you` that had
 been applied once already — `doctor` says more before the first build, and more before the first
 apply, than after both. Where a
@@ -167,6 +191,7 @@ PATH is relative to ~/.dotfiles.  URL says how to clone PATH's top-level
 directory; give it once per directory and leave it off the other lines.
 
 A .shale-ignore file at the top of a clone root blocks paths from every apply.
+A .shale-modes file there declares modes, one "700  .ssh" per line.
 ```
 
 `shale help`, `shale -h` and `shale --help` print that same text, as does `shale` with no arguments
@@ -440,12 +465,14 @@ overwrites, and how to carry on from a block that stopped.
 - Rebuilding replaces `~/.dotfiles/current` in place, so there is a brief window in which the
   symlinks in `$HOME` point at nothing. Apply relinks immediately afterwards.
 - No build is incremental: every one composes every layer from scratch, so a one-character edit
-  costs what a first build costs. Roughly two milliseconds a file — 4.1 seconds for a 2000-file
-  tree, 31 milliseconds for a seven-file one, on the container these were measured in. A directory
-  costs more than a file, because its mode is read and set: budget about three milliseconds each —
-  once per directory and not once per layer providing it, since only the layer that wins a path pays
-  — which a directory-heavy tree notices and an ordinary one does not. An `apply` adds one more read
-  for each of those directories that was already in `$HOME`.
+  costs what a first build costs. Roughly two and a half milliseconds a file — 5.0 seconds for a
+  2000-file tree spread over 400 directories, 40 milliseconds for a seven-file one, on the container
+  these were measured in. A directory
+  is one `mkdir` and costs less than a file: no layer's directory mode is read or copied. What costs
+  instead is each line of a `.shale-modes` — one `chmod` in the build, and a read and a `chmod` in
+  the apply — so the price is the length of that file rather than the shape of the tree. Against a
+  400-directory tree, five lines were not measurable, twenty added 13 milliseconds to the build and
+  72 to the apply, and four hundred added 0.9 seconds and 2.4.
 - When a whole directory leaves every layer, stow does not visit it and the links inside it are left
   dangling by an apply that still exits 0. That apply counts them and says so in one line; `shale
   doctor` names them and prints what to do about them, and goes on finding them on every later run,
@@ -461,9 +488,11 @@ overwrites, and how to carry on from a block that stopped.
   appear in `$HOME`.
 - Git records no permission bits for a directory, and only the executable bit for a file, so a
   freshly cloned layer has whatever modes the clone's umask gave it — `755` on most machines, `775`
-  on Debian and Ubuntu, and `644` for a file you committed at `600`. Shale copies the working tree
-  faithfully, and the working tree after a clone is not what was committed. Where a mode matters,
-  `chmod` it in the layer: every build and apply reproduces it from there.
+  on Debian and Ubuntu, and `644` for a file you committed at `600`. Shale carries a file's mode
+  across faithfully, and the working tree after a clone is not what was committed; a directory's
+  mode it does not carry at all. Where a mode matters,
+  declare it in a `.shale-modes` at the top of the clone root: that file is plain text, which is the
+  one thing about a mode git reproduces exactly.
 - The built tree is `700`, so nothing but you can walk it. Nothing shale runs needs to — stow reads
   it as you — but if your `$HOME` is group-readable by design and something else reads a file shale
   linked, it resolves the link into `~/.dotfiles/current` and stops there. There is no option to
@@ -472,10 +501,10 @@ overwrites, and how to carry on from a block that stopped.
   bits are shale's — a setgid bit inherited from `~/.dotfiles` gives you `2700` on every build, and
   `doctor` says nothing about that.
 - Shale sets the mode of a directory it creates in `$HOME`, and never widens one that was already
-  there. So a `~/.ssh` you keep at `700` survives a layer that a clone left at `755`. `apply` says
-  in one line that it left such a directory alone, `doctor` names each one and both ways to settle
-  it, and `doctor` stays green — nothing is broken, and the directory shale kept is the safer of
-  the two.
+  there. So a `~/.ssh` you keep at `700` survives a layer that declares `755`. `apply` says in one
+  line that it left such a directory alone, `doctor` names each one and both ways to settle it —
+  change the declaration, or `chmod` the directory yourself — and `doctor` stays green, since
+  nothing is broken and the directory shale kept is the safer of the two.
 
 ## Licence
 

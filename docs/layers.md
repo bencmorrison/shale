@@ -339,88 +339,193 @@ Git cannot store an empty directory. Ship a `.gitkeep` in it, and expect it in `
 it like any other file and stow links it. `~/.config/zsh/rc.d/.gitkeep` is the price of a fragment
 directory that starts out empty.
 
-## Permissions on a directory
+## Permissions
 
-A file arrives in `$HOME` with the mode it has in the layer, and so does the directory holding it, as
-long as shale is the one that created it. `~/.ssh` at `700` in a layer is `700` in
-`~/.dotfiles/current` and `700` in `$HOME`, on a machine at any umask. Nothing about the machine you
-build on decides it.
+**Git records none of this.** A tree entry has no permission bits at all, and a blob's are one
+executable bit, so a freshly cloned layer has whatever the clone's umask gave it — `755` on most
+machines, `775` on Debian and Ubuntu, and `644` for a `config` you committed at `600`. Nothing you
+`chmod` in a working tree survives the trip to the next machine.
 
-One bit is shale's rather than the layer's: the owner's `rwx` is always on. A layer directory at
-`550` composes as `750`. Shale has to be able to write into a directory it has just created — the
-next layer composes into it, and an interrupted build has to be able to delete the tree it left
-behind — and a directory in `$HOME` you cannot enter is not an arrangement any dotfile wants. The
-group and world bits, which are the ones that decide whether `~/.ssh` is safe, are copied exactly.
+So a mode you want is a mode you declare. `.shale-modes`, at the top of the clone root and committed
+with the layers, is plain text — which is the one thing git carries perfectly:
 
-Where two layers provide the same directory, the mode is the last one's, exactly as its files are.
-That includes a layer that provides only one file inside it: a `local` layer adding
-`~/.ssh/known_hosts` hands the mode of `~/.ssh` to `local`, whatever the base layer says. Put the
-mode you want on the directory in every layer that has it.
+```
+~/.dotfiles/
+  shale.conf          this machine's
+  personal/           the clone root, the git repository
+    .shale-ignore     committed
+    .shale-modes      committed
+    base/  wsl/
+```
 
-Directories in `$HOME` are set by `apply` after stow has run, because stow does not carry a mode:
-under `--no-folding` it creates each directory with the umask of whoever ran it and never with the
-mode of the built tree.
+```
+# ~/.dotfiles/personal/.shale-modes
+# Blank lines and lines starting with '#' are ignored.
+700  .ssh
+600  .ssh/config
+700  .gnupg
+600  .netrc
+```
+
+The mode first, in `chmod`'s own order, then the path — relative to the **layer root**, which is the
+top of the tree a layer mirrors, so `.ssh/config` is the same spelling you would use with `shale
+which`. One or more spaces or tabs between them; only the first run separates the two, so a path with
+a space in it needs no quoting.
+
+A declaration covers a file as readily as a directory. A `600` on a config is as lost to a clone as a
+`700` on a directory, and shale does not have to guess which of your files are secret if you tell it.
+
+### What a declaration does
+
+`build` sets the declared mode on the path in `~/.dotfiles/current`. `apply` sets it again on the
+directory stow makes in `$HOME` — stow carries no mode of its own, creating each directory with
+`mkdir` and the umask of whoever ran it. A declared *file* needs nothing in `$HOME`: what is there is
+a symlink into `current/`, and reading through it reads the file the build already set the mode on.
+
+The result is the same on every machine at every umask, which is the whole point:
+
+```
+committed:                     .ssh=700  .ssh/config=600
+clone at umask 022, apply:     ~/.ssh=700  ~/.ssh/config=600
+clone at umask 002, apply:     ~/.ssh=700  ~/.ssh/config=600
+```
+
+One digit is shale's rather than yours: **the owner's triad is always `7` for a directory.** Only
+that digit, and the other two are taken exactly as written:
+
+```
+declared:  050  500  000  070  007
+composed:  750  700  700  770  707
+```
+
+Shale has to write into a directory it has just created — the next layer composes into it, and an
+interrupted build has to be able to delete the tree it left behind — and a directory in `$HOME` you
+cannot enter is not an arrangement any dotfile wants, nor one stow can descend to link what is
+inside. The group and world bits, which are the ones that decide whether `~/.ssh` is safe, are
+untouched by it. A declared *file* gets all three digits unchanged.
+
+**A directory nobody declares is `755`** in `current/`, at any umask, and shale sets nothing at all
+for it in `$HOME` — there it is stow's `mkdir` against your umask, as it was before any of this.
+Shale acts on the paths it was told about and no others.
+
+### What stops a build
+
+- **A path no layer provides.** A declaration for a file you have since renamed is otherwise a silent
+  no-op, and the mode goes missing on the next machine with every command exiting 0. Shale names the
+  file and the line: `.shale-modes:2: no layer provides '.ssh/id_rsa'`. Correct the path or remove
+  the line.
+- **A path that is a symlink.** `chmod` follows one, so honouring the line would set the mode of
+  whatever it points at, somewhere else entirely, and there is no portable way to do the other thing.
+- **Four octal digits.** Setuid, setgid and the sticky bit are refused rather than set on a path in
+  your home directory: everything created inside a `setgid` directory afterwards takes its group,
+  including files no layer ever named. `0700` is refused by the same rule, and the message names the
+  three digits to write instead.
+- **A glob.** `600 .ssh/*` is refused: one exact path per line. Exact paths are also what makes
+  precedence between two clone roots something you can read.
+- **`..`, a leading `/`, a trailing `/`, an empty component.** Each refused by name.
+
+`shale doctor` finds every one of these before a build, and each is a problem rather than a note: no
+build runs until it is fixed.
+
+### Two roots declaring one path
+
+Config order, like everything else — the last one read wins. `shale which` names the line that
+decides a path, and the lines it shadows:
+
+```
+$ shale which .ssh
+merged    work  /home/you/.dotfiles/work/base/.ssh/
+merged    base  /home/you/.dotfiles/personal/base/.ssh/
+shale: note: '.ssh' is declared mode 755 at /home/you/.dotfiles/work/.shale-modes:1
+shale:   shadowed: /home/you/.dotfiles/personal/.shale-modes:1 declares 700
+shale:   shale sets that mode on /home/you/.dotfiles/current/.ssh
+shale:   and on /home/you/.ssh, where it never widens a directory that was already there
+```
+
+`merged` rather than `winner` because both providers are directories and directories merge; the
+trailing slash is how `which` writes one. For a declared file the last line is different, because
+what is in `$HOME` is a link and the mode lives on the copy the link points at:
+
+```
+$ shale which .netrc
+winner    base  /home/you/.dotfiles/personal/base/.netrc
+shale: note: '.netrc' is declared mode 600 at /home/you/.dotfiles/personal/.shale-modes:2
+shale:   shale sets that mode on /home/you/.dotfiles/current/.netrc
+shale:   /home/you/.netrc is a link into that tree, so that is the mode read through it
+```
+
+Neither last line is printed for a path an ignore list covers: no apply links one, so no apply sets a
+mode on one, and the note below the table says so.
+
+### Never-widen, in `$HOME`
 
 **A directory that was already in `$HOME` before the apply is only ever narrowed.** Keep `~/.ssh` at
-`700` and add a layer whose `.ssh` is `755` — the mode a clone gives it — and the apply leaves your
-`700` alone. The same layer against a `~/.ssh` that does not exist yet, or one at `755`, gives you the
-layer's mode exactly. The rule is the asymmetry: a mode fix that quietly opens `~/.ssh` is worse than
-the mode being wrong.
+`700` and add a layer declaring `755`, and the apply leaves your `700` alone. The same declaration
+against a `~/.ssh` that does not exist yet, or one at `775`, gives you `755` exactly.
 
-`apply` says so in one line, with the count and no more, because after a clone this is the ordinary
-state rather than a rare one and it lasts until you change something:
+The asymmetry is the rule: a declaration is what a layer's author asked for, the mode on the machine
+is yours, and a mode fix that quietly opens `~/.ssh` is worse than the mode being wrong.
+
+`apply` says so in one line, with the count and no more, because this is a standing disagreement
+rather than an event and it lasts until you change one side:
 
 ```
 shale: 1 directory in /home/you was left as it is: shale never widens one that was already there; 'shale doctor' names it
 ```
 
-`shale doctor` is where the detail is. It names each path, the mode it has and the mode the layer
-gives, as a note rather than a problem — the directory that survives is the *safer* of the two, so
-nothing here is broken and `doctor` still exits 0:
+`shale doctor` is where the detail is, as a note rather than a problem — the directory that survives
+is the *safer* of the two, so nothing is broken and `doctor` still exits 0:
 
 ```
 shale: an apply left 1 directory in /home/you as it is
-shale:   /home/you/.ssh is 0700, and the layer that provides it gives 0755
+shale:   /home/you/.ssh is 700, and shale is asked for 755
 shale:   shale sets the mode of a directory it creates in /home/you, and never widens one that was already there
-shale:   to take the mode the layer gives, chmod that directory yourself
-shale:   to keep the mode it has, set that mode on the directory in the layer: 'shale which' names the layer for a path
-shale: no problems found, but read the note above
+shale:   to take the mode the declaration asks for, chmod that directory yourself
+shale:   to keep the mode it has, change the declaration: 'shale which' names the line that decides a path
 ```
 
 `apply` exits 0 either way — nothing it was asked to do was left undone. A mode it cannot set at all
 is a different thing: that is named on stderr and `apply` exits 1 with the links in place.
 
-Nothing is set on a path an ignore list blocks, in `$HOME` or below it. No apply links anything
-there, so the `~/.cache` a layer names in `.shale-ignore` is yours and shale does not touch its mode
-— the same paths `shale which` reports as ignored.
+### A declaration that never reached `$HOME`
 
-`setgid`, `setuid` and the sticky bit are copied with the rest. A layer directory that is `2775` makes
-`$HOME`'s `2775`, and everything created inside it afterwards takes that directory's group. That is
-rarely what anyone intends and is easy to acquire by accident, since a directory created inside a
-`setgid` parent inherits the bit: check with `ls -ld` if a layer of yours lives on a shared volume.
+The other way a line can go unhonoured is the path not being linked at all — stow declined it, or
+something removed the link. The mode is on the copy in `current/` and on nothing anybody uses, and
+`doctor` says so as a note:
 
-**Git records none of this.** A tree entry has no permission bits at all, and a blob's are one
-executable bit, so a freshly cloned layer has whatever the clone's umask gave it — `755` on most
-machines, `775` on Debian and Ubuntu, and `644` for a `config` you committed at `600`. Shale copies
-what is in the working tree, faithfully, and what is in the working tree after a clone is not what
-you committed. Where a mode matters, set it after cloning:
-
-```sh
-chmod 700 ~/.dotfiles/personal/base/.ssh ~/.dotfiles/personal/base/.gnupg
-chmod 600 ~/.dotfiles/personal/base/.ssh/config
 ```
+shale: 1 declared mode is not on anything in /home/you
+shale:   /home/you/.dotfiles/personal/.shale-modes:4 declares 600, and nothing in /home/you is at /home/you/.netrc
+shale:   the built tree holds each of these paths with the declared mode on it, and an apply is what puts one in /home/you
+shale:   'shale which PATH' says why a path in the tree is not linked
+```
+
+Nothing is set on a path an ignore list blocks, in `$HOME` or below it, declaration or no
+declaration. No apply links anything there, so the `~/.cache` a layer names in `.shale-ignore` is
+yours and shale does not touch its mode — the same paths `shale which` reports as ignored. `doctor`
+says nothing about one either.
+
+### Where the file is read
+
+One `.shale-modes` per clone root — the top of the first component of each layer path — and every one
+of them concatenated into a single list, exactly as `.shale-ignore` is. Shale reads these files and
+composes none of them, at any depth, the way it never composes a `.git`, so one never reaches `$HOME`
+even when a clone root is named as a layer itself. A `.shale-modes` beside the config, or anywhere
+inside a layer, is read by nothing; `shale doctor` names those, because silence there is a file of
+declarations doing nothing.
 
 ## Permissions on the built tree itself
 
 `~/.dotfiles/current` is `700`, and so are `current.new`, any `current.old` and the lock at
-`~/.dotfiles/.lock`. No layer provides those, so there is no mode to copy: shale picks one, and picks
-the narrowest, on every machine at every umask.
+`~/.dotfiles/.lock`. No layer provides those and no line declares them: shale picks one mode, and
+picks the narrowest, on every machine at every umask.
 
 It matters more than it looks. Every symlink shale makes in `$HOME` resolves *through* that
 directory, so its mode is what decides who may read the file at the end of the link and who may
-replace it — and what is inside it is a copy of every file of every layer, at whatever mode the layer
-has. Read the paragraph above again: a clone gives you `644` on a `config` you committed at `600`.
-`700` on the tree is what contains that mistake.
+replace it — and what is inside it is a copy of every file of every layer, at whatever mode a clone
+left it. Read the first paragraph of the section above again: a clone gives you `644` on a `config`
+you committed at `600`, and it stays `644` until a line says otherwise. `700` on the tree is what
+contains that mistake in the meantime.
 
 The cost is that nothing but you can walk the built tree. Nothing shale runs needs to — stow reads it
 as you, and so does every other command here — but if your `$HOME` is group-readable by design and
@@ -442,8 +547,8 @@ across. So a `~/.dotfiles` on a shared volume gives you `2700` here rather than 
 build, and `doctor` says nothing about it — that bit is yours. It is the mode of a genuinely wide
 tree, `2755` say, that `doctor` reports, and it reports the whole of it so you can see both halves.
 
-The modes *inside* the tree are the layers' and are untouched by this: `current/.ssh` is whatever the
-section above says it is.
+The modes *inside* the tree are untouched by this: `current/.ssh` is whatever the section above says
+it is — the declared mode, or `755` for a directory nobody declared.
 
 ## What a layer must not ship
 
