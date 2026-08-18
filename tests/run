@@ -8082,6 +8082,12 @@ test_doctor_names_the_ignore_patterns_in_force() {
   conf 'base common/base' 'local local'
   mklayer common/base .zshrc
   mklayer local .vimrc
+  # The junk the patterns below are written for, in the layers before the build
+  # so the tree holds it: what the list is withholding from $HOME is the whole
+  # of why the list is named at all.
+  mklayer common/base .DS_Store
+  mklayer common/base notes.swp
+  mklayer local Thumbs.db
   mkignore common '# junk' '.DS_Store' '*.swp'
   mkignore local 'Thumbs.db'
   # Applied first, so that the closing line counts this note and nothing else:
@@ -8091,15 +8097,16 @@ test_doctor_names_the_ignore_patterns_in_force() {
   assert_status 0 "$shale_status" 'the apply'
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale: 3 ignore patterns are in force' 'stdout'
+  assert_contains "$shale_out" \
+    'shale: 3 ignore patterns are in force, and the built tree holds 3 files they cover' 'stdout'
   assert_contains "$shale_out" \
     "shale:   shale writes them into $HOME/.dotfiles/current/.stow-local-ignore, below stow's own list, so no apply links a path they match" \
     'stdout'
   # The qualification is not decoration: without it this headline reads as a
-  # claim about $HOME as it stands, four lines above findings naming links at
-  # exactly the paths it just said nothing links.
+  # claim about $HOME as it stands, above findings naming links at exactly the
+  # paths it just said nothing links.
   assert_contains "$shale_out" \
-    'shale:   a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named below' \
+    'shale:   a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named above' \
     'stdout'
   assert_contains "$shale_out" "shale:   $HOME/.dotfiles/common/.shale-ignore" 'stdout'
   assert_contains "$shale_out" 'shale:   line 2: .DS_Store' 'stdout'
@@ -8110,11 +8117,13 @@ test_doctor_names_the_ignore_patterns_in_force() {
   mkignore local '# nothing here now'
   run_shale doctor
   assert_status 0 "$shale_status" 'the second doctor'
-  assert_contains "$shale_out" 'shale: 2 ignore patterns are in force' 'the second stdout'
+  assert_contains "$shale_out" \
+    'shale: 2 ignore patterns are in force, and the built tree holds 2 files they cover' 'the second stdout'
   mkignore common '.DS_Store'
   run_shale doctor
   assert_status 0 "$shale_status" 'the third doctor'
-  assert_contains "$shale_out" 'shale: 1 ignore pattern is in force' 'the third stdout'
+  assert_contains "$shale_out" \
+    'shale: 1 ignore pattern is in force, and the built tree holds 1 file it covers' 'the third stdout'
   assert_contains "$shale_out" \
     "shale:   shale writes it into $HOME/.dotfiles/current/.stow-local-ignore, below stow's own list, so no apply links a path it matches" \
     'the third stdout'
@@ -8132,6 +8141,52 @@ test_doctor_says_nothing_about_ignoring_without_an_ignore_file() {
   assert_not_contains "$shale_out" 'ignore pattern' 'stdout'
   assert_not_contains "$shale_out" 'stow-local-ignore' 'stdout'
   assert_eq "$(doctor_unapplied_report)" "$shale_out" 'stdout'
+}
+
+# A walk that could not read the whole built tree may not answer 'nothing': the
+# directory it could not open is exactly where a covered file hides, so a report
+# that went quiet about the list there would be answering a question it never
+# got to ask.  What goes is the count, not the note.
+test_doctor_names_the_ignore_patterns_where_it_could_not_read_the_tree() {
+  local doctor_out doctor_status
+  skip_if_root
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mklayer common/base sub/.DS_Store
+  mkignore common '.DS_Store'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  chmod 0000 "$HOME/.dotfiles/current/sub" || fail 'could not remove the mode bits'
+  run_shale doctor
+  doctor_out=$shale_out
+  doctor_status=$shale_status
+  chmod 0755 "$HOME/.dotfiles/current/sub" || fail 'could not restore the mode'
+  assert_status 0 "$doctor_status"
+  assert_contains "$doctor_out" 'shale: 1 ignore pattern is in force' 'stdout'
+  # The only file the pattern covers is under the directory nothing could open,
+  # so there is no count to state and none is stated.
+  assert_not_contains "$doctor_out" 'the built tree holds' 'stdout'
+  assert_contains "$doctor_out" "shale:   $HOME/.dotfiles/common/.shale-ignore" 'stdout'
+  assert_contains "$doctor_out" 'shale:   line 1: .DS_Store' 'stdout'
+}
+
+# And the silence that matters more, because README tells a first-time reader to
+# write exactly this file: patterns that cover nothing in the built tree are
+# withholding nothing from $HOME, and a list is not news for existing.  Naming
+# it on every run put five lines above every report and left 'no problems found'
+# unreachable for anyone who took that advice.
+test_doctor_says_nothing_about_an_ignore_list_that_covers_nothing() {
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mkignore common '.DS_Store' '*.swp'
+  # Applied, so that the report below is the bare verdict rather than the note
+  # doctor prints for a tree nothing has linked.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+  assert_empty "$shale_err" 'stderr'
 }
 
 # doctor names the paths in $HOME that stow will refuse to write over, and it
@@ -8514,6 +8569,12 @@ test_doctor_names_links_left_behind_by_a_new_pattern() {
   assert_contains "$shale_out" 'shale: remove the links named above' 'stdout'
   assert_contains "$shale_out" \
     'shale:   stow skips an ignored path rather than unstowing it, so no build or apply removes one' 'stdout'
+  # The list itself, under the links it covers: this is the report that has a
+  # reason to show which pattern took which file out of $HOME, and the file to
+  # edit is the one thing a reader with a link to remove still has to find.
+  assert_contains "$shale_out" \
+    'shale: 2 ignore patterns are in force, and the built tree holds 2 files they cover' 'stdout'
+  assert_contains "$shale_out" 'shale:   line 2: junk' 'stdout'
   assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
   # The remedy is the whole of the fix: no rebuild, no reapply.  The directory
   # is resolved and the leaf removed from it, sandbox_leaf refusing to hand back
@@ -8676,6 +8737,9 @@ test_doctor_notes_an_ignore_file_nothing_reads() {
   mklayer common/base .zshrc
   mklayer local .vimrc
   mklayer local/sub .inputrc
+  # Covered by the one ignore file shale does read, so that its patterns are in
+  # the report below to contrast with the four that are read by nothing.
+  mklayer local Thumbs.db
   sandbox_write "$HOME/.dotfiles" .shale-ignore '.DS_Store'
   sandbox_write "$HOME/.dotfiles/common/base" .shale-ignore '.DS_Store'
   sandbox_write "$HOME/.dotfiles/common/base/.config/nvim" .shale-ignore '.DS_Store'
@@ -8698,7 +8762,8 @@ test_doctor_notes_an_ignore_file_nothing_reads() {
   # The one shale does read is a layer's top as well, and is not named.
   assert_not_contains "$shale_out" \
     "shale: $HOME/.dotfiles/local/.shale-ignore is read by nothing" 'stdout'
-  assert_contains "$shale_out" 'shale: 1 ignore pattern is in force' 'stdout'
+  assert_contains "$shale_out" \
+    'shale: 1 ignore pattern is in force, and the built tree holds 1 file it covers' 'stdout'
   # Once, however many layers' walks reach it: 'local' descends into 'sub' and
   # 'local/sub' lists it directly, so without the dedup this file is named
   # twice and counted twice.
@@ -10978,17 +11043,19 @@ test_doctor_notes_a_leftover_scratch_tree() {
   assert_eq 'shale: no problems found' "$shale_out" 'the whole report after the build'
 }
 
-# The tree a build keeps deliberately, which until now sat in ~/.dotfiles with
-# nothing saying what it was: the build that kept it named the one file, and one
-# build later that message is scrollback and the copy is gone.
-test_doctor_notes_the_tree_the_last_build_kept() {
+# The tree a build keeps deliberately, and the state that made 'no problems
+# found' unreachable: editing a layer is what keeps it, so a report that named
+# it said something on every run for two builds after every edit.  The build
+# that kept it is what names the file it kept - here, the hand-edited copy - and
+# the next build reaps the tree, so doctor has nothing of its own to add.
+test_doctor_says_nothing_about_the_tree_the_last_build_kept() {
   conf 'base personal/base' 'local local'
   mklayer personal/base .zshrc
   mklayer local .zshrc
   sandbox_mkdir "$HOME/.dotfiles/local"
   touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
-  # Applied, so that the note counted below is this one: a built tree nothing
-  # has linked is a note of its own.
+  # Applied, so that a clean report here is the bare verdict: a built tree
+  # nothing has linked is a note of its own.
   run_shale apply
   assert_status 0 "$shale_status" 'the first apply'
   assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
@@ -10999,18 +11066,87 @@ test_doctor_notes_the_tree_the_last_build_kept() {
   run_shale build
   assert_status 0 "$shale_status" 'the build that keeps the tree'
   assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
+  # The signal that survives this silence, and the one that names the path: the
+  # build itself, at the moment it keeps the tree.
+  assert_contains "$shale_err" \
+    "shale:   the layer copy wins; what was there is kept at $HOME/.dotfiles/current.old/.zshrc until the next build, to copy into a layer if it was your edit" \
+    'the build stderr'
   run_shale doctor
   assert_status 0 "$shale_status"
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# The everyday loop the report has to stay quiet through: edit one line of one
+# layer file, rebuild, and every path that layer provides is newer than the copy
+# the build replaces, so the build keeps current.old.  Doing what README
+# recommends may not cost a reader their clean report.
+test_doctor_says_nothing_about_the_tree_an_ordinary_rebuild_kept() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  # Dated, so that the edit below is newer than the built copy by more than a
+  # filesystem's timestamp resolution, whatever that resolution is.
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
+  mklayer personal/base .zshrc 'edited'
+  run_shale build
+  assert_status 0 "$shale_status" 'the rebuild'
+  assert_empty "$shale_err" 'the rebuild stderr'
+  assert_exists "$HOME/.dotfiles/current.old" 'the tree the rebuild kept'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+  assert_empty "$shale_err" 'stderr'
+}
+
+# And where that silence would be wrong: the tree is reaped by the next build,
+# so it is worth a line exactly where there is not going to be one.  The note
+# says what happened rather than reporting a fault - an edited layer is the
+# ordinary cause, and a reader told their build 'replaced a file that did not
+# match' goes looking for damage that is not there.
+test_doctor_names_the_kept_tree_no_build_will_clear() {
+  local line first
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  sandbox_mkdir "$HOME/.dotfiles/current.old"
+  # A layer with no directory and no url, which stops every build from now on.
+  conf 'base personal/base' 'gone gone'
+  run_shale doctor
+  assert_status 1 "$shale_status"
   assert_contains "$shale_out" \
     "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
   assert_contains "$shale_out" \
-    'shale:   a build keeps it where it replaced a file that did not match the layer copy providing it' \
+    'shale:   the last build kept it because the copies it replaced were not the ones the layers now provide' \
     'stdout'
-  assert_contains "$shale_out" 'shale:   the next build removes it' 'stdout'
+  # Neither direction of the comparison is named: an edited layer keeps this
+  # tree and so does a file moved into the built tree, and the line under this
+  # one is only worth reading if the cause was the second.
+  assert_not_contains "$shale_out" 'which is what editing a layer does' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   no build will run until the problems above are fixed, so it stays where it is' 'stdout'
   assert_contains "$shale_out" \
     'shale:   copy anything in it you want to keep into a layer first' 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
-  assert_empty "$shale_err" 'stderr'
+  assert_not_contains "$shale_out" 'did not match the layer copy' 'stdout'
+  # The finding is the first thing the report says, not the fifth: a note that
+  # follows the reader's ordinary use may not stand above the one line they ran
+  # doctor to find.
+  first=
+  while IFS= read -r line; do
+    case "$line" in
+      'shale:   '*) ;;
+      'shale: '*) [ -n "$first" ] || first=$line ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq \
+    "shale: layer 'gone' has no directory at $HOME/.dotfiles/gone and no url for 'gone'" \
+    "$first" 'the first line of the report'
 }
 
 # The state a kill between the two renames leaves, which is the one where saying
@@ -11104,22 +11240,22 @@ test_doctor_names_no_interrupted_build_where_there_cannot_have_been_one() {
 # Nothing has looked inside either tree, so nothing may say what is in one.  An
 # empty current.old is the state a build that composed no file at all leaves,
 # and 'copy anything in it you want to keep' is the whole of what a report that
-# did not walk it can offer.
+# did not walk it can offer.  The blocked build is what makes the note print at
+# all: with one to reap the tree there is nothing to say about it.
 test_doctor_claims_no_contents_for_a_tree_it_has_not_walked() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  # Applied, so that the note counted below is this one: a built tree nothing
-  # has linked is a note of its own.
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   sandbox_mkdir "$HOME/.dotfiles/current.old"
+  conf 'base personal/base' 'gone gone'
   run_shale doctor
-  assert_status 0 "$shale_status"
+  assert_status 1 "$shale_status"
   assert_contains "$shale_out" \
     "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
   assert_not_contains "$shale_out" 'holds what' 'stdout'
   assert_not_contains "$shale_out" 'it is the only copy' 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
 }
 
 # Every line doctor prints that says what the next build does is gated on there

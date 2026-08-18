@@ -2535,6 +2535,13 @@ BUILD_BLOCKED=0
 # build runs without it, so a report that stopped offering one would be wrong
 # about the command that still works.
 APPLY_TOOL_MISSING=0
+# The same, for the two audit_ignored_links leaves behind it: cmd_doctor reads
+# both from outside the function that writes them, and the shell takes an
+# increment of an unset name under 'set -u' down with it rather than counting
+# wrongly.  A 'return' added above the pair inside that function would otherwise
+# turn a wrong count into a dead script.
+IGNORED_FILE_COUNT=0
+IGNORED_WALK_PARTIAL=0
 
 # Zero when doctor may offer an apply.  Every line it prints that names 'shale
 # apply' is gated on this - one question, answered in one place, so that the
@@ -3736,7 +3743,14 @@ audit_unapplied_tree() {
 scan_ignored_links() {
   local rel=$1 inherited=$2 cap=$3 here e base srel ignored link
   here=$CUR${rel:+/$rel}
-  { [ -r "$here" ] && [ -x "$here" ]; } || return 0
+  if [ ! -r "$here" ] || [ ! -x "$here" ]; then
+    # Recorded, because the count this walk fills is read as an answer about the
+    # whole tree: a directory it could not open holds files it cannot say are
+    # covered, and 'covered nothing' and 'could not look' are not the same
+    # report.  audit_built_tree names the directory itself, so nothing here does.
+    IGNORED_WALK_PARTIAL=1
+    return 0
+  fi
   # Both patterns, and '.' and '..' dropped by name, whatever the glob options
   # say about them.
   list_dir "$here" 1
@@ -3765,6 +3779,13 @@ scan_ignored_links() {
       continue
     fi
     [ "$ignored" -ne 0 ] || continue
+    # The files an ignore file's own patterns hold out of $HOME, whether or not
+    # a link was ever made at one: what makes the list worth naming is that it
+    # is withholding something, and this is the count that says whether it is.
+    # stow's own list is not counted - there is no line of anybody's to edit for
+    # it, so a report naming the configured patterns for it would send the
+    # reader to the wrong file.
+    [ "$ignored" -ne 1 ] || IGNORED_FILE_COUNT=$((IGNORED_FILE_COUNT + 1))
     # --no-folding gives every file its own link, so the link that has to go is
     # at the leaf however far above it the pattern matched.
     link=$HOME_PREFIX/$srel
@@ -3797,6 +3818,12 @@ scan_ignored_links() {
 # They stop no build, so BUILD_BLOCKED is left alone.
 audit_ignored_links() {
   local cap n i rest msg lines links made removes
+  # Ahead of the three refusals below, and the whole of what says the walk
+  # happened: the note cmd_doctor prints from this count reads a tree that was
+  # never walked as a list covering nothing, which is what a tree that is not
+  # there holds.
+  IGNORED_FILE_COUNT=0
+  IGNORED_WALK_PARTIAL=0
   [ -d "$CUR" ] || return 0
   [ ! -L "$CUR" ] || return 0
   [ -n "${HOME-}" ] || return 0
@@ -5858,7 +5885,7 @@ cmd_apply() {
 # before it found, and only the finding count decides the exit status.
 cmd_doctor() {
   local tool i n name path root dir entry leaf known remedy qlock lines layers
-  local pending removed
+  local pending removed covers
 
   FINDINGS=0
   NOTES=0
@@ -6158,43 +6185,6 @@ cmd_doctor() {
     done
   fi
 
-  # The patterns in force, named for the reason the resource file below is: one
-  # that matches more than it was meant to leaves a real file unlinked with
-  # apply exiting 0, and this is the only place they are all shown without
-  # reading the built tree by hand.  A note, never a finding - somebody wrote
-  # them on purpose - and printed only where there are some, so a tree with no
-  # ignore file reports exactly as it did before there were any.
-  #
-  # Grouped by file, because they concatenate across clone roots and 'which
-  # file do I edit' is the question the list is read with.
-  if [ "${#IGNORE_PATTERNS[@]}" -gt 0 ]; then
-    n=${#IGNORE_PATTERNS[@]}
-    # The second line says what an apply does and the third what it does not
-    # undo, because without the third this headline reads as a claim about
-    # $HOME as it stands - and the links audit_ignored_links names below are
-    # exactly the paths it would then be contradicting.
-    if [ "$n" -eq 1 ]; then
-      lines=('1 ignore pattern is in force'
-        "shale writes it into $CUR/.stow-local-ignore, below stow's own list, so no apply links a path it matches"
-        'a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named below')
-    else
-      lines=("$n ignore patterns are in force"
-        "shale writes them into $CUR/.stow-local-ignore, below stow's own list, so no apply links a path they match"
-        'a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named below')
-    fi
-    entry=
-    i=0
-    while [ "$i" -lt "$n" ]; do
-      if [ "${IGNORE_FILES[$i]}" != "$entry" ]; then
-        entry=${IGNORE_FILES[$i]}
-        lines[${#lines[@]}]=$entry
-      fi
-      lines[${#lines[@]}]="line ${IGNORE_LINES[$i]}: ${IGNORE_PATTERNS[$i]}"
-      i=$((i + 1))
-    done
-    note ${lines[@]+"${lines[@]}"}
-  fi
-
   # One of shale's own two files where shale does not read it: beside the
   # config, where the config is, or anywhere inside a layer, which the walk
   # above found at any depth.  Neither is read by anything and neither is
@@ -6268,6 +6258,65 @@ cmd_doctor() {
   # list covers, against what $HOME still links.
   audit_ignored_links
 
+  # The patterns in force, under the walk that says whether they are doing
+  # anything: one that matches more than it was meant to leaves a real file
+  # unlinked with apply exiting 0, and this is the only place they are all shown
+  # without reading the built tree by hand.  A note, never a finding - somebody
+  # wrote them on purpose.
+  #
+  # Printed where the built tree holds a file they cover, which is what gives
+  # the reader something to check the list against.  Having patterns is not
+  # news: README tells a first-time reader to write '.DS_Store' into an ignore
+  # file, and a report that named the list for existing put five lines above
+  # every run they ever made and left 'no problems found' saying nothing by
+  # never appearing alone.  A pattern that covers nothing is withholding
+  # nothing, and has no file in $HOME or in the tree to be wrong about.
+  #
+  # And printed where the walk could not read the whole tree, with the count
+  # left off rather than stated: a directory it could not open is where a
+  # covered file hides, so silence there would be this report answering 'none'
+  # to a question it did not get to ask.  audit_built_tree has already named the
+  # directory; this says the list exists, which is the half that walk cannot.
+  #
+  # Grouped by file, because they concatenate across clone roots and 'which
+  # file do I edit' is the question the list is read with.
+  if [ "${#IGNORE_PATTERNS[@]}" -gt 0 ] &&
+    { [ "$IGNORED_FILE_COUNT" -gt 0 ] || [ "$IGNORED_WALK_PARTIAL" -eq 1 ]; }; then
+    n=${#IGNORE_PATTERNS[@]}
+    entry='files'
+    [ "$IGNORED_FILE_COUNT" -ne 1 ] || entry='file'
+    # The second line says what an apply does and the third what it does not
+    # undo, because without the third this headline reads as a claim about
+    # $HOME as it stands - and the links audit_ignored_links names above are
+    # exactly the paths it would then be contradicting.
+    if [ "$n" -eq 1 ]; then
+      covers=
+      [ "$IGNORED_WALK_PARTIAL" -eq 1 ] ||
+        covers=", and the built tree holds $IGNORED_FILE_COUNT $entry it covers"
+      lines=("1 ignore pattern is in force$covers"
+        "shale writes it into $CUR/.stow-local-ignore, below stow's own list, so no apply links a path it matches"
+        'a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named above')
+    else
+      covers=
+      [ "$IGNORED_WALK_PARTIAL" -eq 1 ] ||
+        covers=", and the built tree holds $IGNORED_FILE_COUNT $entry they cover"
+      lines=("$n ignore patterns are in force$covers"
+        "shale writes them into $CUR/.stow-local-ignore, below stow's own list, so no apply links a path they match"
+        'a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named above')
+    fi
+    entry=
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      if [ "${IGNORE_FILES[$i]}" != "$entry" ]; then
+        entry=${IGNORE_FILES[$i]}
+        lines[${#lines[@]}]=$entry
+      fi
+      lines[${#lines[@]}]="line ${IGNORE_LINES[$i]}: ${IGNORE_PATTERNS[$i]}"
+      i=$((i + 1))
+    done
+    note ${lines[@]+"${lines[@]}"}
+  fi
+
   # The declarations against $HOME: the detail behind the one line an apply
   # prints when it leaves a directory as it is, and the declarations that never
   # reached $HOME at all.
@@ -6306,14 +6355,26 @@ cmd_doctor() {
         'shale clears that path before it swaps' \
         "$removed"
     elif [ -d "$CUR" ] && [ ! -L "$CUR" ]; then
+      # Only where the build that reaps it is not going to run.  Either
+      # direction of the comparison keeps this tree, and an edited layer is one
+      # of them - it leaves every path that layer provides newer than the copy
+      # in the tree - so the everyday loop keeps one on every rebuild, and a
+      # line about it on every run is a line nobody reads.  Neither direction is
+      # named, for the reason the build names neither: what is in the tree is
+      # not doctor's to say, and a cause guessed at sends a reader looking for
+      # the wrong file.  What is left is the one thing the build that kept it
+      # could not know, which is that nothing is coming to clear it.
+      #
       # What the path is for, never what is in it: nothing here has looked, and
       # a build that kept it because one file differed leaves a whole tree, while
       # an empty one told that it holds the last copy of something is a lie in
       # the direction that costs a reader time.
-      note "$OLD is where a build leaves the tree it replaced" \
-        'a build keeps it where it replaced a file that did not match the layer copy providing it' \
-        "$removed" \
-        'copy anything in it you want to keep into a layer first'
+      if [ "$BUILD_BLOCKED" -gt 0 ]; then
+        note "$OLD is where a build leaves the tree it replaced" \
+          'the last build kept it because the copies it replaced were not the ones the layers now provide' \
+          "$removed" \
+          'copy anything in it you want to keep into a layer first'
+      fi
     else
       # The shape a kill between the two renames leaves, and the one a hand that
       # removed $CUR leaves too.  Only what is on disk is stated: the composed

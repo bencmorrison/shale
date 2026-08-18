@@ -15,12 +15,17 @@ this over a connection you are not relying on the dotfiles to make.
 One thing to know before you start, rather than after: do not use `stow --adopt`. Your first apply
 will refuse a pile of conflicts, `--adopt` is what a search turns up for clearing them, and here it
 moves your file out of `$HOME` and into `~/.dotfiles/current`, which is generated output that the
-next `shale build` overwrites. That build says nothing about it — it keeps the whole previous tree
-at `current.old`, so an adopted file survives one build and no more, and the build after that
-removes `current.old`. The command that tells you is `shale doctor`: run it before you build and it
-names the file, run it after and it names `current.old` as a tree the next build removes. Or copy
-the file into a layer instead, and there is nothing to recover. The refusals themselves are covered
-below, each with what to do about it.
+next `shale build` overwrites. That build keeps the whole previous tree at `current.old`, so an
+adopted file survives one build and no more, and the build after that removes `current.old`. What
+the build says about it depends on which way the timestamps fall: a file newer than the layer copy
+it replaces gets three lines on stderr naming it and naming its copy in `current.old`, and one older
+— which is what `--adopt` leaves when the file in `$HOME` predates the layer's — gets nothing,
+because an edited layer leaves that same state and the message would be on the loop you run all day.
+`shale doctor` is what covers the silent direction, and the time to run it is before you build,
+while it still names the file: after the build the copy is in `current.old` and doctor says nothing
+about it either, that tree being what every rebuild leaves. Or copy the file into a layer instead,
+and there is nothing to recover. The refusals themselves are covered below, each with what to do
+about it.
 
 ## Coming from plain files
 
@@ -318,10 +323,11 @@ not detectable — one more reason to copy the file into a layer rather than ado
 same note from a `doctor` run any time after pulling a layer and before building, and it is nothing
 to act on there —
 which is why it is a note and `doctor` still exits 0. Either way the previous tree is at
-`current.old` and your file is in it, until the next clean build removes it. After that build
-`doctor` cannot see the mismatch any more, because the built copy matches the layer again — what it
-still says is that `current.old` is there, what it holds and that the next build removes it, which is
-the last warning you get. Copy the file into a layer instead and there is nothing to recover.
+`current.old` and your file is in it, until the next clean build removes it. The note above is the
+last warning you get: after that build `doctor` cannot see the mismatch any more, because the built
+copy matches the layer again, and it says nothing about `current.old` either — every rebuild leaves
+one, so a line about it would be a line after every edit. Copy the file into a layer instead and
+there is nothing to recover.
 
 ## Links left behind after layers change
 

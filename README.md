@@ -136,10 +136,11 @@ alone, so `bash -x shale build` still works.
 
 The file is still composed into `current/`; the pattern changes only what stow links. So a pattern
 that matches more than it was meant to leaves a real file unlinked with `shale apply` exiting 0, and
-two commands report that: `shale doctor` names every pattern in force with the file and line it came
-from, and `shale which PATH` says when a path is on the list and which pattern put it there. Adding a
-pattern does not unlink what an earlier apply already linked — stow skips an ignored path rather than
-unstowing it — so `doctor` names those leftover links too, and removing them is the whole of the fix.
+two commands report that: `shale doctor` names the patterns in force, with the file and line each
+came from, where the built tree holds a file they cover, and `shale which PATH` says when a path is
+on the list and which pattern put it there. Adding a pattern does not unlink what an earlier apply
+already linked — stow skips an ignored path rather than unstowing it — so `doctor` names those
+leftover links too, and removing them is the whole of the fix.
 [docs/layers.md](docs/layers.md#blocking-a-file-without-removing-it) has the detail.
 
 ## Declaring the mode of a path
@@ -215,8 +216,9 @@ Builds are quiet. A build that finds `current` holding a copy older than the lay
 keeps the previous tree at `~/.dotfiles/current.old` and says nothing, because an edited layer leaves
 exactly that state and a message there would be a message on every edit. `shale doctor` is what
 reports the mismatch, as a note rather than a problem, and only until the build that overwrites it.
-After that build it reports `current.old` instead, until the build after that removes it — see
-[docs/layers.md](docs/layers.md).
+After that build nothing reports it: what was there sits at `~/.dotfiles/current.old` until the next
+build removes it, and `doctor` names it again only where a problem it found means no build is coming
+— see [docs/layers.md](docs/layers.md).
 
 Shale chooses between three exit codes, and no others:
 
@@ -365,9 +367,9 @@ nothing in `$HOME` at a path the layers provide is something no apply put there 
 directory, or a link of your own, none of which stow will write over — that no layer ships
 `.stow-local-ignore`, which shale writes itself, or shale itself, that `~/.dotfiles/current` is a
 directory rather than a file or a link to one, that the
-build lock is neither held nor uncreatable, that nothing in `~/.dotfiles` is a stray, that neither
-`current.new` nor `current.old` has been left beside `current`, and that no
-link in `$HOME` points into the built tree at a path it no longer provides, and that something from
+build lock is neither held nor uncreatable, that nothing in `~/.dotfiles` is a stray, that no
+`current.new` has been left beside `current` and no `current.old` that no build is coming to
+remove, and that no link in `$HOME` points into the built tree at a path it no longer provides, and that something from
 that tree is linked in `$HOME` at all — a built tree with nothing linked is what a machine that has
 never been applied looks like, and nothing in it is in use. Where a `.stowrc` exists
 it names the stow options that file sets, because several of them change an apply and three of them

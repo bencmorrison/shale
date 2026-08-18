@@ -664,13 +664,15 @@ before this syntax existed.
 ### When a pattern arrives late
 
 The file is still composed into `current/`; the pattern changes only what stow links. Two commands
-report what the list is doing:
+report what the list is doing. `doctor` names the list where the built tree holds a file it covers,
+and says nothing about a list that is covering nothing — a pattern written before the junk it is for
+is withholding no file from `$HOME` and has nothing to report:
 
 ```
 $ shale doctor
-shale: 3 ignore patterns are in force
+shale: 3 ignore patterns are in force, and the built tree holds 1 file they cover
 shale:   shale writes them into /home/you/.dotfiles/current/.stow-local-ignore, below stow's own list, so no apply links a path they match
-shale:   a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named below
+shale:   a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named above
 shale:   /home/you/.dotfiles/personal/.shale-ignore
 shale:   line 3: .DS_Store
 shale:   line 4: *.swp
@@ -774,9 +776,11 @@ are still named; what changes is that nothing promises you a `current.old` that 
 never creates.
 
 `doctor` names the files only in the window between one arriving and the next build. Afterwards the
-built copy is the layer's again and the mismatch is gone; what `doctor` says then is that
-`current.old` is there and that the next build removes it, so recovery is `current.old` and one
-build deep. If you use `stow --adopt` against `current/`, run `shale doctor` before you build.
+built copy is the layer's again, the mismatch is gone, and `doctor` says nothing at all — the copy
+is still in `current.old` and still one build from gone, but that tree is what every rebuild leaves
+and naming it after each one would be naming it after every edit. `doctor` names `current.old`
+where a problem it found means no build is coming to clear it, and there only. So the window is the
+one before the build: if you use `stow --adopt` against `current/`, run `shale doctor` first.
 
 ## The everyday loop: build, and when to apply
 
@@ -789,8 +793,9 @@ each layer. It keeps `current.old` — the built copy your edit replaced was old
 the layer copy, which is the state a file moved into the tree also leaves, and shale keeps the
 previous tree either way — but it prints no message about it, because a message there is a message
 on every edit. `shale doctor` is where a built tree its layers have moved past is reported, and
-after a build the mismatch is gone; what doctor names then is `current.old` itself — what it holds,
-and that the next build removes it.
+after a build the mismatch is gone. Doctor is silent about the `current.old` that build left as
+well, for the reason the build is: the next build removes it, and a line about it after every
+rebuild is a line after every edit.
 
 `shale apply` is what you need when a **path** appears or disappears, since making and unmaking links
 is stow's job and nothing else does it:
