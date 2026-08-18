@@ -9275,6 +9275,54 @@ test_doctor_names_a_directory_an_apply_left_as_it_is() {
     "shale: an apply left 1 directory in $HOME as it is" 'stdout'
 }
 
+# 'shale which' is a remedy like any other, and the one state it refuses in is a
+# state doctor is often run in: it parses the config before it answers anything,
+# and a config error is exactly what BUILD_BLOCKED is folded from.  So both
+# lines that name it are gated on the parse rather than on apply_offerable -
+# which is a different question, and would suppress them for a missing stow that
+# 'which' does not need.
+#
+# Both notes in one fixture, because both name it: a directory an apply left as
+# it is, and a declaration nothing in $HOME answers.
+test_doctor_offers_no_which_while_the_config_does_not_parse() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .ssh/config
+  mklayer personal/base .gnupg/gpg.conf
+  mkmodes personal '755  .ssh' '700  .gnupg'
+  sandbox_mkdir "$HOME/.ssh"
+  chmod 0700 "$sandbox_dir" || fail 'could not set the home directory mode'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  # The second note: a declared path with nothing in $HOME at it, while the rest
+  # of the tree is linked.
+  sandbox_mkdir "$HOME"
+  rm -rf "$sandbox_dir/.gnupg" || fail 'could not remove the declared directory'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the sound setup'
+  assert_contains "$shale_out" \
+    "shale:   to keep the mode it has, change the declaration: 'shale which' names the line that decides a path" \
+    'the sound stdout'
+  assert_contains "$shale_out" \
+    "shale:   'shale which PATH' says why a path in the tree is not linked" 'the sound stdout'
+  # A duplicate layer name: the line is refused, the layer above it stands, and
+  # every command that parses this file exits 1 - 'which' included.
+  conf 'base personal/base' 'base personal/other'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the setup with the config error'
+  # The notes themselves stay: what they say about $HOME is still true, and only
+  # the command they named has stopped working.
+  assert_contains "$shale_out" \
+    "shale: an apply left 1 directory in $HOME as it is" 'the blocked stdout'
+  assert_contains "$shale_out" \
+    "shale: 1 declared mode is not on anything in $HOME" 'the blocked stdout'
+  assert_not_contains "$shale_out" 'shale which' 'the blocked stdout'
+  # The command those lines would have named.
+  run_shale which .ssh/config
+  assert_status 1 "$shale_status" 'the which the lines refuse to offer'
+  assert_contains "$shale_err" 'duplicate layer name' 'the which stderr'
+}
+
 # The note may not swallow a real problem, and a real problem may not swallow
 # the note: one run holding both has to exit 1 for the finding, print the
 # finding's own count, and still carry every line of the note.
@@ -10242,6 +10290,151 @@ test_doctor_the_remedy_names_both_where_an_apply_clears_only_some() {
   assert_contains "$shale_out" \
     'shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
     'the stdout after the apply'
+}
+
+# The three cases below are one rule in three states: a link an apply would
+# clear is still a link no apply is going to clear while something else in the
+# report stops the apply.  Each is written around a single gate, and each runs
+# the sound state first - the line is right in that half, and a doctor that had
+# simply stopped printing it would pass a case that only looked at the blocked
+# one.
+#
+# A blocked build, which stops the apply's first half: an apply builds before it
+# stows.  The mixed shape, because it is where the apply is named twice - once
+# for the links it takes off the list, and once at the end of the sweep.
+test_doctor_offers_no_apply_for_an_orphan_while_the_build_is_blocked() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .tmux.conf
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  # One file that left its only layer, which stow prunes, and one directory that
+  # left every layer, which it does not.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .tmux.conf
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the sound setup'
+  assert_contains "$shale_out" \
+    'shale:   an apply clears 1 of them and leaves the rest: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds' \
+    'the sound stdout'
+  assert_contains "$shale_out" \
+    "shale:     stow -D -p --no-folding -d '$HOME/.dotfiles' -t '$HOME' current && shale apply" \
+    'the sound stdout'
+  # The same links, with two layers now disagreeing about a path: every build
+  # from here exits 1, and so does every apply.
+  conf 'base personal/base' 'work work'
+  mklayer personal/base both/inner
+  mklayer work both
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the setup that cannot build'
+  assert_contains "$shale_out" \
+    'shale:   an apply would clear 1 of them and leave the rest: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds' \
+    'the blocked stdout'
+  assert_contains "$shale_out" \
+    'shale:   no apply will finish until the problems above are fixed' 'the blocked stdout'
+  assert_not_contains "$shale_out" 'an apply clears 1 of them' 'the blocked stdout'
+  # The sweep goes with it: it unstows the whole target tree and the apply after
+  # it is what puts the links back, so half of it is not half a remedy.
+  assert_not_contains "$shale_out" 'stow -D -p' 'the blocked stdout'
+  # The whole report, which is the claim: 'shale apply' is not offered anywhere
+  # in it while one line of it says no apply will finish.
+  assert_not_contains "$shale_out" 'shale apply' 'the blocked stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply no line offered'
+}
+
+# The second gate: a path in $HOME that a layer provides, which stops the stow
+# half and no build at all.  The plural shape of the remedy, whose whole line is
+# the offer.
+test_doctor_offers_no_apply_for_an_orphan_while_a_path_in_home_conflicts() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .config/nvim/init.lua
+  mklayer local .config/nvim/extra.lua
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  # The directory stays in the built tree, because the higher layer keeps it
+  # alive, so both links are ones stow prunes.
+  mklayer personal/base .config/nvim/keep.lua
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the sound setup'
+  assert_contains "$shale_out" 'shale: clear them with: shale apply' 'the sound stdout'
+  # A real file where a layer provides one: stow refuses the whole operation.
+  mklayer personal/base .vimrc
+  sandbox_write "$HOME" .vimrc 'mine, and not a link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the setup with the conflict'
+  assert_contains "$shale_out" \
+    'shale: no apply will finish until the problems above are fixed, so these links stay' \
+    'the blocked stdout'
+  assert_contains "$shale_out" \
+    'shale:   stow prunes the links an apply wrote — relative, and in a directory the built tree still holds — and every one of these is one of them' \
+    'the blocked stdout'
+  assert_not_contains "$shale_out" 'clear them with' 'the blocked stdout'
+  assert_not_contains "$shale_out" 'shale apply' 'the blocked stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply no line offered'
+}
+
+# The third gate, which neither of the others covers: stow is the one tool an
+# apply needs that a build does not, so a machine without it composes every
+# layer, links none of them, and has a build doctor may still offer.  The
+# singular shape of the remedy.
+test_doctor_offers_no_apply_for_an_orphan_where_stow_is_not_installed() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .tmux.conf
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .tmux.conf
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the sound setup'
+  assert_contains "$shale_out" 'shale: clear it with: shale apply' 'the sound stdout'
+  stub_path_without stow
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the setup without stow'
+  # The finding is still made: this gate suppresses the remedy and never the
+  # report of what is missing.
+  assert_contains "$shale_out" 'shale: stow is not installed' 'the blocked stdout'
+  assert_contains "$shale_out" \
+    'shale: no apply will finish until the problems above are fixed, so this link stays' \
+    'the blocked stdout'
+  assert_contains "$shale_out" \
+    'shale:   stow prunes the links an apply wrote — relative, and in a directory the built tree still holds — and this is one of them' \
+    'the blocked stdout'
+  assert_not_contains "$shale_out" 'clear it with' 'the blocked stdout'
+  assert_not_contains "$shale_out" 'shale apply' 'the blocked stdout'
+  # A build is still offered where one is offered at all: the missing tool stops
+  # no build, and a report that suppressed both would be wrong about the command
+  # that still works.
+  PATH=$stub_path
+  run_shale build
+  PATH=$saved
+  assert_status 0 "$shale_status" 'the build stow does not stop'
+  PATH=$stub_path
+  run_shale apply
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the apply no line offered'
+  assert_contains "$shale_err" \
+    'shale: stow is not installed, and apply links the built tree with it' 'the apply stderr'
 }
 
 # plant_orphans DIR N - N links in $HOME/DIR into the built tree at paths it has
@@ -12756,6 +12949,7 @@ test_doctor_the_unapplied_note_sits_beside_a_finding() {
 # did not create, so a path in $HOME that a layer provides stops the other half.
 # Both are run rather than quoted.
 test_doctor_offers_no_apply_that_would_not_finish() {
+  local saved
   conf 'base personal/base'
   mklayer personal/base .zshrc
   run_shale build
@@ -12787,6 +12981,27 @@ test_doctor_offers_no_apply_that_would_not_finish() {
   assert_not_contains "$shale_out" 'shale:   apply it with: shale apply' 'the second stdout'
   run_shale apply
   assert_status 1 "$shale_status" 'the apply after the collision'
+  # stow's other half, which stops no build: the tool an apply links with, and
+  # the one name in doctor's tool list that is deliberately not blocking.
+  conf 'base personal/base'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/both" || fail 'could not remove the colliding layer path'
+  stub_path_without stow
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  assert_status 1 "$shale_status" 'doctor without stow'
+  assert_contains "$shale_out" 'shale: stow is not installed' 'the third stdout'
+  assert_contains "$shale_out" \
+    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'the third stdout'
+  assert_contains "$shale_out" \
+    'shale:   no apply will finish until the problems above are fixed' 'the third stdout'
+  assert_not_contains "$shale_out" 'shale:   apply it with: shale apply' 'the third stdout'
+  PATH=$stub_path
+  run_shale apply
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the apply without stow'
 }
 
 # A tree shale could not read whole is a tree it may not conclude about: a
