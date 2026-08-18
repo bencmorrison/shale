@@ -502,8 +502,28 @@ require_sandbox() {
 LF='
 '
 
+# sandbox_dir and sandbox_path are the case's: sandbox_mkdir sets the first,
+# sandbox_leaf the second, and sandbox_write both through them.  Proving a path
+# does not move either, so a case keeps what it last asked for across anything
+# the primitives or run_shale do for their own reasons.
+#
+# The helpers that build things are the exception, and nothing holds them to
+# this: conf, mklayer, mkrepo, mkignore, mkmodes, option_fixture, plant_orphans,
+# inherit_shell_line, run_inner_suite, the stub_ helpers and anything else that
+# writes through the primitives leaves one or both names holding a path of its
+# own.  A case that saves a path and then calls one of them copies it out first.
+#
+# sandbox_resolved is nobody's but the next line's: it is valid only until the
+# next resolve, which is why sandbox_resolve writes there and every reader
+# copies it into a local of its own immediately.  That split is what stops the
+# hazard this arrangement is for: run_shale proves three leaves before it starts
+# anything, so a resolve that published into sandbox_dir left a case that had
+# saved a directory, run shale and then written through $sandbox_dir writing
+# somewhere it never named - reported as an unremovable directory in the
+# sandbox, a symptom one whole layer away from its cause.
 sandbox_dir=
 sandbox_path=
+sandbox_resolved=
 
 # Resolves an existing directory and proves it contained.  No $HOME involved, so
 # the runner can use it for its own writes as well.  The test root itself counts
@@ -541,7 +561,7 @@ sandbox_resolve() {
     "$TEST_ROOT" | "$TEST_ROOT"/*) ;;
     *) guard_trip "path resolves outside the test root: $dir -> $resolved" ;;
   esac
-  sandbox_dir=$resolved
+  sandbox_resolved=$resolved
 }
 
 # sandbox_leaf DIR LEAF [new] - resolves DIR and proves LEAF may be written.
@@ -568,7 +588,7 @@ sandbox_leaf() {
       ;;
   esac
   sandbox_resolve "$dir"
-  target=$sandbox_dir/$leaf
+  target=$sandbox_resolved/$leaf
   case "$mode" in
     '')
       [ ! -L "$target" ] || guard_trip "write target is a symlink: $target"
@@ -626,10 +646,13 @@ sandbox_mkdir() {
     esac
     # Empty from a '//' in the caller's path, and nothing to create.
     [ -n "$part" ] || continue
-    next=$sandbox_dir/$part
+    next=$sandbox_resolved/$part
     [ -d "$next" ] || mkdir "$next" || fail "could not create $next"
     sandbox_resolve "$next"
   done
+  # Published last, and once: the deepest component is what the caller asked
+  # for, and every resolve above it is this function's own business.
+  sandbox_dir=$sandbox_resolved
 }
 
 sandbox_target() {
@@ -707,7 +730,7 @@ sandbox_write() {
 # numeric restore would write 0755 over the 0700 a developer running under
 # 'umask 077' started with.
 shale() {
-  local script locked status
+  local script locked status sandbox_path
   require_sandbox
   locked=
   if [ "${1-}" = --unsearchable ]; then
@@ -717,8 +740,11 @@ shale() {
     # a directory the runner's own rm -rf cannot remove.
     [ "${3-}" != --script ] ||
       guard_trip '--unsearchable cannot be combined with --script'
+    # Copied out on the line below the resolve, as every reader of
+    # sandbox_resolve does: that name holds only until the next resolve, and the
+    # restore this pairs with is on the far side of a whole run of shale.
     sandbox_resolve "$2"
-    locked=$sandbox_dir
+    locked=$sandbox_resolved
     shift 2
     chmod u-x "$locked" || fail "could not remove the search bit from $locked"
   fi
@@ -761,8 +787,15 @@ shale() {
 # '--unsearchable DIR' is passed through to the wrapper, which is where the
 # containment proof for either lives; the transcript records them like any other
 # argument, so what ran is what the report shows.
+#
+# sandbox_path is local because the leaves proven below are this function's own
+# and the name they would be published into is the case's - the same claim the
+# resolve split makes for sandbox_dir, restated here because a leaf proof is the
+# one thing that legitimately writes this name.  Dynamic scoping puts
+# sandbox_leaf's assignments in this local, and the case's value stands.  shale
+# does the same for the leaf its --script path proves.
 run_shale() {
-  local n out err
+  local n out err sandbox_path
   SHALE_RUNS=$((SHALE_RUNS + 1))
   n=$SHALE_RUNS
   # All three leaves are proven before shale runs, not one at a time as each is
@@ -7689,7 +7722,7 @@ test_doctor_an_unsearchable_ancestor_of_home_is_named_instead_of_home() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
   sandbox_resolve "$CASE_DIR/outer"
-  locked=$sandbox_dir
+  locked=$sandbox_resolved
   run_shale --unsearchable "$locked" doctor
   assert_status 1 "$shale_status"
   assert_contains "$shale_out" "shale: cannot search $locked: permission denied" 'stdout'
@@ -8375,8 +8408,6 @@ test_doctor_and_which_agree_about_stows_default_list() {
       */*) sandbox_write "$HOME/${rel%/*}" "${rel##*/}" 'mine, and not a link' ;;
       *) sandbox_write "$HOME" "$rel" 'mine, and not a link' ;;
     esac
-    # Kept now: run_shale proves leaves of its own and leaves sandbox_path
-    # holding the last of them.
     plant=$sandbox_path
     run_shale doctor
     reported=0
@@ -12354,7 +12385,7 @@ test_meta_the_unsearchable_option_locks_a_leaf_that_looks_like_an_option() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
   sandbox_resolve "$CASE_DIR/-L"
-  locked=$sandbox_dir
+  locked=$sandbox_resolved
   run_shale --unsearchable -L doctor
   assert_status 1 "$shale_status"
   assert_contains "$shale_out" "shale: cannot search $locked: permission denied" 'stdout'
@@ -12744,9 +12775,6 @@ test_doctor_says_nothing_about_an_unapplied_tree_it_could_not_read() {
   run_shale build
   assert_status 0 "$shale_status" 'the build'
   sandbox_mkdir "$HOME/.dotfiles/current/.config"
-  # Kept, because run_shale resolves paths of its own and leaves sandbox_dir
-  # naming the last of them: restoring $sandbox_dir would chmod that instead and
-  # leave a directory the runner's own rm -rf cannot remove.
   locked=$sandbox_dir
   chmod u-rx "$locked" || fail 'could not lock the built directory'
   run_shale doctor
@@ -16837,6 +16865,37 @@ test_meta_sandbox_leaf_returns_the_resolved_path() {
   assert_exists "$trip/root/sub/target" 'the file that was written'
 }
 
+# sandbox_dir and sandbox_path belong to the case that called a primitive, and a
+# run of shale in between must not move either.  run_shale proves three leaves of
+# its own before it starts anything, and while those proofs published into these
+# two names a case that saved a directory, ran shale and then wrote through
+# $sandbox_dir wrote into $CASE_DIR instead - silently, at whichever path
+# run_shale had resolved last.
+#
+# The write is what is asserted, not just the two values: a case reaches these
+# names to write through them, so the claim is about where the byte lands.
+test_meta_a_run_of_shale_leaves_the_case_its_own_sandbox_names() {
+  local dir path
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$CASE_DIR/saved"
+  dir=$sandbox_dir
+  sandbox_leaf "$dir" marker new
+  path=$sandbox_path
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_eq "$dir" "$sandbox_dir" 'sandbox_dir after a run of shale'
+  assert_eq "$path" "$sandbox_path" 'sandbox_path after a run of shale'
+  # Through the names as a case would use them, rather than through the copies.
+  : >"$sandbox_path" || fail 'could not write the saved leaf'
+  sandbox_leaf "$sandbox_dir" second new
+  : >"$sandbox_path" || fail 'could not write the second leaf'
+  assert_exists "$dir/marker" 'the leaf saved before the run'
+  assert_exists "$dir/second" 'the leaf proven after the run'
+  assert_missing "$CASE_DIR/marker" 'a leaf in the case directory'
+  assert_missing "$CASE_DIR/second" 'a second leaf in the case directory'
+}
+
 # run_shale's capture files are fresh names in the case's own directory, so
 # nothing may be at either of them, whatever kind of thing it is.  A hardlink and
 # a fifo are the two that no symlink test can see: the first carries the write
@@ -17686,11 +17745,11 @@ run_case() {
   sandbox_leaf "${case_dir%/*}" "${case_dir##*/}" new
   mkdir "$sandbox_path" || return 2
   sandbox_resolve "$sandbox_path"
-  case_dir=$sandbox_dir
+  case_dir=$sandbox_resolved
   sandbox_leaf "$case_dir" home new
   mkdir "$sandbox_path" || return 2
   sandbox_resolve "$sandbox_path"
-  case_home=$sandbox_dir
+  case_home=$sandbox_resolved
   # Everything below lands in a directory this function has just created empty,
   # so no 'new' check here can fire; they go through the primitive so that the
   # rule holds by construction rather than by an argument about the caller.  The
@@ -17720,6 +17779,10 @@ run_case() {
   status=0
   (
     CASE_DIR=$case_dir
+    # Seeded rather than left empty: the case directory is a path every case may
+    # write under, and a name that starts empty makes an authoring slip in one
+    # of the rm -rf "$sandbox_dir/..." sites an rm -rf of "/..." instead.
+    sandbox_dir=$case_dir
     SHALE_RUNS=0
     STUB_PATHS=0
     HOME=$case_home
