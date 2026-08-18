@@ -2525,6 +2525,39 @@ blocking_finding() {
   finding "$@"
 }
 
+# Both zeroed here as well as in cmd_doctor, which is their one writer today:
+# apply_offerable below reads them, and an unbound expansion under 'set -u' kills
+# the script rather than answering wrongly, so the first call from anywhere else
+# would take shale down with it.
+BUILD_BLOCKED=0
+# The tools an apply needs that a build does not, counted where they are missing.
+# stow is the whole of that list, and its absence is deliberately not blocking: a
+# build runs without it, so a report that stopped offering one would be wrong
+# about the command that still works.
+APPLY_TOOL_MISSING=0
+
+# Zero when doctor may offer an apply.  Every line it prints that names 'shale
+# apply' is gated on this - one question, answered in one place, so that the
+# report cannot refuse an apply in one check and offer it in the next.  It gates
+# the lines that name the command and not every mention of an apply: a line
+# saying what an apply is for states a mechanism, and stays true whether or not
+# one can run today.
+#
+# Three inputs, each sufficient on its own.  An apply builds before it stows, so
+# everything that stops a build stops it.  stow will not write over what it did
+# not create, so a path in $HOME that a layer provides stops the stow half; that
+# is APPLY_CONFLICTS, which blocks no build and so is not counted in
+# BUILD_BLOCKED.  And stow is the one tool an apply needs that a build does not,
+# so a machine without it composes every layer and links none of them.
+#
+# Read where the line is printed rather than answered once: BUILD_BLOCKED and
+# APPLY_CONFLICTS go on rising until the last check has run.
+apply_offerable() {
+  [ "$BUILD_BLOCKED" -eq 0 ] &&
+    [ "$APPLY_CONFLICTS" -eq 0 ] &&
+    [ "$APPLY_TOOL_MISSING" -eq 0 ]
+}
+
 # Counted, though a note never changes the exit status: the summary says how
 # many were printed, so that a report ending 'no problems found' cannot be read
 # as a report that said nothing.
@@ -3666,13 +3699,12 @@ audit_unapplied_tree() {
   lines=("nothing in the built tree at $CUR is linked in $HOME"
     "build composes that tree and apply is what links it into $HOME, so until an apply runs none of it is in use")
   # Offered only where it would work, which is audit_broken_links' rule for the
-  # build it offers.  An apply builds before it stows, so everything that stops
-  # a build stops it; a path in $HOME that a layer provides stops the stow half,
-  # in a finding that says what to move aside.
-  if [ "$BUILD_BLOCKED" -gt 0 ] || [ "$APPLY_CONFLICTS" -gt 0 ]; then
-    lines[${#lines[@]}]='no apply will finish until the problems above are fixed'
-  else
+  # build it offers.  apply_offerable holds the three reasons an apply cannot
+  # finish, and every remedy that names one asks it.
+  if apply_offerable; then
     lines[${#lines[@]}]='apply it with: shale apply'
+  else
+    lines[${#lines[@]}]='no apply will finish until the problems above are fixed'
   fi
   note ${lines[@]+"${lines[@]}"}
 }
@@ -4006,7 +4038,17 @@ audit_declared_modes() {
     fi
     lines+=("shale sets the mode of a directory it creates in $HOME, and never widens one that was already there")
     lines+=('to take the mode the declaration asks for, chmod that directory yourself')
-    lines+=("to keep the mode it has, change the declaration: 'shale which' names the line that decides a path")
+    # 'which' parses the config before it answers anything, and CONFIG_ERRORS is
+    # what a refused line leaves, so a report holding one may not send the reader
+    # to a command that exits 1 printing those same errors back.  The remedy
+    # stands without the pointer: it is the declaration to edit either way, and
+    # the parse errors at the top of the report are the one thing to act on
+    # first.
+    if [ "$CONFIG_ERRORS" -eq 0 ]; then
+      lines+=("to keep the mode it has, change the declaration: 'shale which' names the line that decides a path")
+    else
+      lines+=('to keep the mode it has, change the declaration')
+    fi
     note ${lines[@]+"${lines[@]}"}
   fi
 
@@ -4035,7 +4077,11 @@ audit_declared_modes() {
     lines+=("and $rest more, not named here")
   fi
   lines+=("the built tree holds each of these paths with the declared mode on it, and an apply is what puts one in $HOME")
-  lines+=("'shale which PATH' says why a path in the tree is not linked")
+  # The pointer above's rule, and the whole of this line: with a config error
+  # 'shale which' answers nothing but those errors, which the top of this report
+  # has already printed.
+  [ "$CONFIG_ERRORS" -ne 0 ] ||
+    lines+=("'shale which PATH' says why a path in the tree is not linked")
   note ${lines[@]+"${lines[@]}"}
 }
 
@@ -4293,12 +4339,27 @@ EOF
   # sweep under it is the alternative to doing that by hand.  Where the two are
   # mixed, the rm is what covers all of them and the apply is named for what it
   # takes off the list.
+  #
+  # Every line here that names an apply asks apply_offerable first, exactly as
+  # the note about the unapplied tree does: with a blocked build, a conflict in
+  # $HOME or no stow installed, 'clear them with: shale apply' is a command that
+  # cannot finish, and the report has already said so a few lines above.  What
+  # replaces it says which state it is waiting on rather than a second remedy:
+  # the apply is still the right answer for these links, once it can run.
   if [ "$prunable" -eq "$n" ] && [ "$n" -eq 1 ]; then
-    remedy=('clear it with: shale apply'
-      'stow prunes the links an apply wrote — relative, and in a directory the built tree still holds — and this is one of them')
+    if apply_offerable; then
+      remedy=('clear it with: shale apply')
+    else
+      remedy=('no apply will finish until the problems above are fixed, so this link stays')
+    fi
+    remedy+=('stow prunes the links an apply wrote — relative, and in a directory the built tree still holds — and this is one of them')
   elif [ "$prunable" -eq "$n" ]; then
-    remedy=('clear them with: shale apply'
-      'stow prunes the links an apply wrote — relative, and in a directory the built tree still holds — and every one of these is one of them')
+    if apply_offerable; then
+      remedy=('clear them with: shale apply')
+    else
+      remedy=('no apply will finish until the problems above are fixed, so these links stay')
+    fi
+    remedy+=('stow prunes the links an apply wrote — relative, and in a directory the built tree still holds — and every one of these is one of them')
   else
     if [ "$n" -le "$cap" ]; then
       if [ "$prunable" -eq 0 ]; then
@@ -4315,14 +4376,24 @@ EOF
         remedy=('remove them; the built tree is correct and needs no rebuilding')
       fi
     fi
-    if [ "$prunable" -gt 0 ]; then
+    if [ "$prunable" -gt 0 ] && apply_offerable; then
       remedy+=("an apply clears $prunable of them and leaves the rest: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds")
+    elif [ "$prunable" -gt 0 ]; then
+      remedy+=("an apply would clear $prunable of them and leave the rest: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds" \
+        'no apply will finish until the problems above are fixed')
     else
       remedy+=('stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links')
     fi
-    remedy+=('stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' \
-      "  stow -D -p --no-folding -d $qdots -t $qhome current && shale apply" \
-      'earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory')
+    # The sweep goes with the apply rather than standing without it.  Its '&&'
+    # is on stow's exit status and not on the apply's, so where the apply cannot
+    # finish the unstow still succeeds, the apply then exits 1, and $HOME is
+    # left unstowed and not restowed - worse than where the reader started.  The
+    # rm leading this block is the remedy that stands whatever else is broken.
+    if apply_offerable; then
+      remedy+=('stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' \
+        "  stow -D -p --no-folding -d $qdots -t $qhome current && shale apply" \
+        'earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory')
+    fi
   fi
 
   if [ "$n" -le "$cap" ]; then
@@ -5792,6 +5863,7 @@ cmd_doctor() {
   FINDINGS=0
   NOTES=0
   BUILD_BLOCKED=0
+  APPLY_TOOL_MISSING=0
   pending=0
 
   # Every tool shale runs, and the list a new one joins.  Elsewhere a tool is
@@ -5805,8 +5877,13 @@ cmd_doctor() {
   for tool in chmod cp ls mkdir mv rm rmdir stow; do
     command -v "$tool" >/dev/null 2>&1 && continue
     # stow is wanted only by apply, so it stops no build on its own; every other
-    # name here does, and no line below may then offer one.
-    [ "$tool" = stow ] || BUILD_BLOCKED=$((BUILD_BLOCKED + 1))
+    # name here does, and no line below may then offer one.  What it does stop is
+    # every apply, which is apply_offerable's third input.
+    if [ "$tool" = stow ]; then
+      APPLY_TOOL_MISSING=$((APPLY_TOOL_MISSING + 1))
+    else
+      BUILD_BLOCKED=$((BUILD_BLOCKED + 1))
+    fi
     finding "$tool is not installed" \
       "install it with your system package manager: shale installs nothing"
   done
