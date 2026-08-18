@@ -9,11 +9,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A backstop, not a budget.  The suite is minutes; the default cap is six
+    # hours, and a step that hangs rather than fails burns all of them while the
+    # PR reads as pending rather than as broken.  The per-step timeouts are what
+    # name which step hung, which a job-level one cannot.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       # chkstow ships with stow.
       - name: Install stow
+        timeout-minutes: 5
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq stow
@@ -27,6 +33,7 @@ jobs:
       # fails on any skip, so a broken pin turns the run red rather than quietly
       # testing less.
       - name: Install pinned shellcheck
+        timeout-minutes: 5
         env:
           SHELLCHECK_VERSION: v0.11.0
         shell: bash
@@ -44,6 +51,7 @@ jobs:
       # acceptance criterion from the issue: any skip in CI means a prerequisite
       # is missing from the runner, not that a case was legitimately skipped.
       - name: Run the suite
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euo pipefail
@@ -65,14 +73,17 @@ jobs:
   # the entire point of having it.
   test-macos:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       # chkstow ships with stow.
       - name: Install stow
+        timeout-minutes: 10
         run: brew install stow
 
       - name: Install pinned shellcheck
+        timeout-minutes: 5
         env:
           SHELLCHECK_VERSION: v0.11.0
         run: |
@@ -99,6 +110,7 @@ jobs:
       # /bin/bash explicitly, not the shebang: brew may put a newer bash earlier
       # on PATH, which would quietly test the wrong thing.
       - name: Run the suite under system bash
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           /bin/bash tests/run | tee result.txt
