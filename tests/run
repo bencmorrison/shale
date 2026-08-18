@@ -1071,6 +1071,33 @@ find_utf8_locale() {
     'tried: en_US.UTF-8 C.UTF-8 en_US.utf8 C.utf8'
 }
 
+# Zero when this machine has locale $1, for a case that wants an extra locale
+# rather than needing one.
+#
+# The system's list, and never the shell's own complaint about a locale it has
+# not got, which is the trap this walked into first: bash 5.2 warns 'cannot
+# change locale' on stderr, and bash 3.2.57 - the floor, and what macOS ships -
+# says nothing at all and exits 0.  So a probe reading that warning answers yes
+# to every name on the floor platform, which is exactly the machine an extra
+# locale is wanted for.  Measured: under LC_ALL=no_SUCH.UTF-8 the mac's
+# /bin/bash prints nothing and 'locale' under it reports LC_CTYPE="C", so the
+# caller's extra arm would have run under C believing it ran under the name it
+# asked for - and passed.  That is the one way this helper can be wrong with
+# nothing going red, which is why it is the mechanism and not the answers that
+# has to be right here.
+#
+# -x and -F rather than a substring or a pattern, so that 'C' does not answer
+# for 'C.utf8' and the '.' in a locale name is a '.'.
+#
+# Unlike find_utf8_locale directly above, this never fails the case: its one
+# caller asserts the same answer under every locale it is given, and a machine
+# with one locale fewer asserts that over a shorter list.  The caller says in
+# its comment which machine has which.  A machine with no 'locale' command at
+# all answers no to everything and takes the same shorter list.
+have_locale() {
+  locale -a 2>/dev/null | grep -qxF "${1-}"
+}
+
 # The whole of doctor's report on a machine that has built and never applied, on
 # stdout for a whole-report assertion to compare against.
 #
@@ -15115,6 +15142,141 @@ test_which_predicts_a_collision_beside_the_skipped_names() {
   assert_contains "$shale_err" 'shale: conflict at x/git/c' 'the build stderr'
   assert_contains "$shale_err" 'shale: conflict at y/.gitignore' 'the build stderr'
   assert_contains "$shale_err" "shale: 4 conflicts; $HOME/.dotfiles/current not rebuilt" 'the build stderr'
+}
+
+# A name that differs from a skipped one in case alone, which is an ordinary
+# name and not the skipped one: '.GIT' is not the string '.git', so the composer
+# walks it, and build exits 1 at the collision inside it.
+#
+# ONLY A CASE-INSENSITIVE VOLUME CAN TURN THIS RED - APFS's default, so macOS's,
+# so the platform of the bash 3.2 floor.  A green run on ext4 is evidence about
+# ext4 and about nothing else: there 'd/.git/c' is simply not there, and it was
+# there on macOS, where -e resolved a typed 'd/.git/c' to the '.GIT' beside it
+# while which went on reading its own '.git' out of the string it was given.
+# What that bought was 'no build composes a .git' printed over a path every
+# build composes, and the collision prediction taken off a build that exits 1:
+# silent where build fails.  Measured on macOS 26.4 before the fix.
+#
+# The assertions are identical on both volumes, which is the whole point - the
+# answer is about the spelling that was typed, and which volume it landed on
+# does not enter it.
+#
+# Locale-independence is demonstrated rather than asserted, and 'd/.GIT/c' is
+# the demonstration: shale compares these names with '=' inside a [, which is
+# byte equality on every locale there is, and reads them out of list_dir's byte
+# locale.  Any implementation that folded case instead would have to fold that
+# 'I', and tr_TR is where folding an 'I' stops meaning 'i' - the dotless-i
+# problem #103 and #109 both refused to let into an answer.  So the pair of
+# which runs below is made under every locale the machine has of C, UTF-8 and
+# tr_TR.UTF-8, and must answer byte for byte the same under each.  The container
+# has no tr_TR and the mac has all three, so the arm that separates a fold from
+# a byte comparison runs on the macOS job alone; the C and UTF-8 arms run
+# everywhere.
+test_which_a_case_variant_of_a_skipped_name_is_not_the_skipped_name() {
+  local loc locales
+  conf 'base personal/base' 'local local'
+  mklayer personal/base d/.GIT/c
+  mklayer local d/.GIT/c/inside
+  # What the two which answers below are measured against: the composer reaches
+  # this path, so the collision in it is one build dies at.
+  run_shale build
+  assert_status 1 "$shale_status" 'the build'
+  assert_contains "$shale_err" 'shale: conflict at d/.GIT/c' 'the build stderr'
+  assert_contains "$shale_err" "shale: 1 conflict; $HOME/.dotfiles/current not rebuilt" 'the build stderr'
+  find_utf8_locale \
+    'it asserts that the answer for a name differing in case alone is the same under every locale'
+  locales="C $utf8_locale"
+  ! have_locale tr_TR.UTF-8 || locales="$locales tr_TR.UTF-8"
+  for loc in $locales; do
+    # The name that is on disk: composed like any other, so the prediction
+    # stands and no note claims the path never reaches the built tree.
+    LC_ALL=$loc run_shale which d/.GIT/c
+    assert_status 0 "$shale_status" "the name on disk under LC_ALL=$loc"
+    assert_eq "shale: note: 'build' would fail here — d/.GIT/c is a file in 'base' and a directory in 'local'" \
+      "$shale_err" "stderr for the name on disk under LC_ALL=$loc"
+    # The name nobody wrote.  No layer holds it, whatever the volume makes of
+    # the two names being one file, and the notes are the ones for a path no
+    # layer provides rather than the ones for a path the composer skips.
+    LC_ALL=$loc run_shale which d/.git/c
+    assert_status 1 "$shale_status" "the name nobody wrote under LC_ALL=$loc"
+    assert_eq "shale: no layer provides 'd/.git/c'
+shale: note: 'd/.git/c' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: \\.git
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it" \
+      "$shale_err" "stderr for the name nobody wrote under LC_ALL=$loc"
+  done
+  # doctor's side of it, which was already the composer's on both volumes: all
+  # three commands name 'd/.GIT/c' and none of them names 'd/.git/c'.
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" "shale: 'build' would fail at d/.GIT/c" 'the doctor stdout'
+  assert_not_contains "$shale_out" 'would fail at d/.git/c' 'the doctor stdout'
+}
+
+# The other side of the same fix, and the one a bare -e got wrong in the
+# direction that reads worst: a built tree called stale while it holds exactly
+# what the layer holds.
+#
+# ALSO RED ONLY ON A CASE-INSENSITIVE VOLUME, for the same reason and on the
+# same machines.  With '.GIT' composed and no layer providing 'd/.git/c', -e on
+# the built tree answered yes for the typed spelling and which prescribed a
+# rebuild that would compose the very same tree again.  Every build here exits 0
+# - there is no collision - so the tree under test is a good one.
+test_which_does_not_call_a_tree_stale_for_a_name_differing_in_case() {
+  conf 'base personal/base'
+  mklayer personal/base d/.GIT/c
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_exists "$HOME/.dotfiles/current/d/.GIT/c" 'the composed copy'
+  run_shale which d/.git/c
+  assert_status 1 "$shale_status" 'the name nobody wrote'
+  assert_not_contains "$shale_err" "current/ is stale" 'the stale note'
+  assert_eq "shale: no layer provides 'd/.git/c'
+shale: note: 'd/.git/c' is on stow's own ignore list — no apply links it
+shale:   stow's default ignore list: \\.git
+shale:   shale writes that list into $HOME/.dotfiles/current/.stow-local-ignore on every build
+shale:   that list has no line to edit: nothing but a different name gets this path past it" \
+    "$shale_err" 'stderr for the name nobody wrote'
+}
+
+# The third and last place which resolves a typed path against a real tree, and
+# the only one a name outside the three skipped ones can reach: the test that
+# the path is in the built tree, which is what the residual note is about.
+#
+# ALSO RED ONLY ON A CASE-INSENSITIVE VOLUME, on the same machines and for the
+# same reason.  A layer file renamed in case alone leaves the earlier build's
+# 'Foo' in the tree and 'foo' in the layer; -e answered yes for 'current/foo',
+# so which said this path was in the built tree at a name that tree does not
+# hold.  Byte for byte it is not there, which is also what a rebuild would tell
+# anyone who looked.
+#
+# The rename is the fixture and the volume decides what it means: on ext4 it
+# makes a second file and 'current/foo' is absent either way, on APFS it renames
+# the one file and 'current/foo' is the old spelling of it.  Both must answer
+# the same, and silence is the answer - the path is in the layer, no build has
+# put this spelling in the tree, and there is nothing for a note to say.
+test_which_does_not_place_a_typed_name_in_a_tree_holding_another_case() {
+  local layer
+  conf 'base personal/base'
+  mklayer personal/base Foo
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_exists "$HOME/.dotfiles/current/Foo" 'the composed copy'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  layer=$sandbox_dir
+  sandbox_leaf "$layer" Foo
+  # Not 'new' for the destination: on a case-insensitive volume the name it is
+  # about already exists under the spelling being renamed away from, so the
+  # guard's strong mode would refuse the fixture this case is made of.
+  sandbox_leaf "$layer" foo
+  mv "$layer/Foo" "$layer/foo" || fail 'could not rename the layer file'
+  run_shale which foo
+  assert_status 0 "$shale_status" 'the renamed layer file'
+  assert_contains "$shale_out" "$layer/foo" 'stdout for the renamed layer file'
+  assert_empty "$shale_err" 'stderr for the renamed layer file'
 }
 
 # The claim measured against the thing claimed, over a corpus holding both
