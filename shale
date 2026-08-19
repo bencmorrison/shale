@@ -89,7 +89,7 @@ set -uo pipefail
 # none of the three exists on the floor.  A range is only ever matched inside
 # the byte locale enter_byte_locale sets, where both settings of
 # globasciiranges agree.  Every glob listing a directory drops '.' and '..' by
-# name, which is stated at dir_is_empty and held under both settings of
+# name, which is stated at list_dir and held under both settings of
 # globskipdots by
 # test_meta_dot_globs_answer_the_same_under_both_glob_meanings.  And the third
 # only ever changes what '**' expands to: no glob in this script is one, and an
@@ -177,12 +177,9 @@ CONF=$DOTFILES/shale.conf
 CUR=$DOTFILES/current
 NEW=$DOTFILES/current.new
 OLD=$DOTFILES/current.old
-# The leading dot keeps this out of the layer namespace: valid_component makes
-# every configured path component start with a letter, digit or '_'.
-LOCK=$DOTFILES/.lock
 
-# The mode of every directory shale makes for itself: the lock, the tree a build
-# composes into, and - by the two renames that install it - $CUR and the $OLD it
+# The mode of every directory shale makes for itself: the tree a build composes
+# into, and - by the two renames that install it - $CUR and the $OLD it
 # replaced.  Every one of them was 0777 against the caller's umask, so on the
 # Debian and Ubuntu default the directory every symlink in $HOME resolves
 # through was group-writable, and anyone sharing the group could replace what
@@ -1891,10 +1888,7 @@ DIR_ENTRIES=()
 # composer, three of doctor's walks and which's.  A 'for' list is expanded once,
 # before the first pass of the body, so a recursive call that overwrites
 # DIR_ENTRIES cannot disturb the loop already running over it; nothing may read
-# DIR_ENTRIES after such a call.  dir_is_empty runs from a trap and so can land
-# between the two locale calls here, which would leave the saved LC_ALL wrong -
-# every path that reaches that trap exits, so there is nothing left to be wrong
-# for.
+# DIR_ENTRIES after such a call.
 #
 # The switch is not free where LC_ALL names a locale the machine has not got:
 # bash 5 warns on every restore, so this pays one line per directory listed and
@@ -1918,70 +1912,19 @@ list_dir() {
 SCRATCH=
 CLONING=
 
-# The lock while this process holds it, and empty otherwise, so that cleanup
-# releases only a lock this process took and never one another shale is holding.
-LOCKED=
-
-# Non-zero when directory $1 holds an entry of any kind, dotfiles included.
-# Written so that dotglob and nullglob may be set either way round: build sets
-# both partway through, and this runs from a trap.  With nullglob off an
-# unmatched pattern arrives as itself, which the -e and -L tests tell from a
-# file genuinely called '*' or '.*'.
-dir_is_empty() {
-  local dir=$1 entry
-  # A directory that cannot be listed answers every glob with nothing, exactly
-  # as an empty one does, and 'empty' is the answer a caller turns into rmdir.
-  # Not knowing is therefore reported as not empty, which is the answer all
-  # three callers are safe to act on.
-  { [ -r "$dir" ] && [ -x "$dir" ]; } || return 1
-  list_dir "$dir" 1
-  for entry in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
-    case "${entry##*/}" in
-      . | ..) continue ;;
-      '*' | '.*')
-        { [ ! -e "$entry" ] && [ ! -L "$entry" ]; } || return 1
-        continue
-        ;;
-    esac
-    return 1
-  done
-  return 0
-}
-
-# The glob gates are the last line of defence on these three removals, which run
+# The glob gates are the last line of defence on these two removals, which run
 # from a trap at a moment nothing chose: an empty or corrupted variable lands in
 # a refusing branch rather than deleting a layer or a home directory.  Blanking
 # comes first so a second call does nothing even if a removal failed.
 cleanup() {
-  local scratch=${SCRATCH-} cloning=${CLONING-} locked=${LOCKED-} remedy qlocked
+  local scratch=${SCRATCH-} cloning=${CLONING-}
   SCRATCH=
   CLONING=
-  LOCKED=
   case "$scratch" in
     */current.new) rm -rf "$scratch" ;;
   esac
   case "$cloning" in
     */.*.cloning) rm -rf "$cloning" ;;
-  esac
-  # Last, after the scratch tree is gone: a build that took the lock in between
-  # would reap a current.new this one was still in the middle of removing.
-  # rmdir rather than rm -rf, because nothing is ever written inside the lock:
-  # a lock that is not empty is not the one this process created.
-  case "$locked" in
-    */.lock)
-      if ! rmdir "$locked" 2>/dev/null; then
-        # rmdir is the remedy for the lock shale makes, which is always empty;
-        # against one something wrote inside, it is a command that errors.
-        # Clobbering the global QUOTED is safe here and nowhere else in this
-        # function: cleanup runs from a trap and every path reaching it exits.
-        shell_quote "$locked"
-        qlocked=$QUOTED
-        remedy="rmdir $qlocked"
-        dir_is_empty "$locked" || remedy="rm -rf $qlocked"
-        warn "could not remove the lock at $locked" \
-          "remove it with: $remedy, or no later build will run"
-      fi
-      ;;
   esac
 }
 
@@ -2043,75 +1986,6 @@ make_dir_at() {
   status=$?
   umask "$UMASK_SAVED"
   return "$status"
-}
-
-# -------------------------------------------------------------------- the lock
-
-# mkdir is the atomic primitive - it fails when the directory exists, on every
-# filesystem and both userlands - where flock is Linux-only and not in the
-# toolset shale keeps to.  Held from here to the end of the process rather than
-# released at the end of the command: apply takes it for its build and its stow
-# together, and the release belongs on the paths cleanup already covers.
-acquire_lock() {
-  local remedy qlock
-  # Already held by this process, which is how apply's own build reaches this
-  # without meeting the lock apply took for it.
-  [ -z "$LOCKED" ] || return 0
-  # Before the lock is taken rather than when it is released: without rmdir the
-  # release fails at the end of a build that otherwise succeeded, every build
-  # after it is refused, and the remedy printed is the command that is missing.
-  command -v rmdir >/dev/null 2>&1 ||
-    die 'rmdir is not installed, and shale releases its lock by removing a directory' \
-      "shale would take the lock at $LOCK and never be able to give it back" \
-      'install it with your system package manager: shale installs nothing'
-  # Necessary because the 2>/dev/null below swallows bash's 'command not found'
-  # along with 'File exists', leaving no arm that names mkdir.
-  command -v mkdir >/dev/null 2>&1 ||
-    die 'mkdir is not installed, and shale takes its lock by creating a directory' \
-      "shale would say only that it could not create the lock at $LOCK" \
-      'install it with your system package manager: shale installs nothing'
-  # mkdir's own diagnostic is suppressed because each arm below says more about
-  # this particular directory, and its remedy, than 'File exists' does.
-  if make_own_dir "$LOCK" 2>/dev/null; then
-    LOCKED=$LOCK
-    return 0
-  fi
-  # Before the -d arm, which a link to a directory answers as readily: shale
-  # does not follow one, so naming it a lock another shale holds would be false.
-  if [ -L "$LOCK" ]; then
-    die "$LOCK is a symlink" \
-      'shale takes its lock by creating that directory, and will not follow a link to one' \
-      'remove it, or move it aside'
-  fi
-  # Refused, never reclaimed, and never waited on: nothing that could be put
-  # inside this directory would prove its holder alive, a pid being reusable
-  # between the write and the read.  The message carries the manual remedy.
-  if [ -d "$LOCK" ]; then
-    # Quoted, like every command shale prints to be pasted: a home with a space
-    # in it otherwise yields an rm -rf over two paths that are not the lock, and
-    # one with a quote in it yields a command the shell will not even parse.
-    shell_quote "$LOCK"
-    qlock=$QUOTED
-    remedy="rmdir $qlock"
-    dir_is_empty "$LOCK" || remedy="rm -rf $qlock"
-    die "another shale has the lock at $LOCK" \
-      "build and apply take it so that two of them cannot rebuild $CUR at once" \
-      "if no other shale is running, this lock is stale: remove it with: $remedy"
-  fi
-  if [ -e "$LOCK" ]; then
-    die "$LOCK exists but is not a directory" \
-      'shale takes its lock by creating that directory' \
-      'remove it, or move it aside'
-  fi
-  # Nothing is there, so the holder released between the mkdir above and these
-  # tests.  One more attempt, so that only a mkdir that fails against an empty
-  # path reaches the message below, which is about permissions.
-  if make_own_dir "$LOCK" 2>/dev/null; then
-    LOCKED=$LOCK
-    return 0
-  fi
-  die "could not create the lock at $LOCK" \
-    "check that $DOTFILES is writable"
 }
 
 # ------------------------------------------------------------------ the clones
@@ -4606,10 +4480,6 @@ cmd_build() {
 
   parse_config || exit 1
 
-  # After the parse and before everything that writes: taking it first would
-  # answer a missing config with a message about a lock.
-  acquire_lock
-
   # dotglob because dotfiles are the ordinary case here, nullglob because an
   # empty layer directory - the day-one state of a local layer - must expand to
   # nothing rather than to a literal '*'.  Never restored.
@@ -5090,29 +4960,15 @@ cmd_apply() {
     die 'stow is not installed, and apply links the built tree with it' \
       'install it with your system package manager: shale installs nothing'
 
-  acquire_lock
-
-  # Under the lock, so nothing else is rebuilding the tree being read, and
-  # before the build, which is what takes paths out of it.  A tree that is not a
-  # directory is left to the build to refuse, and a missing one - the state
-  # before the first build - leaves nothing to have orphaned.
+  # Before the build, which is what takes paths out of the tree being read.  A
+  # tree that is not a directory is left to the build to refuse, and a missing
+  # one - the state before the first build - leaves nothing to have orphaned.
   PREVIOUS_PATHS=()
   if [ -d "$CUR" ] && [ ! -L "$CUR" ]; then
     scan_previous_tree ''
   fi
 
   cmd_build || exit 1
-
-  # Re-taken rather than trusted: a whole build sits between the acquire and the
-  # stow.  The -x is what keeps a $DOTFILES that has lost its search bit - where
-  # every test of a path inside it is false - out of this arm and in the cd's,
-  # and LOCKED is blanked because this process no longer holds anything.
-  if [ ! -d "$LOCKED" ] && [ -x "$DOTFILES" ]; then
-    LOCKED=
-    die "the lock at $LOCK is gone, and this apply was holding it" \
-      "another shale may be rebuilding $CUR, which is what the lock prevents" \
-      "nothing in $HOME was relinked: apply again once no other shale is running"
-  fi
 
   # -t "$HOME" is mandatory even though stow's default target - the parent of
   # the stow directory - is that same path.  man stow, RESOURCE FILES: stow
@@ -5391,7 +5247,7 @@ cmd_apply() {
 # Nothing here exits early or short-circuits: every check runs whatever the ones
 # before it found, and only the finding count decides the exit status.
 cmd_doctor() {
-  local tool i n name path root dir entry leaf known remedy qlock lines layers
+  local tool i n name path root dir entry leaf known lines layers
   local pending removed covers
 
   FINDINGS=0
@@ -5408,7 +5264,7 @@ cmd_doctor() {
   # git is not here: it is wanted for one thing only, and whether that thing is
   # wanted is not known until the layers have been looked at.  Its check is below
   # them.
-  for tool in chmod cp ls mkdir mv rm rmdir stow; do
+  for tool in chmod cp ls mkdir mv rm stow; do
     command -v "$tool" >/dev/null 2>&1 && continue
     # stow is wanted only by apply, so it stops no build on its own; every other
     # name here does, and no line below may then offer one.  What it does stop is
@@ -5448,33 +5304,17 @@ cmd_doctor() {
     fi
   fi
 
-  # The lock build and apply take, in acquire_lock's order and with its
-  # remedies; doctor takes no lock of its own.  Every state acquire_lock refuses
-  # is an arm here.  Counted, because while it is there shale will not work at
-  # all - but the finding states both readings rather than calling it stale:
-  # nothing shale can read tells a live holder from a killed one.
-  if [ -L "$LOCK" ]; then
-    blocking_finding "$LOCK is a symlink" \
-      'build and apply take their lock by creating that directory, and will not follow a link to one' \
-      'remove it, or move it aside, or neither will run'
-  elif [ -d "$LOCK" ]; then
-    shell_quote "$LOCK"
-    qlock=$QUOTED
-    remedy="rmdir $qlock"
-    dir_is_empty "$LOCK" || remedy="rm -rf $qlock"
-    blocking_finding "a shale has the lock at $LOCK, or a killed one left it behind" \
-      "build and apply take it so that two of them cannot rebuild $CUR at once, and both refuse while it is there" \
-      'nothing shale can read tells a live holder from a dead one, so this is a lock to remove only if no other shale is running' \
-      "remove it with: $remedy"
-  elif [ -e "$LOCK" ]; then
-    blocking_finding "$LOCK exists but is not a directory" \
-      'build and apply take their lock by creating that directory' \
-      'remove it, or move it aside, or neither will run'
-  elif [ -d "$DOTFILES" ] && [ -x "$DOTFILES" ] && [ ! -w "$DOTFILES" ]; then
-    # acquire_lock's last refusal, and the only one with nothing at the lock
-    # path to look at.  The last line is build's own remedy, word for word.
-    blocking_finding "no build or apply can create the lock at $LOCK" \
-      'they take their lock by creating that directory, and stop where they cannot' \
+  # Read off the permissions on the directory rather than off any path inside
+  # it, none of which exists to be looked at.  The headline names the directory
+  # for the same reason: three of a build's writes land here and which one it
+  # stops on depends on the state, not on the permission this arm is about - a
+  # clone root to fetch stops in the temporary directory git clones into, a
+  # current.new left by an earlier build stops on the rm that reaps it, and
+  # otherwise it is the mkdir that makes current.new.  One remedy for all three.
+  # Without this arm every build stopped and the report said no problems found.
+  if [ -d "$DOTFILES" ] && [ -x "$DOTFILES" ] && [ ! -w "$DOTFILES" ]; then
+    blocking_finding "no build can write in $DOTFILES" \
+      'a build creates the tree it composes into there, renames it into place, and clones a missing layer there too' \
       "check that $DOTFILES is writable"
   fi
 
@@ -5616,8 +5456,8 @@ cmd_doctor() {
   # Everything in ~/.dotfiles that shale does not account for, a file as much as
   # a directory: an editor left a 'shale.conf.bak' beside the config and nothing
   # said so.  Nothing whose name begins with '.' - the glob does not match one,
-  # so the '.git', the '.stowrc' and shale's own '.lock' beside the config are
-  # out of it by construction rather than by name.
+  # so a '.git' or a '.stowrc' beside the config is out of it by construction
+  # rather than by name.
   if [ -d "$DOTFILES" ] && { [ ! -r "$DOTFILES" ] || [ ! -x "$DOTFILES" ]; }; then
     denied_verb "$DOTFILES"
     finding "$DENIED_VERB $DOTFILES: permission denied" \

@@ -515,9 +515,9 @@ declarations doing nothing.
 
 ## Permissions on the built tree itself
 
-`~/.dotfiles/current` is `700`, and so are `current.new`, any `current.old` and the lock at
-`~/.dotfiles/.lock`. No layer provides those and no line declares them: shale picks one mode, and
-picks the narrowest, on every machine at every umask.
+`~/.dotfiles/current` is `700`, and so are `current.new` and any `current.old`. No layer provides
+those and no line declares them: shale picks one mode, and picks the narrowest, on every machine at
+every umask.
 
 It matters more than it looks. Every symlink shale makes in `$HOME` resolves *through* that
 directory, so its mode is what decides who may read the file at the end of the link and who may

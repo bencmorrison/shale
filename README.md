@@ -14,7 +14,7 @@ is the machine's business, not the repos'.
 ## Requirements
 
 `bash`, `git` and GNU `stow`, installed with your system package manager, and the coreutils any
-system already has — `cp`, `mv`, `rm`, `mkdir`, `rmdir` and `readlink`. Shale installs nothing,
+system already has — `cp`, `mv`, `rm`, `mkdir` and `readlink`. Shale installs nothing,
 including itself. `git` is used only to clone a layer repository the machine does not have yet, so
 `doctor` reports it missing as a note where no configured layer needs cloning and as a problem where
 one does.
@@ -235,15 +235,9 @@ it splits the two commands that say something alongside their answer: `doctor`'s
 its report and go to stdout with it, while `which`'s note that `build` would refuse the set is a
 diagnostic, so `shale which PATH > file` keeps the answer and leaves the warning on the terminal.
 
-`build` and `apply` take a lock at `~/.dotfiles/.lock` for the whole build and, for `apply`, the
-stow that follows it. A second shale run refuses immediately rather than waiting, and touches
-nothing:
-
-```
-shale: another shale has the lock at /home/you/.dotfiles/.lock
-shale:   build and apply take it so that two of them cannot rebuild /home/you/.dotfiles/current at once
-shale:   if no other shale is running, this lock is stale: remove it with: rmdir '/home/you/.dotfiles/.lock'
-```
+Two shale runs at once are not coordinated. Shale takes no lock, so two `build` or `apply` runs
+against the same `~/.dotfiles` interleave their renames and the tree that results is undefined. Run
+one at a time.
 
 `~/.dotfiles/current` is generated output. It is disposable — a bad build is fixed by fixing a layer
 and building again — and it should never be edited or versioned. Edit the layer, not the result. A
@@ -350,7 +344,7 @@ it cannot open, that no two layers disagree about whether a path is a file or a 
 nothing in `$HOME` at a path the layers provide is something no apply put there — a file, a
 directory, or a link of your own, none of which stow will write over — that no layer ships
 `.stow-local-ignore`, which shale writes itself, or shale itself, that `~/.dotfiles/current` is a
-directory rather than a file or a link to one, that the build lock is neither held nor uncreatable,
+directory rather than a file or a link to one, that a build could create the tree it composes into,
 that nothing in `~/.dotfiles` whose name does not begin with a dot is a stray, that no `current.new`
 has been left beside `current` and no `current.old` that no build is coming to remove, and that no
 link in `$HOME` points into the built tree at a path it no longer provides. Where a `.stowrc` exists
@@ -396,12 +390,11 @@ doctor says nothing about it, where the same two without the dot are both report
 Dotfiles belong inside a layer, at the path they take in `$HOME`.
 
 The dot names doctor does report come from checks of their own rather than from that scan, and each
-knows one thing: a `.stowrc` gets the note that stow reads it, a `.lock` the report on
-the build lock, and `.shale-ignore` and `.shale-modes` are looked for by name beside the config and
-inside every configured layer, so a misplaced one is reported at either, up to the ten doctor names
-before it counts the rest. A copy anywhere else — beside a clone root's layers rather than at the
-top of it, or under a directory no config line makes a layer — is in neither place, and is as
-silent as any other dot name:
+knows one thing: a `.stowrc` gets the note that stow reads it, and `.shale-ignore` and
+`.shale-modes` are looked for by name beside the config and inside every configured layer, so a
+misplaced one is reported at either, up to the ten doctor names before it counts the rest. A copy
+anywhere else — beside a clone root's layers rather than at the top of it, or under a directory no
+config line makes a layer — is in neither place, and is as silent as any other dot name:
 
 ```
 $ shale doctor
@@ -488,12 +481,10 @@ overwrites, and how to carry on from a block that stopped.
   doctor` names them and prints what to do about them, and goes on finding them on every later run,
   which `apply` does not — it speaks only for the apply you just ran.
   [docs/migrating.md](docs/migrating.md) covers the case in full.
-- A shale that is killed outright — `kill -9`, or the machine losing power — leaves its lock
-  directory behind, and a `~/.dotfiles/current.new` as well if it died mid-build. Shale never
-  reclaims a lock, because nothing it can read tells a live holder from a dead one. `doctor` reports
-  the lock and names the command that clears it, and notes `current.new` and any `current.old` beside
-  it, saying what each is. It does not promise the next build will remove them while the lock is
-  still there, because that build will not run: clear the lock and doctor says so instead.
+- A shale that is killed outright — `kill -9`, or the machine losing power — leaves a
+  `~/.dotfiles/current.new` behind if it died mid-build. `doctor` notes it, and any `current.old`
+  beside it, saying what each is; the next build removes both, and where doctor found a problem that
+  stops that build it says so instead.
 - Git cannot store an empty directory, so a layer that needs one ships a `.gitkeep`, which will
   appear in `$HOME`.
 - Git records no permission bits for a directory, and only the executable bit for a file, so a
