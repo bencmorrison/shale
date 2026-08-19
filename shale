@@ -172,12 +172,6 @@ esac
 HOME_PREFIX=${HOME-}
 HOME_PREFIX=${HOME_PREFIX%/}
 
-DOTFILES=$HOME_PREFIX/.dotfiles
-CONF=$DOTFILES/shale.conf
-CUR=$DOTFILES/current
-NEW=$DOTFILES/current.new
-OLD=$DOTFILES/current.old
-
 # The mode of every directory shale makes for itself: the tree a build composes
 # into, and - by the two renames that install it - $CUR and the $OLD it
 # replaced.  Every one of them was 0777 against the caller's umask, so on the
@@ -280,6 +274,88 @@ die() {
   'it decides what every directory listing returns, so a build would drop layer files and name none of them' \
   'unset it, or take the readonly off it, in whatever set it before shale ran'
 
+# The dotfiles directory: everything shale reads that is not a layer's own file,
+# every layer, and the tree a build composes.  $HOME/.dotfiles unless SHALE_DIR
+# names somewhere else, and the whole of what SHALE_DIR moves - the stow target
+# is $HOME either way, because what an apply links into is the home being built
+# and not the place the material is kept.
+#
+# Below die rather than beside HOME_PREFIX at the top, for the reason the check
+# above is: both arms here stop the run, and die is what says so.  Nothing
+# between the two reads any of these names.
+SHALE_DIR=${SHALE_DIR-}
+if [ -n "$SHALE_DIR" ]; then
+  case "$SHALE_DIR" in
+    /*) ;;
+    # A leading '~' lands here with everything else relative, and correctly: the
+    # shell expands a tilde before shale is started, so one that arrives is a
+    # literal character somebody quoted, and shale expands nothing.  Exit 1 and
+    # not 2 - the command line is well formed, and the environment is not.
+    *)
+      die "SHALE_DIR is set to '$SHALE_DIR', which is not an absolute path" \
+        'it names the directory holding shale.conf, the layers and the tree a build composes' \
+        "give it a path beginning with '/', or unset it for $HOME_PREFIX/.dotfiles"
+      ;;
+  esac
+  # Trailing slashes off, exactly as HOME's come off above: every path below is
+  # written as '$DOTFILES/...', so a root that ends in one puts a '//' in the
+  # middle of every path shale prints and compares.
+  DOTFILES=${SHALE_DIR%"${SHALE_DIR##*[!/]}"}
+  # What that leaves of a root of nothing but slashes, and the one absolute path
+  # shale will not take: '/' as the dotfiles directory makes shale.conf and the
+  # built tree furniture of the filesystem root, every entry on the machine a
+  # stray in doctor's scan, and every join above it a '//...'.  Refused whole
+  # rather than half-carried.
+  [ -n "$DOTFILES" ] ||
+    die "SHALE_DIR is set to '$SHALE_DIR', which is the root directory" \
+      'shale keeps shale.conf, the layers and its build output in that directory, and will not keep them at the root of the filesystem' \
+      "give it a directory of its own, or unset it for $HOME_PREFIX/.dotfiles"
+  # $HOME itself, and everything above it.  Both sides of the compare carry the
+  # slash that makes it a path boundary rather than a string prefix, so a home's
+  # sibling whose name merely starts with the home's is not read as holding it;
+  # HOME_PREFIX has had its own trailing slashes taken off at the top of this
+  # file and $DOTFILES a moment ago, so neither can bring a second one.  The arm cannot fire on the
+  # home that leaves HOME_PREFIX empty - a '/' root is refused above, and it is
+  # the only path that holds '/'.
+  case "$HOME_PREFIX/" in
+    "$DOTFILES"/*)
+      die "SHALE_DIR is set to '$SHALE_DIR', which is ${HOME-} or a directory holding it" \
+        'shale composes into that directory and stows the result into your home, and stow will not link a directory into itself: the apply exits 0 having linked nothing' \
+        "give it a directory of its own, or unset it for $HOME_PREFIX/.dotfiles"
+      ;;
+  esac
+else
+  DOTFILES=$HOME_PREFIX/.dotfiles
+fi
+CONF=$DOTFILES/shale.conf
+CUR=$DOTFILES/current
+NEW=$DOTFILES/current.new
+OLD=$DOTFILES/current.old
+
+# $DOTFILES spelled relative to $HOME, and empty where the root is not under the
+# home at all - which is a layout SHALE_DIR makes reachable and the default never
+# was.  The one place a $HOME-relative path has to be compared against the root,
+# in cmd_apply's count, reads it: written as the literal '.dotfiles' it excluded
+# a path that is not the root under a SHALE_DIR, and excluded nothing that is.
+DOTFILES_REL=
+case "$DOTFILES" in
+  "$HOME_PREFIX"/*) DOTFILES_REL=${DOTFILES#"$HOME_PREFIX"/} ;;
+esac
+
+# The same directory as usage spells it: abbreviated to a '~/' wherever the home
+# is the thing it is under, and absolute wherever it is not.  The abbreviation is
+# exact rather than decorative - the two arms are the two halves of the case
+# above - so the default root prints the '~/.dotfiles' this text has always said,
+# and a SHALE_DIR outside the home prints the only spelling that is true of it.
+if [ -n "$DOTFILES_REL" ]; then
+  # Quoted, and it has to be: an unquoted '~/' in an assignment is expanded by
+  # bash, which would put the home back in the very string that abbreviates it.
+  # shellcheck disable=SC2088  # a tilde to print, not one to expand
+  DOTFILES_SHOWN="~/$DOTFILES_REL"
+else
+  DOTFILES_SHOWN=$DOTFILES
+fi
+
 # 'cannot search' or 'cannot read' for the directory $1, in DENIED_VERB.  The
 # search bit is tested first, so mode 0000 - missing both - is reported as
 # 'cannot search', which is the word which uses for the same directory.
@@ -291,23 +367,29 @@ denied_verb() {
   fi
 }
 
+# Every path here is the resolved root rather than the default's spelling: with
+# SHALE_DIR set, a usage naming ~/.dotfiles describes a directory this run does
+# not read.  Under the default the three are the '~/.dotfiles' they have always
+# been, DOTFILES_SHOWN abbreviating exactly what it abbreviates.
 usage() {
   # shellcheck disable=SC2088  # a tilde to print, not one to expand
   printf '%s\n' \
     'shale - layered dotfiles builder' \
     '' \
     'usage:' \
-    '  shale build          compose the configured layers into ~/.dotfiles/current' \
+    "  shale build          compose the configured layers into $DOTFILES_SHOWN/current" \
     '  shale apply          build, then stow current into your home directory' \
     '  shale doctor         check prerequisites, config, and broken links' \
     '  shale which PATH     show which layer provides PATH, and what it shadows' \
     '' \
-    '~/.dotfiles/shale.conf lists one layer per line, lowest precedence first:' \
+    "$DOTFILES_SHOWN/shale.conf lists one layer per line, lowest precedence first:" \
     '' \
     '  NAME  PATH  [URL]' \
     '' \
-    "PATH is relative to ~/.dotfiles.  URL says how to clone PATH's top-level" \
+    "PATH is relative to $DOTFILES_SHOWN.  URL says how to clone PATH's top-level" \
     'directory; give it once per directory and leave it off the other lines.' \
+    '' \
+    'SHALE_DIR, an absolute path, names that directory; ~/.dotfiles without it.' \
     '' \
     'A .shale-ignore file at the top of a clone root blocks paths from every apply.' \
     'A .shale-modes file there declares modes, one "700  .ssh" per line.'
@@ -4065,8 +4147,12 @@ which_normalise() {
     '~/'*) path=$HOME_PREFIX/${path#'~/'} ;;
   esac
 
-  # Before the $HOME strip, not after it: $DOTFILES is itself under $HOME, so
-  # stripping $HOME first leaves a '.dotfiles/...' that matches no layer.
+  # Before the $HOME strip, not after it, whichever of the two directories holds
+  # the other.  Under the default root $DOTFILES is itself under $HOME, and
+  # stripping $HOME first leaves a '.dotfiles/...' that matches no layer; under a
+  # SHALE_DIR outside $HOME the strip below would refuse the path as being
+  # outside the home before any layer had been looked at.  What this leaves is
+  # relative, so neither arm below can fire on what it stripped.
   longest=
   root=
   for prefix in current ${LAYER_PATHS[@]+"${LAYER_PATHS[@]}"}; do
@@ -4922,9 +5008,11 @@ count_dangling_links() {
     # under this path - stow refuses to link into the stow directory it was
     # given, and says so - so the arm only ever answers for a link something
     # else made, at a path a layer once composed a '.dotfiles' of its own into.
-    case "$rel" in
-      .dotfiles | .dotfiles/*) continue ;;
-    esac
+    if [ -n "$DOTFILES_REL" ]; then
+      case "$rel" in
+        "$DOTFILES_REL" | "$DOTFILES_REL"/*) continue ;;
+      esac
+    fi
     target=$CUR/$rel
     { [ ! -e "$target" ] && [ ! -L "$target" ]; } || continue
     link=$HOME_PREFIX/$rel
@@ -5453,7 +5541,7 @@ cmd_doctor() {
   # them there is anything to read.
   audit_mode_declarations
 
-  # Everything in ~/.dotfiles that shale does not account for, a file as much as
+  # Everything in $DOTFILES that shale does not account for, a file as much as
   # a directory: an editor left a 'shale.conf.bak' beside the config and nothing
   # said so.  Nothing whose name begins with '.' - the glob does not match one,
   # so a '.git' or a '.stowrc' beside the config is out of it by construction

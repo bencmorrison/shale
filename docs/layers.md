@@ -1,11 +1,12 @@
 # Authoring a layer
 
 A layer is a directory tree that mirrors your home directory. Everything in it is copied, path for
-path, into `~/.dotfiles/current`, and almost everything in `current` is linked into `$HOME`. A file
-at `personal/base/.config/nvim/init.lua` becomes `~/.config/nvim/init.lua`. The exception is the
-handful of names stow never links — version-control furniture, editor backups and emacs autosaves —
-which *Where a layer lives* below sets out; apart from those there is nothing else to learn about
-the mapping.
+path, into `~/.dotfiles/current` — or into `current` under whatever `SHALE_DIR` names, which the
+README's *Configuration* section covers — and almost everything in `current` is linked into `$HOME`.
+A file at `personal/base/.config/nvim/init.lua` becomes `~/.config/nvim/init.lua`. The exception is
+the handful of names stow never links — version-control furniture, editor backups and emacs
+autosaves — which *Where a layer lives* below sets out; apart from those there is nothing else to
+learn about the mapping.
 
 Shale copies files. It never merges them, never templates them and never reads what is inside one.
 Fragment directories, numeric prefixes and shared helper files are conventions for *your* layers,

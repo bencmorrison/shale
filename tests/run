@@ -2034,6 +2034,274 @@ test_config_reached_through_a_symlink_parses() {
   assert_empty "$shale_err" 'stderr'
 }
 
+# ------------------------------------------------------- the dotfiles root
+#
+# SHALE_DIR moves shale.conf, the layers and the built tree; the stow target
+# stays $HOME.  Every other case in this file runs with the variable unset, so
+# the default is asserted by the whole of the rest of the suite rather than here.
+
+# A whole dotfiles root at $CASE_DIR/elsewhere, in shale_root, with SHALE_DIR
+# exported to it for the rest of the case.  Inside the case's sandbox and outside
+# its $HOME, which is the layout the variable exists for and the one conf and
+# mklayer cannot express - both write under $HOME/.dotfiles by construction.
+#
+# shale_root is published rather than made local: the case owns it, exactly as
+# mkrepo publishes repo_url.
+shale_dir_fixture() {
+  sandbox_mkdir "$CASE_DIR/elsewhere"
+  shale_root=$sandbox_dir
+  sandbox_write "$shale_root/personal/base" .zshrc 'elsewhere/.zshrc'
+  sandbox_write "$shale_root" shale.conf 'base personal/base'
+  export SHALE_DIR=$shale_root
+}
+
+test_config_shale_dir_moves_the_root_out_of_home() {
+  local shale_root
+  shale_dir_fixture
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq 'elsewhere/.zshrc' "$(cat "$shale_root/current/.zshrc")" 'the built tree'
+  assert_missing "$HOME/.dotfiles" 'the default root'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  # The link lands in $HOME and points into the tree under SHALE_DIR: the target
+  # moved and the destination did not.
+  assert_symlink_to "$HOME/.zshrc" "$shale_root/current/.zshrc"
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" 'shale: no problems found' 'the doctor report'
+  run_shale which .zshrc
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" "$shale_root/personal/base/.zshrc" 'the which answer'
+  # After all four, because a command that created it would be the defect.
+  assert_missing "$HOME/.dotfiles" 'the default root'
+}
+
+# Every command, not one: the value is wrong before there is a command to run
+# under it, so each of the four refuses in the same words - the bare invocation
+# that prints usage included.
+test_config_shale_dir_refuses_a_relative_path_from_every_command() {
+  local args
+  export SHALE_DIR=relative/path
+  for args in build apply doctor 'which .zshrc' '' help -h --help; do
+    # Unquoted on purpose: 'which .zshrc' is two words.
+    # shellcheck disable=SC2086
+    run_shale $args
+    assert_status 1 "$shale_status" "'shale $args' exit status"
+    assert_contains "$shale_err" \
+      "shale: SHALE_DIR is set to 'relative/path', which is not an absolute path" \
+      "'shale $args' stderr"
+    assert_contains "$shale_err" \
+      "shale:   give it a path beginning with '/', or unset it for $HOME/.dotfiles" \
+      "'shale $args' stderr"
+  done
+  assert_missing "$HOME/.dotfiles" 'the default root'
+  # The case runs with its working directory at $CASE_DIR, so this is where a
+  # shale that resolved the value against $PWD would have put the tree.
+  assert_missing "$CASE_DIR/relative" 'a root resolved against the working directory'
+}
+
+# The shell expands a real tilde before shale is started, so one that reaches
+# shale is a literal character somebody quoted - and shale expands nothing.
+test_config_shale_dir_refuses_a_tilde_it_did_not_expand() {
+  local value
+  # shellcheck disable=SC2088  # a tilde to hand to shale, not one to expand
+  for value in '~' '~/elsewhere'; do
+    export SHALE_DIR=$value
+    run_shale doctor
+    assert_status 1 "$shale_status" "SHALE_DIR=$value exit status"
+    assert_contains "$shale_err" \
+      "shale: SHALE_DIR is set to '$value', which is not an absolute path" \
+      "SHALE_DIR=$value stderr"
+  done
+  assert_missing "$HOME/.dotfiles" 'the default root'
+  assert_missing "$CASE_DIR/~" 'a root taken literally'
+}
+
+# The one absolute path that is refused, and the reason is arithmetic as much as
+# taste: '/' as the root makes every '$DOTFILES/...' join a '//...'.  '//' is the
+# same value after the trailing slashes come off, and is here so that the strip
+# cannot turn a refusal into an acceptance.
+test_config_shale_dir_refuses_the_root_directory() {
+  local value
+  for value in / // ///; do
+    export SHALE_DIR=$value
+    run_shale doctor
+    assert_status 1 "$shale_status" "SHALE_DIR=$value exit status"
+    assert_contains "$shale_err" \
+      "shale: SHALE_DIR is set to '$value', which is the root directory" \
+      "SHALE_DIR=$value stderr"
+  done
+  assert_missing "$HOME/.dotfiles" 'the default root'
+}
+
+# The refusal that is about $HOME rather than about the string: a root at the
+# home, or above it, is one stow is asked to link into itself.  It accepts the
+# command and links nothing - 'WARNING: skipping target which was current stow
+# directory' on both 2.3.1 and 2.4.1, and an exit 0 - so without this arm the
+# whole of an apply is a silent no-op.  The two audits disagree there as well:
+# apply's dangling count excludes nothing under a root that is not below the
+# home, and doctor's excludes the whole walk.
+#
+# The directory under the home is in the same case because the arm is a path
+# comparison, and one written as a string prefix refuses it too.
+test_config_shale_dir_refuses_the_home_and_its_ancestors() {
+  local value under
+  for value in "$HOME" "${HOME%/*}" "${HOME%/*/*}"; do
+    export SHALE_DIR=$value
+    run_shale doctor
+    assert_status 1 "$shale_status" "SHALE_DIR=$value exit status"
+    assert_contains "$shale_err" \
+      "shale: SHALE_DIR is set to '$value', which is $HOME or a directory holding it" \
+      "SHALE_DIR=$value stderr"
+    assert_contains "$shale_err" \
+      'shale:   shale composes into that directory and stows the result into your home, and stow will not link a directory into itself: the apply exits 0 having linked nothing' \
+      "SHALE_DIR=$value stderr"
+  done
+  assert_missing "$HOME/current" 'a tree composed into the home itself'
+  assert_missing "$HOME/.dotfiles" 'the default root'
+  # A root under the home, which is what the default is and what the arm must
+  # not take with it.  A sibling of the home whose name starts with the home's,
+  # for the boundary the '/' in the compare is there for.
+  under=$HOME/elsewhere
+  sandbox_write "$under/personal/base" .zshrc 'elsewhere/.zshrc'
+  sandbox_write "$under" shale.conf 'base personal/base'
+  export SHALE_DIR=$under
+  run_shale build
+  assert_status 0 "$shale_status" 'a root under the home'
+  assert_eq 'elsewhere/.zshrc' "$(cat "$under/current/.zshrc")" 'the built tree'
+  # A sibling whose name starts with the home's, which a compare written as a
+  # string prefix rather than a path one would take for a directory under it.
+  # Asserted by building there rather than by the absence of a message: a
+  # refusal for any other reason would satisfy a negative assertion too.
+  sandbox_write "${HOME}extra/personal/base" .zshrc 'extra/.zshrc'
+  sandbox_write "${HOME}extra" shale.conf 'base personal/base'
+  export SHALE_DIR=${HOME}extra
+  run_shale build
+  assert_status 0 "$shale_status" 'a sibling of the home whose name extends it'
+  assert_empty "$shale_err" 'the stderr for a sibling of the home'
+  assert_eq 'extra/.zshrc' "$(cat "${HOME}extra/current/.zshrc")" 'the built tree'
+}
+
+# Usage names the root this run reads, and every line of it that names one.  A
+# usage that said ~/.dotfiles under a SHALE_DIR would be describing a directory
+# the run does not touch, which is the one document a reader consults precisely
+# because they do not know where things are.
+#
+# The '~/' arm is asserted against a root that is not the default: abbreviating
+# by printing the literal '~/.dotfiles' passes for the default and for nothing
+# else.
+test_config_shale_dir_usage_names_the_root_in_force() {
+  local shale_root spelling
+  run_shale
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    '  shale build          compose the configured layers into ~/.dotfiles/current' \
+    'usage under the default root'
+  shale_dir_fixture
+  run_shale
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "  shale build          compose the configured layers into $shale_root/current" \
+    'usage under a root outside the home'
+  assert_contains "$shale_out" \
+    "$shale_root/shale.conf lists one layer per line, lowest precedence first:" \
+    'usage under a root outside the home'
+  assert_contains "$shale_out" "PATH is relative to $shale_root.  URL says" \
+    'usage under a root outside the home'
+  # The spellings that would still be there had the text stayed static, each one
+  # a whole path rather than a substring of the sentence that names the variable.
+  # shellcheck disable=SC2088  # tildes to look for in shale's output, not to expand
+  for spelling in '~/.dotfiles/current' '~/.dotfiles/shale.conf' 'relative to ~/.dotfiles.'; do
+    assert_not_contains "$shale_out" "$spelling" 'usage under a root outside the home'
+  done
+  # And under the home, where the abbreviation is the whole of what is being
+  # asserted: the home is a temporary directory, so an unabbreviated path here
+  # would be unmissable.
+  export SHALE_DIR=$HOME/elsewhere
+  run_shale
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    '  shale build          compose the configured layers into ~/elsewhere/current' \
+    'usage under a root inside the home'
+  assert_not_contains "$shale_out" "$HOME/elsewhere" 'usage under a root inside the home'
+}
+
+# Not the same string, and it must be the same root: the strip is what keeps a
+# '//' out of every path a run prints and compares.
+test_config_shale_dir_ignores_trailing_slashes() {
+  local shale_root plain slashed
+  shale_dir_fixture
+  run_shale build
+  assert_status 0 "$shale_status"
+  run_shale which .zshrc
+  assert_status 0 "$shale_status"
+  plain=$shale_out
+  export SHALE_DIR=$shale_root///
+  run_shale which .zshrc
+  assert_status 0 "$shale_status"
+  slashed=$shale_out
+  assert_eq "$plain" "$slashed" 'the answer under a trailing slash'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq "shale: composed layer 'base' from $shale_root/personal/base" \
+    "$shale_out" 'the build under a trailing slash'
+  assert_empty "$shale_err" 'the build stderr under a trailing slash'
+  assert_eq 'elsewhere/.zshrc' "$(cat "$shale_root/current/.zshrc")" 'the built tree'
+}
+
+# Empty is unset, byte for byte, and both are $HOME/.dotfiles.
+test_config_shale_dir_empty_is_the_default_root() {
+  local unset_out unset_err
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  unset_out=$shale_out
+  unset_err=$shale_err
+  assert_contains "$unset_out" 'shale: no problems found' 'the doctor report'
+  export SHALE_DIR=
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq "$unset_out" "$shale_out" 'the doctor report under an empty SHALE_DIR'
+  assert_eq "$unset_err" "$shale_err" 'the doctor stderr under an empty SHALE_DIR'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built tree'
+}
+
+# which strips the root's prefixes before it applies the under-$HOME rule, and
+# under a root outside $HOME that order is the whole of what makes an absolute
+# spelling answerable: taken the other way round, every path under SHALE_DIR is
+# refused as being outside the home before any layer has been looked at.
+test_config_shale_dir_which_answers_for_a_path_spelled_under_it() {
+  local shale_root by_rel by_home by_tree by_layer
+  shale_dir_fixture
+  run_shale build
+  assert_status 0 "$shale_status"
+  run_shale which .zshrc
+  assert_status 0 "$shale_status"
+  by_rel=$shale_out
+  assert_contains "$by_rel" "winner    base  $shale_root/personal/base/.zshrc" 'the which answer'
+  run_shale which "$HOME/.zshrc"
+  assert_status 0 "$shale_status"
+  by_home=$shale_out
+  run_shale which "$shale_root/current/.zshrc"
+  assert_status 0 "$shale_status"
+  by_tree=$shale_out
+  run_shale which "$shale_root/personal/base/.zshrc"
+  assert_status 0 "$shale_status"
+  by_layer=$shale_out
+  assert_eq "$by_rel" "$by_home" 'the answer for the path spelled from the home'
+  assert_eq "$by_rel" "$by_tree" 'the answer for the path spelled in the built tree'
+  assert_eq "$by_rel" "$by_layer" 'the answer for the path spelled in the layer'
+  # The boundary: a path under the root that is neither the built tree nor a
+  # layer is not a path in the home being composed, and is refused as one.
+  run_shale which "$shale_root/shale.conf"
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: $shale_root/shale.conf is not under $HOME" 'stderr'
+}
+
 # ---------------------------------------------------------------- build cases
 #
 # build is the first command that writes anything, so most of these assert the
@@ -16184,6 +16452,11 @@ run_case() {
     export GIT_COMMITTER_NAME='shale tests'
     export GIT_COMMITTER_EMAIL='tests@shale.invalid'
     unset STOW_DIR
+    # Every case but the ones below shale_dir_fixture runs against the default
+    # root, and those set it themselves.  Without this a developer who exports it
+    # runs a different suite from CI's, and every path assertion in the file is
+    # wrong at once.
+    unset SHALE_DIR
     # cd here so no .stowrc from wherever the suite was started is reachable.
     cd "$case_dir" || exit 1
     require_sandbox

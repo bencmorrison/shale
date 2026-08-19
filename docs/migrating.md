@@ -7,6 +7,9 @@ into one package and stows that, so the move is mechanical — unstow what is th
 into layers, list them, apply. Both paths meet at *What a first apply refuses, and why*, and the way
 back out is the same for both.
 
+Every `~/.dotfiles` below is the default root; if you set `SHALE_DIR`, read it as that directory
+instead — the README's *Configuration* section says what the variable covers.
+
 Do it from a shell you can afford to lose. Either path takes `~/.zshrc`, `~/.profile` and everything
 beside them out of `$HOME` for a while — unstowed, or moved aside — and every shell opened between
 then and the apply falls back to the system defaults. Keep a second session already running, and do
