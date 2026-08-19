@@ -4301,92 +4301,6 @@ obscured_ancestor() {
   done
 }
 
-# Zero when something is at $1/$2 and every component of $2 is spelled on disk
-# exactly as it was given, byte for byte.  which's own, and the only test in
-# this script that resolves a path somebody typed rather than one read out of a
-# directory.
-#
-# -e and -L answer through the filesystem's idea of when two names are one name,
-# and on a case-insensitive volume - APFS's default, so macOS's, so the floor's -
-# '.git' and '.GIT' are one name to them.  Every test that decides whether the
-# composer reaches a path compares a name read from a listing against a literal,
-# byte for byte: compose_dir's three skips, doctor's three, and which's own
-# 'unreached'.  So on such a volume a bare -e disagrees with all of them at once.
-# A layer's 'd/.GIT/c' is composed - '.GIT' is not the string '.git' - and build
-# exits 1 at a collision there, while which resolved a typed 'd/.git/c' to that
-# same file, read its own '.git' out of the string it was given, and called the
-# path one no build reaches: silent where build fails, which is the wrong
-# direction to be silent in.  Reproduced on macOS 26.4, and unreproducible on
-# ext4.
-#
-# So which asks the composer's question rather than the filesystem's, and the
-# answer is that '.GIT' is a different name from '.git' everywhere.  No case rule
-# is involved and none is wanted: folding case is locale business - the Turkish
-# dotless i - and a comparison that moved with LC_CTYPE would be the defect this
-# closes wearing a different hat.  Byte equality is what '=' inside a [ already
-# is, and the listing itself runs in list_dir's byte locale.
-#
-# On a case-sensitive volume every answer here is the answer -e gave, so nothing
-# there changes and no case in this suite can tell the difference.
-#
-# A directory that cannot be listed falls back to the filesystem's answer, which
-# is what -e alone gave before: telling '.git' from '.GIT' needs the parent's
-# entries, and the read bit is what hands them over.  A directory that is
-# searchable but not readable is therefore the one state where which is back to
-# folding, and it says nothing about it - obscured_ancestor, which is where
-# which reports a directory it cannot look in, tests only -x and is silent on a
-# missing -r.  What the reader gets instead is build's own refusal, compose_dir
-# dying on a layer directory it cannot read; so the wrong answer here never
-# describes a build that runs, and nothing tells them so until they run one.
-#
-# '.' and an empty component are left to the kernel, so that a typed 'a/./b' and
-# 'a//b' resolve here as they do at every -e in this script; '..' is refused by
-# which_normalise before anything reaches this.
-path_exists_as_spelled() {
-  local here=$1 rest=$2 want e base found
-  while :; do
-    case "$rest" in
-      */*)
-        want=${rest%%/*}
-        rest=${rest#*/}
-        ;;
-      *)
-        want=$rest
-        rest=
-        ;;
-    esac
-    case "$want" in
-      '' | '.')
-        [ -n "$rest" ] || break
-        continue
-        ;;
-    esac
-    if [ -r "$here" ] && [ -x "$here" ]; then
-      found=0
-      list_dir "$here" 1
-      for e in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
-        base=${e##*/}
-        # Dropped by name, as at every glob in this script: bash 3.2 matches '.'
-        # and '..' with "$here"/.* where 5.2's globskipdots does not.
-        case "$base" in
-          . | ..) continue ;;
-        esac
-        [ "$base" = "$want" ] || continue
-        # Also where an unmatched glob lands, its literal being at no path - so
-        # a layer holding a file genuinely called '*' answers here and a layer
-        # holding none does not.
-        { [ -e "$e" ] || [ -L "$e" ]; } || continue
-        found=1
-        break
-      done
-      [ "$found" -eq 1 ] || return 1
-    fi
-    here=$here/$want
-    [ -n "$rest" ] || break
-  done
-  [ -e "$here" ] || [ -L "$here" ]
-}
-
 # How $1 is composed, in WHICH_KIND, and how it is shown, in WHICH_SHOW.  A
 # symlink is a leaf whatever it points at, because the composer treats one that
 # way: calling it a directory here promises a merge build refuses to perform.
@@ -6041,11 +5955,7 @@ cmd_which() {
   while [ "$i" -gt 0 ]; do
     i=$((i - 1))
     path=$DOTFILES/${LAYER_PATHS[$i]}/$rel
-    # Spelled as given rather than -e alone: on a case-insensitive volume a
-    # layer's '.GIT' answers -e for a typed '.git', and every other test in this
-    # command reads the spelling it was given.  A layer providing one name and
-    # not the other is a layer this loop must not name for the other.
-    if path_exists_as_spelled "$DOTFILES/${LAYER_PATHS[$i]}" "$rel"; then
+    if [ -e "$path" ] || [ -L "$path" ]; then
       which_describe "$path"
       WHICH_NAMES+=("${LAYER_NAMES[$i]}")
       WHICH_KINDS+=("$WHICH_KIND")
@@ -6095,10 +6005,7 @@ cmd_which() {
     # that an ordinary build copies.
     if [ "${rel%%/*}" = .stow-local-ignore ]; then
       emit "note: shale writes $CUR/.stow-local-ignore itself, and no build accepts a layer providing one"
-    elif path_exists_as_spelled "$CUR" "$rel"; then
-      # The same spelling the loop above answered 'no layer provides' on: with a
-      # bare -e a built '.GIT' answers for a typed '.git' on a case-insensitive
-      # volume, and this would call a tree the last build wrote stale.
+    elif [ -e "$CUR/$rel" ] || [ -L "$CUR/$rel" ]; then
       emit "note: present in current/ but no layer provides it — current/ is stale, run 'shale build'"
     fi
     exit 1
