@@ -7925,6 +7925,9 @@ test_doctor_dot_entries_are_never_strays() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
   sandbox_mkdir "$HOME/.dotfiles/.git"
+  # The three a clone root has of its own, which is the common shape of
+  # $HOME/.dotfiles and the one a scan reaching dot names would be noisiest on.
+  sandbox_mkdir "$HOME/.dotfiles/.github"
   # Not '.stowrc' and not '.lock': doctor has a line of its own for each of
   # those, and this case is about the ones it should say nothing at all about.
   sandbox_write "$HOME/.dotfiles" .gitignore 'current/'
@@ -7933,6 +7936,64 @@ test_doctor_dot_entries_are_never_strays() {
   assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
   assert_not_contains "$shale_out" 'is not a layer' 'stdout'
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The same rule from the reader's side rather than shale's, and the whole of
+# what the README promises about it in one report: the scan stops at the leading
+# dot, so 'tmux.conf' and 'old-layer' are notes while '.tmux.conf' and
+# '.old-layer' - the same two mistakes, made by someone whose files begin with a
+# dot - are silence.  The pair is what makes that silence readable: a case
+# planting the dot names alone goes green on a doctor that has stopped scanning
+# $HOME/.dotfiles at all, which is the same green for the opposite defect.
+#
+# The last third is the exception, and it belongs here rather than in a case of
+# its own because the two are one claim.  A reader who has met the
+# '.shale-ignore is read by nothing' note has been told a dot name in that
+# directory does get reported, so a README saying dot names are skipped reads as
+# wrong until it says which two are not: those come from a check that looks for
+# them by name, and so survives a scan that never sees them.
+test_doctor_the_stray_scan_stops_at_the_leading_dot() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # Applied, because an unbuilt tree is a note of its own and so is a built one
+  # nothing has linked: the count below is of every note in the report, and it
+  # is the count that says nothing else was reported.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  sandbox_write "$HOME/.dotfiles" tmux.conf 'set -g mouse on'
+  sandbox_write "$HOME/.dotfiles" .tmux.conf 'set -g mouse on'
+  sandbox_mkdir "$HOME/.dotfiles/old-layer"
+  sandbox_mkdir "$HOME/.dotfiles/.old-layer"
+  sandbox_write "$HOME/.dotfiles" .shale-ignore '.DS_Store'
+  # The placement the exception does not cover: inside the clone root, beside
+  # the layers rather than at the top of it, and under a directory no config
+  # line makes a layer.  The by-name check reads the config's layers and the
+  # top of $HOME/.dotfiles, and this is in neither - so it is silent, and a
+  # README that promised a misplaced one is reported wherever it is would be
+  # wrong here.  'personal' is a configured layer path's first component, so
+  # nothing above notes the directory holding it either.
+  sandbox_write "$HOME/.dotfiles/personal/sub" .shale-ignore '.DS_Store'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/tmux.conf is not a layer, and no build reads it" 'stdout'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/old-layer is not a configured layer" 'stdout'
+  # The path with the prefix on its left and a space on its right, so the needle
+  # is a whole name in a whole line and matches whatever doctor might come to
+  # say about it.  Half of one - 'is not a layer', or the path without the
+  # 'shale: ' - is true of the two notes just asserted, and would make this pass
+  # by finding the entry that is meant to be reported.
+  assert_not_contains "$shale_out" "shale: $HOME/.dotfiles/.tmux.conf " 'stdout'
+  assert_not_contains "$shale_out" "shale: $HOME/.dotfiles/.old-layer " 'stdout'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/.shale-ignore is read by nothing" 'stdout'
+  assert_not_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/personal/sub/.shale-ignore " 'stdout'
+  # Three, so the three silences above are silence in a report that had
+  # something to say: a fourth note is one of them reported after all.
+  assert_contains "$shale_out" \
+    'shale: no problems found, but read the 3 notes above' 'stdout'
 }
 
 # The scan is a glob and a -d test, and a directory that cannot be listed or

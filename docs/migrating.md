@@ -245,8 +245,9 @@ shale build
 shale which .zshrc
 ```
 
-`doctor` reports any package left in `~/.dotfiles` that no config line claims, which is how a
-package you forgot to convert shows up:
+`doctor` reports any package left in `~/.dotfiles` whose name does not begin with a dot and that no
+config line claims, which is how a package you forgot to convert shows up. One named with a leading
+dot is not reported — that scan reads no dot name at all — so check for those yourself:
 
 ```
 shale: /home/you/.dotfiles/common is not a configured layer
