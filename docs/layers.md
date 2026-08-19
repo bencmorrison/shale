@@ -497,7 +497,6 @@ something removed the link. The mode is on the copy in `current/` and on nothing
 shale: 1 declared mode is not on anything in /home/you
 shale:   /home/you/.dotfiles/personal/.shale-modes:4 declares 600, and nothing in /home/you is at /home/you/.netrc
 shale:   the built tree holds each of these paths with the declared mode on it, and an apply is what puts one in /home/you
-shale:   'shale which PATH' says why a path in the tree is not linked
 ```
 
 Nothing is set on a path an ignore list blocks, in `$HOME` or below it, declaration or no
@@ -574,7 +573,7 @@ layer's own copy directly and there is no such finding, because no layer shadows
 Watch for `~/.stowrc` and `~/.dotfiles/.stowrc`. Their `--ignore` patterns are *appended* to the
 ones stow is already using rather than overriding them, so a stray `--ignore=zshrc` leaves
 `~/.zshrc` silently unlinked with `shale apply` exiting 0. `shale doctor` notes a resource file if
-one exists, and names the stow options it sets.
+one exists; what is in it is stow's business and shale never reads it.
 
 ## Blocking a file without removing it
 

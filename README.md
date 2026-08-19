@@ -168,8 +168,7 @@ one path resolve by config order, and `shale which` names the line that wins.
 [docs/layers.md](docs/layers.md) has the whole of it.
 
 Every transcript below was produced from that config, in a home directory at `/home/you` that had
-been applied once already — `doctor` says more before the first build, and more before the first
-apply, than after both. Where a
+been applied once already — `doctor` says more before the first build than after one. Where a
 transcript needed a fault to show, the text says what was broken first.
 
 ## Commands
@@ -314,26 +313,11 @@ shale: no layer provides '.vimrc'
 ```
 
 `which` also answers the question that brings most people to it — why a file it names is not in
-`$HOME`. Where shale knows the reason it gives it: an ignore pattern of yours, stow's own default
-list, a `.git` no build composes. Where it does not, it says what it can see, which is that the file
-is in `current/` and nothing is at that path in your home directory:
-
-```
-$ shale which secret
-winner    base  /home/you/.dotfiles/personal/base/secret
-shale: note: 'secret' is in the built tree at /home/you/.dotfiles/current/secret, and nothing is at /home/you/secret
-shale:   something has linked other paths from that tree, though not necessarily since this one reached it
-shale:   run 'shale apply': a path still missing after one is a path stow declined to link
-shale:   stow reads /home/you/.stowrc as well, and shale does not act on what is in it
-shale:   shale doctor names the options such a file sets, any of which can keep this path out of an apply
-```
-
-That covers every cause at once: a `--ignore` in a stow resource file, an option shale does not
-model, a stow version that behaves differently. Run the apply it names — an apply builds first, so a
-file still missing after one is a file stow was offered and declined. A resource file setting
-`--dotfiles` is the one exception shale names rather than reasons about: stow links `dot-zshrc` as
-`.zshrc`, so shale says it cannot follow the rename and stops there. A path that is in `$HOME` gets
-no such note, whether it is a link into `current/`, a file of your own, or a link somewhere else.
+`$HOME` — for the reasons shale knows: an ignore pattern of yours, stow's own default list, a `.git`
+no build composes, a pair of layers `build` would refuse. Where it knows none it says nothing, and
+what is left to check is `~/.stowrc` and `~/.dotfiles/.stowrc`: stow reads both, shale reads neither,
+and an `--ignore` in one takes a file out of every apply with each command exiting 0. `shale doctor`
+names such a file where one exists.
 
 ## When two layers disagree about a path
 
@@ -369,11 +353,10 @@ directory, or a link of your own, none of which stow will write over — that no
 directory rather than a file or a link to one, that the build lock is neither held nor uncreatable,
 that nothing in `~/.dotfiles` whose name does not begin with a dot is a stray, that no `current.new`
 has been left beside `current` and no `current.old` that no build is coming to remove, and that no
-link in `$HOME` points into the built tree at a path it no longer provides, and that something from
-that tree is linked in `$HOME` at all — a built tree with nothing linked is what a machine that has
-never been applied looks like, and nothing in it is in use. Where a `.stowrc` exists it names the
-stow options that file sets, because several of them change an apply and three of them make it do
-nothing at all. It changes nothing itself.
+link in `$HOME` points into the built tree at a path it no longer provides. Where a `.stowrc` exists
+it says so, because stow appends its `--ignore` patterns to the ones shale passes and one of them can
+drop a file from an apply without a word. It reads nothing out of that file, and changes nothing
+itself.
 
 ```
 $ shale doctor
@@ -413,7 +396,7 @@ doctor says nothing about it, where the same two without the dot are both report
 Dotfiles belong inside a layer, at the path they take in `$HOME`.
 
 The dot names doctor does report come from checks of their own rather than from that scan, and each
-knows one thing: a `.stowrc` gets the note about the stow options it sets, a `.lock` the report on
+knows one thing: a `.stowrc` gets the note that stow reads it, a `.lock` the report on
 the build lock, and `.shale-ignore` and `.shale-modes` are looked for by name beside the config and
 inside every configured layer, so a misplaced one is reported at either, up to the ten doctor names
 before it counts the rest. A copy anywhere else — beside a clone root's layers rather than at the
