@@ -95,6 +95,17 @@ nothing else does.
 
 The config is machine-specific and belongs to the machine, not to any layer repo.
 
+`~/.dotfiles` is the default and not the only choice: set `SHALE_DIR` to an absolute path and that
+directory holds `shale.conf`, the layers and the built tree instead. Every path `shale` prints names
+the directory in force, the usage text above included. Trailing slashes are ignored; an unset or
+empty `SHALE_DIR` is `~/.dotfiles` exactly as before; and a message naming the variable refuses a
+relative path, a path starting with a literal `~`, `/` itself, and `$HOME` or any directory above it
+— shale composes into that directory and stows the result into `$HOME`, and stow will not link a
+directory into itself. What `apply` links into is `$HOME` whatever the root is: the variable moves
+where the material is kept, not where it lands. Every command reads it, so export it from the
+environment rather than setting it on one command line — a build under one root and an apply under
+another leave `$HOME` linked into a tree nothing rebuilds.
+
 ## Blocking a file from every apply
 
 `.shale-ignore`, at the top of a clone root, lists the files no apply should link:
@@ -189,6 +200,8 @@ usage:
 
 PATH is relative to ~/.dotfiles.  URL says how to clone PATH's top-level
 directory; give it once per directory and leave it off the other lines.
+
+SHALE_DIR, an absolute path, names that directory; ~/.dotfiles without it.
 
 A .shale-ignore file at the top of a clone root blocks paths from every apply.
 A .shale-modes file there declares modes, one "700  .ssh" per line.
