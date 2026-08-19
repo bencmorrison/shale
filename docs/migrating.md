@@ -92,8 +92,7 @@ work queue. Take it in this order.
 
 1. **Build, which touches nothing in `$HOME`.** `shale build` writes only `~/.dotfiles/current`, so
    it is safe to run with your files where they are, and it gives you the layers' version of each
-   path to compare against. From here until the apply in step 5, `shale doctor` says that nothing in
-   the built tree is linked yet — that is the expected report at this stage, not a fault.
+   path to compare against.
 
 2. **Compare, path by path.** `shale which` names the layer a version came from, and `diff` says what
    adopting it would cost you:

@@ -1098,24 +1098,6 @@ have_locale() {
   locale -a 2>/dev/null | grep -qxF "${1-}"
 }
 
-# The whole of doctor's report on a machine that has built and never applied, on
-# stdout for a whole-report assertion to compare against.
-#
-# A built tree with nothing linked into $HOME is a state doctor names, so this
-# and not 'shale: no problems found' is the clean report for a case that builds
-# without applying - which most of them do, an apply costing a stow run they
-# have no other use for.  Here in one place because twenty-two of them assert
-# it, and none of them is about it: the wording is pinned line by line in
-# test_doctor_names_a_built_tree_nobody_has_applied, and this is the baseline
-# the rest assert they have not disturbed.
-doctor_unapplied_report() {
-  printf '%s\n' \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" \
-    "shale:   build composes that tree and apply is what links it into $HOME, so until an apply runs none of it is in use" \
-    'shale:   apply it with: shale apply' \
-    'shale: no problems found, but read the note above'
-}
-
 # ------------------------------------------------------------------ assertions
 #
 # Assertions print and exit themselves rather than relying on set -e, so a case
@@ -7824,7 +7806,7 @@ test_doctor_a_stray_that_is_not_a_regular_file_gets_no_second_line() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
   # Applied, so that the note counted in the summary below is this one: an
-  # unbuilt tree is a note of its own, and so is a built one nothing has linked.
+  # unbuilt tree is a note of its own.
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   sandbox_target "$HOME/.dotfiles" dangling
@@ -7878,9 +7860,8 @@ test_doctor_notes_nothing_it_accounts_for() {
 test_doctor_the_summary_says_how_many_notes_it_printed() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  # Applied, because an unbuilt tree is a note of its own and so is a built one
-  # nothing has linked, and the count is of all of them: this case is about the
-  # count, not about which notes there are.
+  # Applied, because an unbuilt tree is a note of its own and the count is of
+  # all of them: this case is about the count, not about which notes there are.
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   sandbox_mkdir "$HOME/.dotfiles/common"
@@ -7955,9 +7936,9 @@ test_doctor_dot_entries_are_never_strays() {
 test_doctor_the_stray_scan_stops_at_the_leading_dot() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  # Applied, because an unbuilt tree is a note of its own and so is a built one
-  # nothing has linked: the count below is of every note in the report, and it
-  # is the count that says nothing else was reported.
+  # Applied, because an unbuilt tree is a note of its own: the count below is of
+  # every note in the report, and it is the count that says nothing else was
+  # reported.
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   sandbox_write "$HOME/.dotfiles" tmux.conf 'set -g mouse on'
@@ -8152,8 +8133,7 @@ test_doctor_names_the_ignore_patterns_in_force() {
   mkignore common '# junk' '.DS_Store' '*.swp'
   mkignore local 'Thumbs.db'
   # Applied first, so that the closing line counts this note and nothing else:
-  # doctor has one of its own before the first build, and another for a built
-  # tree nothing has linked.
+  # doctor has one of its own before the first build.
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   run_shale doctor
@@ -8201,7 +8181,7 @@ test_doctor_says_nothing_about_ignoring_without_an_ignore_file() {
   assert_status 0 "$shale_status"
   assert_not_contains "$shale_out" 'ignore pattern' 'stdout'
   assert_not_contains "$shale_out" 'stow-local-ignore' 'stdout'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'stdout'
+  assert_eq 'shale: no problems found' "$shale_out" 'stdout'
 }
 
 # A walk that could not read the whole built tree may not answer 'nothing': the
@@ -8241,7 +8221,7 @@ test_doctor_says_nothing_about_an_ignore_list_that_covers_nothing() {
   mklayer common/base .zshrc
   mkignore common '.DS_Store' '*.swp'
   # Applied, so that the report below is the bare verdict rather than the note
-  # doctor prints for a tree nothing has linked.
+  # doctor prints where there is no built tree at all.
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   run_shale doctor
@@ -8330,7 +8310,7 @@ test_doctor_says_nothing_about_stows_default_list() {
   rm -f "$sandbox_dir/.zshrc" || fail 'could not remove the control'
   run_shale doctor
   assert_status 0 "$shale_status" 'the doctor with the control gone'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the second stdout'
+  assert_eq 'shale: no problems found' "$shale_out" 'the second stdout'
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   assert_empty "$shale_err" 'the apply stderr'
@@ -8441,7 +8421,7 @@ test_doctor_says_nothing_at_a_name_ending_in_a_newline() {
   sandbox_write "$HOME" "$trailing" 'mine, and not a link'
   run_shale doctor
   assert_status 0 "$shale_status" 'the doctor'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'stdout'
+  assert_eq 'shale: no problems found' "$shale_out" 'stdout'
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   assert_empty "$shale_err" 'the apply stderr'
@@ -8473,7 +8453,7 @@ test_doctor_says_nothing_at_a_stow_local_ignore_ending_in_a_newline() {
   sandbox_write "$HOME" "$trailing" 'mine, and not a link'
   run_shale doctor
   assert_status 0 "$shale_status" 'the doctor'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'stdout'
+  assert_eq 'shale: no problems found' "$shale_out" 'stdout'
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   assert_empty "$shale_err" 'the apply stderr'
@@ -8872,100 +8852,25 @@ test_doctor_a_dangling_stow_resource_file_is_still_noted() {
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
 }
 
-# What is in the file, on the line it is on.  An --ignore drops a file from the
-# apply with exit 0 and both of stow's streams empty, so there is nothing for
-# apply to report the presence of and this note is the only place it can be
-# said.  --version and -n are the same defect at full size: a resource file
-# carrying either makes stow print and link nothing at all, still exit 0.  A
-# --verbose changes no link and is still named, because apply reports a stow
-# that wrote anything, so this file is what a warning on every apply for ever
-# leads back to.
-#
-# The line above the list says the file sets them and stops there.  --target is
-# in the same list and does not redirect this apply - the case above asserts it
-# does not - so a list introduced as options that change an apply would have
-# doctor contradicting the suite.
-#
-# The exit status is asserted because the whole of it stays a note: naming an
-# option counts nothing, and a doctor that started exiting 1 on a file the user
-# put there deliberately would be unusable.
-test_doctor_a_stow_resource_file_has_its_options_named() {
+# Nothing in the file is read: what it does to an apply is stow's to say, and
+# shale interprets no file it does not own.  The whole report is asserted rather
+# than a fragment of it, this case being about what doctor does not print - an
+# assertion for the note alone would pass with a list of that file's options
+# printed under it.
+test_doctor_a_stow_resource_file_is_not_read() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  sandbox_write "$HOME" .stowrc \
-    '--ignore=secret' '' '--target=/tmp' '--dotfiles' '-n' '--version' '--verbose'
+  sandbox_write "$HOME" .stowrc '--target=/elsewhere --ignore=x'
+  # A tree first, so that the report is the note and the verdict and nothing
+  # else: without one doctor has a note of its own to add about that.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_contains "$shale_out" "shale: a stow resource file exists at $HOME/.stowrc" 'stdout'
-  assert_contains "$shale_out" \
-    'shale:   it sets these stow options, which shale names and does not act on:' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 1: --ignore' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 3: --target' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 4: --dotfiles' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 5: -n' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 6: --version' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 7: --verbose' 'stdout'
-  # Said once, about the two options it is true of, rather than folded into a
-  # claim about all of them.
-  assert_contains "$shale_out" \
-    'shale:   apply passes its own -d and -t, so a --dir or a --target set here does not redirect it' \
-    'stdout'
-  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
-}
-
-# The other half: an option that cannot reach an apply at all is not named, so
-# the note that names nothing is the note doctor printed before it could name
-# anything.  --no-folding is already on the command line apply builds, and man
-# stow, RESOURCE FILES says -D, -R, -S and package names are ignored in one of
-# these files.  The -d and -t line is absent too, since nothing here sets either.
-test_doctor_a_stow_resource_file_of_harmless_options_names_none() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  sandbox_write "$HOME" .stowrc '--no-folding' '-R' '-D' '-S' 'somepackage'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_contains "$shale_out" "shale: a stow resource file exists at $HOME/.stowrc" 'stdout'
-  assert_contains "$shale_out" \
-    'shale:   so it can silently drop files from an apply' 'stdout'
-  assert_not_contains "$shale_out" 'shale:   line ' 'stdout'
-  assert_not_contains "$shale_out" 'shale:   it sets these stow options' 'stdout'
-  assert_not_contains "$shale_out" "shale:   apply passes its own -d and -t" 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
-}
-
-# stow reads a '--' as the end of its options and everything after it as a
-# package name, which a resource file has none of that it may use: an rc file of
-# '-- --ignore=.foo' leaves .foo linked.  Naming an option there would point the
-# reader at a line that does nothing.  The --dotfiles before it is what shows
-# the scan ran at all, and the --adopt on the next line is what shows a '--'
-# ends the options for the rest of the file rather than for its own line.
-test_doctor_a_stow_resource_file_ends_at_a_double_dash() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  sandbox_write "$HOME" .stowrc '--dotfiles -- --ignore=secret' '--adopt'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale:   line 1: --dotfiles' 'stdout'
-  assert_not_contains "$shale_out" 'shale:   line 1: --ignore' 'stdout'
-  assert_not_contains "$shale_out" 'shale:   line 2: --adopt' 'stdout'
-}
-
-# The one place the two versions of stow disagree about this file, and it is the
-# direction that matters.  2.4.1 splits with shellwords, which strips the quotes
-# and leaves one live option, so a fully quoted line takes effect on the macOS
-# floor; 2.3.1 splits with perl's split " " and the token keeps its quotes, so it
-# begins with a quote rather than a dash and is discarded as a package name -
-# verified against 2.3.1, where '"--ignore=plain"' left plain linked and exited
-# 0.  Naming it is right under the version where it silently bites, and names a
-# line that does nothing under the other.
-test_doctor_a_quoted_stow_resource_option_is_named() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  sandbox_write "$HOME" .stowrc '"--ignore=secret"' "'--dotfiles'"
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale:   line 1: --ignore' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 2: --dotfiles' 'stdout'
+  assert_eq "shale: a stow resource file exists at $HOME/.stowrc
+shale:   stow adds its --ignore patterns to the ones shale passes rather than replacing them
+shale:   so it can silently drop files from an apply
+shale: no problems found, but read the note above" "$shale_out" 'the whole report'
 }
 
 # No resource file, nothing said about one.  Most other cases would fail loudly
@@ -8978,124 +8883,6 @@ test_doctor_says_nothing_about_a_resource_file_that_is_not_there() {
   assert_status 0 "$shale_status"
   assert_not_contains "$shale_out" 'stow resource file' 'stdout'
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
-}
-
-# The spellings stow's own parser accepts, because a note that misses one is
-# silent exactly where its reader needs it.  Read against both versions of
-# bin/stow.in: the whole file is parsed as one argument list, so a value may be
-# a separate token and may fall on the next line; Getopt::Long resolves an
-# unambiguous abbreviation, so '--dotf' is --dotfiles and '--ign' is --ignore;
-# and a single dash is a bundle of one-letter options.  The token is reported as
-# the file spells it, since an ambiguous prefix has no one answer.
-#
-# Both abbreviations are here because the two are resolved by separate loops -
-# one for the options that take a value and one for the flags - and a case
-# carrying only a flag leaves the other loop free to match exactly and still
-# pass.  Line 3 is --defer's value and must not be a line of its own, though
-# that alone would not notice a scan that ignored values: a token with no
-# leading dash is passed over either way.  The case below is what pins that.
-test_doctor_a_stow_resource_file_is_read_the_way_stow_reads_it() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  sandbox_write "$HOME" .stowrc \
-    '--ign secret' '--defer' 'bin' '--dotf' '-nV' '--tar=/tmp'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale:   line 1: --ign' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 2: --defer' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 4: --dotf' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 5: -n' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 5: -V' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 6: --tar' 'stdout'
-  assert_not_contains "$shale_out" 'shale:   line 3:' 'stdout'
-}
-
-# An option's value is not an option, even when it looks exactly like one and
-# even across a line ending: stow parses the whole file as one argument list, so
-# the '--dotfiles' below is what --target and -t were given and nothing is
-# renamed by either.  Naming it would send the reader to edit a line that does
-# nothing, which is the same user-visible error as missing a live option and
-# reached from the opposite side.
-#
-# Both spellings, because the two are held by separate code: a long option's
-# value is claimed where the option is matched, and a bare '-t' claims the next
-# token only because the bundle it sits in ended.
-test_doctor_a_stow_resource_option_value_is_not_read_as_an_option() {
-  local spelling
-  for spelling in --target -t; do
-    conf 'base personal/base'
-    mklayer personal/base .zshrc
-    sandbox_write "$HOME" .stowrc "$spelling" '--dotfiles'
-    run_shale doctor
-    assert_status 0 "$shale_status" "$spelling exit status"
-    assert_contains "$shale_out" "shale:   line 1: $spelling" "$spelling stdout"
-    assert_not_contains "$shale_out" 'shale:   line 2:' "$spelling stdout"
-  done
-}
-
-# A carriage return is whitespace to both versions' splitters, so a CRLF file
-# applies every option in it and the note has to name every option in it.
-# Without the substitution that turns one into a separator, a '--dotfiles\r'
-# matches no option name and the note goes silent on a file stow acts on in
-# full - and the reader cannot see the character that caused it.  Written
-# directly rather than through sandbox_write, which writes '\n' endings.
-test_doctor_a_crlf_stow_resource_file_has_every_option_named() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  sandbox_target "$HOME" .stowrc
-  printf -- '--dotfiles\r\n--ignore=secret\r\n' >"$sandbox_path" ||
-    fail "could not write $sandbox_path"
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale:   line 1: --dotfiles' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 2: --ignore' 'stdout'
-}
-
-# Both versions read a last line with no newline after it, so the note must too.
-# read reports that line as a failure having already assigned it, and a loop
-# that believed the status would drop the option a user most likely just typed -
-# the last one in the file.
-test_doctor_a_stow_resource_file_with_no_final_newline_is_read_whole() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  sandbox_target "$HOME" .stowrc
-  printf -- '--dotfiles\n--ignore=secret' >"$sandbox_path" ||
-    fail "could not write $sandbox_path"
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale:   line 1: --dotfiles' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 2: --ignore' 'stdout'
-}
-
-# Neither version of stow has a comment syntax in a resource file: '#' is a
-# token like any other, and both split the line and go on parsing, so the
-# options after one on the same line take effect.  A reader who assumed
-# otherwise would skip the line and leave the note silent about a live option -
-# which is the failure this whole note exists to prevent.
-test_doctor_a_stow_resource_file_has_no_comment_syntax() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  sandbox_write "$HOME" .stowrc '# --ignore=secret'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale:   line 1: --ignore' 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
-}
-
-# Splitting a line into tokens must not expand them as globs.  run_case leaves
-# the case in $CASE_DIR, so an unquoted expansion would read the names of the
-# files there as options - and a user's own directory is where a file named
-# after one is likeliest to be.  The '*' is a stow package name, which stow
-# ignores in a resource file.
-test_doctor_a_stow_resource_file_is_not_globbed() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  sandbox_write "$CASE_DIR" --version 'not an option'
-  sandbox_write "$HOME" .stowrc '--dotfiles *'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale:   line 1: --dotfiles' 'stdout'
-  assert_not_contains "$shale_out" 'shale:   line 1: --version' 'stdout'
 }
 
 # The reason doctor calls parse_config bare where every other command exits on
@@ -9403,13 +9190,14 @@ test_doctor_names_a_directory_an_apply_left_as_it_is() {
 
 # 'shale which' is a remedy like any other, and the one state it refuses in is a
 # state doctor is often run in: it parses the config before it answers anything,
-# and a config error is exactly what BUILD_BLOCKED is folded from.  So both
-# lines that name it are gated on the parse rather than on apply_offerable -
-# which is a different question, and would suppress them for a missing stow that
-# 'which' does not need.
+# and a config error is exactly what BUILD_BLOCKED is folded from.  So the line
+# that names it is gated on the parse rather than on apply_offerable - which is
+# a different question, and would suppress it for a missing stow that 'which'
+# does not need.
 #
-# Both notes in one fixture, because both name it: a directory an apply left as
-# it is, and a declaration nothing in $HOME answers.
+# Two notes in one fixture: the directory an apply left as it is, whose remedy
+# names the command, and a declaration nothing in $HOME answers, which names no
+# command and has to survive the refusal all the same.
 test_doctor_offers_no_which_while_the_config_does_not_parse() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
@@ -9429,8 +9217,6 @@ test_doctor_offers_no_which_while_the_config_does_not_parse() {
   assert_contains "$shale_out" \
     "shale:   to keep the mode it has, change the declaration: 'shale which' names the line that decides a path" \
     'the sound stdout'
-  assert_contains "$shale_out" \
-    "shale:   'shale which PATH' says why a path in the tree is not linked" 'the sound stdout'
   # A duplicate layer name: the line is refused, the layer above it stands, and
   # every command that parses this file exits 1 - 'which' included.
   conf 'base personal/base' 'base personal/other'
@@ -9559,16 +9345,14 @@ test_doctor_names_a_declared_mode_that_is_not_in_home() {
   assert_contains "$shale_out" \
     "shale:   the built tree holds each of these paths with the declared mode on it, and an apply is what puts one in $HOME" \
     'stdout'
-  assert_contains "$shale_out" \
-    "shale:   'shale which PATH' says why a path in the tree is not linked" 'stdout'
   # The mode is on the copy in the tree all the same, which is what the note
   # says and what makes it a note rather than a finding.
   assert_mode "$HOME/.dotfiles/current/.netrc" '-rw-------' 'the built tree'
 }
 
 # And nothing of the sort on a machine that has built and never applied: every
-# declaration is in that state at once, and the note would be the same fact
-# repeated per line beside audit_unapplied_tree's one line about the whole tree.
+# declaration is in that state at once, and the note would be the same one fact
+# about the machine, repeated once per declaration.
 test_doctor_says_nothing_about_declared_modes_before_the_first_apply() {
   conf 'base personal/base'
   mklayer personal/base .netrc
@@ -9578,8 +9362,6 @@ test_doctor_says_nothing_about_declared_modes_before_the_first_apply() {
   assert_status 0 "$shale_status"
   run_shale doctor
   assert_status 0 "$shale_status" 'doctor exit status'
-  assert_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
   assert_not_contains "$shale_out" \
     "shale: 1 declared mode is not on anything in $HOME" 'stdout'
   assert_not_contains "$shale_out" \
@@ -9588,17 +9370,13 @@ test_doctor_says_nothing_about_declared_modes_before_the_first_apply() {
 
 # build's refusals, in build's own words and without a build: doctor reads the
 # layers, so a declaration naming a path no layer provides is named before the
-# tree it would have stopped exists.  Blocking, because build calls the same
-# parse and stops at the same line, so nothing below may offer a build.
+# tree it would have stopped exists.  It is a blocking finding, and
+# test_doctor_counts_a_refused_declaration_as_a_finding is where that half is
+# asserted, against a report holding a line an apply would otherwise be offered
+# for; this case is the wording and build's agreement with it.
 test_doctor_names_a_declared_path_no_layer_provides() {
   conf 'base personal/base'
   mklayer personal/base .ssh/config
-  mkmodes personal '700  .ssh'
-  # A tree first, so that the line about applying one is a line doctor would
-  # otherwise print: without it the 'blocking' assertion below is about a
-  # sentence nothing in this rig could ever say.
-  run_shale build
-  assert_status 0 "$shale_status" 'the build before the declaration went stale'
   mkmodes personal '700  .ssh' '600  .ssh/id_rsa'
   run_shale doctor
   assert_status 1 "$shale_status"
@@ -9608,10 +9386,6 @@ test_doctor_names_a_declared_path_no_layer_provides() {
     'shale:   a mode declaration names a path in the tree a build composes, and nothing composes one at that path' \
     'stdout'
   assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
-  # Blocking: nothing offers a build that would die on the same line.
-  assert_contains "$shale_out" \
-    'shale:   no apply will finish until the problems above are fixed' 'stdout'
-  assert_not_contains "$shale_out" 'shale:   apply it with: shale apply' 'stdout'
   # And build agrees, which is the whole of what makes doctor's answer worth
   # having before a build has ever run.
   run_shale build
@@ -9638,25 +9412,61 @@ test_doctor_names_a_declared_path_that_is_a_symlink() {
   assert_status 1 "$shale_status" 'build'
 }
 
-# A line shale will not read is a finding of doctor's and stops a build, exactly
-# as an untranslatable ignore pattern does.
+# A declaration shale will not read is a finding of doctor's and stops a build,
+# exactly as an untranslatable ignore pattern does - and stops an apply with it,
+# which is the second half of this case.  A declaration naming a path no layer
+# provides is the same claim by the other route, and both are here because they
+# reach it by different code: the refusal through MODE_ERRORS and the parse it
+# fails, the stale path through blocking_finding.  One of them turning into a
+# plain finding would leave doctor offering an apply that dies on the line it
+# just reported.
+#
+# The orphaned link is what makes either assertion mean anything: it is the one
+# finding here whose remedy is an apply, so it is the line the two have to
+# suppress, and the run before them asserts it is printed and counted while
+# nothing is wrong with the declarations.  Each of the two doctors after it is
+# one problem more than that baseline, which is what says the declaration was
+# counted rather than passed over.
 test_doctor_counts_a_refused_declaration_as_a_finding() {
   conf 'base personal/base'
   mklayer personal/base .ssh/config
-  # A tree first, for the reason above: the line the refusal has to suppress is
-  # one doctor prints about a tree nothing has applied.
+  mklayer personal/base .tmux.conf
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .tmux.conf
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
   run_shale build
-  assert_status 0 "$shale_status" 'the build before the line was written'
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the setup that can still apply'
+  assert_contains "$shale_out" 'shale: clear it with: shale apply' 'the sound stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'the sound stdout'
+  # The stale declaration: read without complaint, and a finding because no
+  # layer provides the path it names.
+  mkmodes personal '700  .ssh' '600  .ssh/id_rsa'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the stale declaration'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/personal/.shale-modes:2: no layer provides '.ssh/id_rsa'" \
+    'the stale stdout'
+  assert_contains "$shale_out" 'shale: 2 problems found' 'the stale stdout'
+  assert_contains "$shale_out" \
+    'shale: no apply will finish until the problems above are fixed, so this link stays' \
+    'the stale stdout'
+  assert_not_contains "$shale_out" 'shale apply' 'the stale stdout'
+  # The refused one, which never gets as far as being a declaration at all.
   mkmodes personal '4700  .ssh'
   run_shale doctor
-  assert_status 1 "$shale_status"
+  assert_status 1 "$shale_status" 'the refused declaration'
   assert_contains "$shale_out" \
     "shale: $HOME/.dotfiles/personal/.shale-modes:1: '4700' is four octal digits, and shale takes three" \
-    'stdout'
-  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+    'the refused stdout'
+  assert_contains "$shale_out" 'shale: 2 problems found' 'the refused stdout'
   assert_contains "$shale_out" \
-    'shale:   no apply will finish until the problems above are fixed' 'stdout'
-  assert_not_contains "$shale_out" 'shale:   apply it with: shale apply' 'stdout'
+    'shale: no apply will finish until the problems above are fixed, so this link stays' \
+    'the refused stdout'
+  assert_not_contains "$shale_out" 'shale apply' 'the refused stdout'
 }
 
 # A .shale-modes shale does not read: beside the config, or anywhere inside a
@@ -9697,8 +9507,8 @@ test_doctor_names_a_mode_file_that_is_read_by_nothing() {
 test_doctor_names_a_built_tree_whose_mode_was_changed_by_hand() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  # Applied, so that the note counted below is this one: a built tree nothing
-  # has linked is a note of its own.
+  # Applied, so that the note counted below is this one: an unbuilt tree is a
+  # note of its own.
   run_shale apply
   assert_status 0 "$shale_status"
   sandbox_mkdir "$HOME/.dotfiles/current"
@@ -9764,14 +9574,14 @@ test_doctor_says_nothing_about_a_tree_it_built_under_a_setgid_dotfiles() {
   assert_empty "$shale_err" 'the build stderr'
   run_shale doctor
   assert_status 0 "$shale_status" 'doctor exit status'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
   # The line the note used to make, run rather than quoted: a second build must
   # not be able to change what the first one left, or the remedy is a lie.
   run_shale build
   assert_status 0 "$shale_status" 'the second build'
   run_shale doctor
   assert_status 0 "$shale_status" 'doctor after the second build'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # The compare itself, on every machine rather than only where a kernel hands the
@@ -9789,13 +9599,13 @@ test_doctor_compares_only_the_permission_bits_of_the_built_tree() {
   assert_mode "$HOME/.dotfiles/current" 'drwx--S---' 'the built tree'
   run_shale doctor
   assert_status 0 "$shale_status" 'doctor exit status'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
   # And the sticky bit, which reaches the same digit by another route.
   sandbox_mkdir "$HOME/.dotfiles/current"
   chmod 1700 "$sandbox_dir" || fail 'could not set the built tree mode'
   run_shale doctor
   assert_status 0 "$shale_status" 'doctor exit status, sticky'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report, sticky'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report, sticky'
 }
 
 # ------------------------------------------ doctor's apply-conflict cases
@@ -11075,8 +10885,8 @@ test_doctor_says_when_there_is_no_built_tree_to_check_links_against() {
 test_doctor_notes_a_leftover_scratch_tree() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
-  # Applied, so that the note counted below is this one: a built tree nothing
-  # has linked is a note of its own.
+  # Applied, so that the note counted below is this one: an unbuilt tree is a
+  # note of its own.
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   # What a compose killed part-way through leaves: the name, holding some of
@@ -11115,8 +10925,8 @@ test_doctor_says_nothing_about_the_tree_the_last_build_kept() {
   mklayer local .zshrc
   sandbox_mkdir "$HOME/.dotfiles/local"
   touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
-  # Applied, so that a clean report here is the bare verdict: a built tree
-  # nothing has linked is a note of its own.
+  # Applied, so that a clean report here is the bare verdict: an unbuilt tree is
+  # a note of its own.
   run_shale apply
   assert_status 0 "$shale_status" 'the first apply'
   assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
@@ -11375,7 +11185,7 @@ test_doctor_two_layers_disagreeing_about_a_path_is_a_finding() {
   assert_status 0 "$shale_status" 'the build after the remedy'
   run_shale doctor
   assert_status 0 "$shale_status" 'the doctor after the remedy'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # A conflict after a successful build is the same finding: the built tree is
@@ -11586,7 +11396,7 @@ test_doctor_a_layer_file_it_cannot_read_is_a_finding() {
   assert_status 0 "$shale_status" 'the build after the remedy'
   run_shale doctor
   assert_status 0 "$shale_status" 'the doctor after the remedy'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # The three shapes an unreadable-looking entry takes that a build composes
@@ -11704,7 +11514,7 @@ test_doctor_a_layer_subdirectory_it_cannot_search_is_a_finding() {
   assert_status 0 "$shale_status" 'the build after the remedy'
   run_shale doctor
   assert_status 0 "$shale_status" 'the doctor after the remedy'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # Not merely quiet but false: shale writes current/.stow-local-ignore itself, so
@@ -11740,7 +11550,7 @@ test_doctor_a_layer_providing_a_stow_local_ignore_is_a_finding() {
   assert_status 0 "$shale_status" 'the build after the remedy'
   run_shale doctor
   assert_status 0 "$shale_status" 'the doctor after the remedy'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # 'build one with: shale build' is a remedy, and a remedy that exits 1 is worse
@@ -11934,7 +11744,7 @@ test_doctor_says_nothing_about_layers_that_merge_or_shadow() {
   assert_status 0 "$shale_status"
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # A .git is skipped at every depth in the composer, so nothing inside one is
@@ -11952,7 +11762,7 @@ test_doctor_says_nothing_about_a_git_directory_in_a_layer() {
   assert_missing "$HOME/.dotfiles/current/.git" 'the built tree'
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # A state 'shale build' refuses rather than repairs, so it is counted and doctor
@@ -11990,7 +11800,7 @@ test_doctor_a_built_tree_that_is_not_a_directory_is_a_finding() {
   assert_status 0 "$shale_status" 'the build after the remedy'
   run_shale doctor
   assert_status 0 "$shale_status" 'the doctor after the remedy'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # The report #66 put in build, moved here.  This is the shape it exists for: a
@@ -12092,7 +11902,7 @@ test_doctor_says_nothing_about_a_built_tree_newer_than_its_layer() {
   touch -t 202601010000 "$sandbox_path" || fail 'could not date the edited file'
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
   run_shale build
   assert_status 0 "$shale_status"
   assert_contains "$shale_err" \
@@ -12116,7 +11926,7 @@ test_doctor_says_nothing_about_a_built_tree_that_matches_its_layers() {
   assert_status 0 "$shale_status"
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # Only the layer that would win the path is compared, because that is the copy
@@ -12137,7 +11947,7 @@ test_doctor_compares_the_built_tree_against_the_winning_layer() {
   assert_eq 'local/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built file'
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
   # And the winner moving ahead of the built copy is what does fire.
   sandbox_mkdir "$HOME/.dotfiles/local"
   sandbox_leaf "$sandbox_dir" .zshrc
@@ -12175,7 +11985,7 @@ test_doctor_says_nothing_about_a_built_tree_path_no_layer_provides() {
   touch -t 200001010000 "$sandbox_path" || fail 'could not date the built copy'
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # The rule #73 set for build's own comparison, and the same reasoning: a build
@@ -12225,7 +12035,7 @@ test_doctor_compares_no_symlink_in_the_built_tree() {
   ln -s .zshrc "$sandbox_path" || fail 'could not replace the built copy with a link'
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # The volume the bound is for: a git pull that changed a couple of hundred files
@@ -12382,7 +12192,7 @@ test_doctor_says_nothing_about_a_git_directory_in_the_built_tree() {
   touch -t 200001010000 "$sandbox_path" || fail 'could not date the built copy'
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
   # And the build the note would have promised: it composes neither, so the
   # promise would have been false in both halves.
   run_shale build
@@ -12425,11 +12235,6 @@ test_doctor_a_built_tree_that_is_a_symlink_is_a_finding() {
   assert_not_contains "$shale_out" 'does not match the layer copy' 'stdout'
   assert_not_contains "$shale_out" 'do not match the layer copies' 'stdout'
   assert_not_contains "$shale_out" 'the next build' 'stdout'
-  # And the same for the note about nothing being linked, which -d would let
-  # through for the same reason: its remedy is an apply, an apply builds first,
-  # and this is the tree every build refuses.
-  assert_not_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
   # The build that note would have described, and what it actually does.
   run_shale build
   assert_status 1 "$shale_status"
@@ -12444,7 +12249,7 @@ test_doctor_a_built_tree_that_is_a_symlink_is_a_finding() {
   assert_status 0 "$shale_status" 'the build after the remedy'
   run_shale doctor
   assert_status 0 "$shale_status" 'the doctor after the remedy'
-  assert_eq "$(doctor_unapplied_report)" "$shale_out" 'the whole report'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
 }
 
 # A directory this walk cannot enter drops out of it exactly as an empty one
@@ -12826,404 +12631,6 @@ test_doctor_ignores_a_script_that_is_not_under_home() {
   assert_status 0 "$shale_status"
   assert_not_contains "$shale_out" 'running script' 'stdout'
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
-}
-
-# ---------------------------------------------- doctor's unapplied-tree cases
-#
-# A machine that has built and never applied, which is the state the README's
-# command table and docs/migrating.md both walk a reader into: build is a
-# legitimate thing to run on its own, and until an apply follows it nothing in
-# $HOME has changed at all.  doctor called that machine green, which is the
-# report that sends a reader looking somewhere with nothing wrong with it.
-#
-# A note and never a finding: the build is complete and correct, and one command
-# installs it.  Every case below that asserts the note absent names the whole of
-# its first line, terminated at the end - a needle stopping at 'built tree at'
-# is a prefix of the real line and would pass whether it was printed or not.
-
-test_doctor_names_a_built_tree_nobody_has_applied() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  mklayer personal/base .config/nvim/init.lua
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  # The state the reader is looking at: a complete tree, and a $HOME with
-  # nothing of it in it.
-  assert_exists "$HOME/.dotfiles/current/.zshrc" 'the built tree'
-  assert_missing "$HOME/.zshrc" 'before the apply'
-  run_shale doctor
-  assert_status 0 "$shale_status" 'doctor exit status'
-  assert_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
-  assert_contains "$shale_out" \
-    "shale:   build composes that tree and apply is what links it into $HOME, so until an apply runs none of it is in use" \
-    'stdout'
-  assert_contains "$shale_out" 'shale:   apply it with: shale apply' 'stdout'
-  # A note: the verdict is on the findings and there are none.
-  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
-  assert_empty "$shale_err" 'stderr'
-  # The remedy, run rather than quoted, and the silence after it.
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc" 'the applied link'
-  run_shale doctor
-  assert_status 0 "$shale_status" 'doctor after the apply'
-  assert_eq 'shale: no problems found' "$shale_out" 'the whole report after the apply'
-}
-
-# The smaller shape of the same thing, which is the one a working setup meets:
-# a file added to a layer and built, with the apply still to run.  One path in
-# the tree is linked, so the machine-wide answer is 'applied' and this note has
-# nothing to say - which is why 'shale which' answers this one and doctor does
-# not.
-test_doctor_says_nothing_about_a_path_built_since_the_last_apply() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  mklayer personal/base .tmux.conf
-  run_shale build
-  assert_status 0 "$shale_status" 'the second build'
-  assert_missing "$HOME/.tmux.conf" 'after the build'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_not_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
-  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
-}
-
-# doctor and which answer the same fact about the same machine, and a reader who
-# runs both must not be told it twice in the same words - the repeat reads as a
-# second problem.  which's line is the one doctor may not print, and which still
-# printing it is what keeps this a claim about doctor rather than about a
-# sentence nothing says any more.
-test_doctor_does_not_repeat_whichs_wording_about_an_unapplied_tree() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  run_shale doctor
-  assert_status 0 "$shale_status" 'doctor'
-  assert_not_contains "$shale_out" \
-    "shale:   no path in that tree is linked in $HOME at all, which is what a build nobody has applied looks like" \
-    'stdout'
-  run_shale which .zshrc
-  assert_status 0 "$shale_status" 'which'
-  assert_contains "$shale_err" \
-    "shale:   no path in that tree is linked in $HOME at all, which is what a build nobody has applied looks like" \
-    'which stderr'
-}
-
-# The two notes about the same machine that must never both fire.  Before the
-# first build there is no tree to be unapplied, and the note that owns that
-# state offers the build; the count in the closing line is what says only one of
-# them was printed.
-test_doctor_says_nothing_about_an_unapplied_tree_before_the_first_build() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  assert_missing "$HOME/.dotfiles/current" 'the built tree'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_contains "$shale_out" \
-    "shale: there is no built tree at $HOME/.dotfiles/current, so shale cannot tell a link into it from any other broken link" \
-    'stdout'
-  assert_not_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
-}
-
-# One link removed by hand is not this note's business: an apply has landed, the
-# rest of the tree is linked, and the machine-wide question is answered.  What
-# the note may not become is a report of every path that is not linked, which is
-# which's job and needs a path to ask about.
-test_doctor_says_nothing_when_one_applied_link_was_removed_by_hand() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  mklayer personal/base .vimrc
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  # The directory is resolved and the leaf removed from it, sandbox_leaf
-  # refusing to hand back a path that is a symlink - which this is.
-  sandbox_mkdir "$HOME"
-  rm -f "$sandbox_dir/.zshrc" || fail 'could not remove the link'
-  assert_missing "$HOME/.zshrc" 'the removed link'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_not_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
-  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
-}
-
-# 'nothing is linked' means something only where there was something to link.  A
-# tree every pattern covers is a tree an apply leaves alone by design, and the
-# apply below is what makes that the premise rather than this suite's reading of
-# it: the patterns cover a directory, so what has to stay unlinked is the files
-# under it.
-test_doctor_says_nothing_about_a_tree_the_ignore_list_covers_whole() {
-  conf 'base common/base'
-  mklayer common/base junk/a
-  mklayer common/base junk/deeper/b
-  mkignore common 'junk'
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  assert_exists "$HOME/.dotfiles/current/junk/a" 'the built tree'
-  run_shale doctor
-  assert_status 0 "$shale_status" 'doctor before the apply'
-  assert_not_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
-  # The one note is the ignore list's own, which is the reason shale already
-  # reports for every path here being unlinked.
-  assert_contains "$shale_out" 'shale: 1 ignore pattern is in force' 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  assert_missing "$HOME/junk" 'what the apply linked'
-  run_shale doctor
-  assert_status 0 "$shale_status" 'doctor after the apply'
-  assert_not_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'the second stdout'
-}
-
-# The same, for the list stow ships, which needs no ignore file to reach a
-# machine: a layer holding nothing but a CVS directory composes a tree stow
-# links nothing out of, and there is no configured pattern to point the reader
-# at either.
-test_doctor_says_nothing_about_a_tree_stows_own_list_covers_whole() {
-  conf 'base personal/base'
-  mklayer personal/base CVS/Entries
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  assert_exists "$HOME/.dotfiles/current/CVS/Entries" 'the built tree'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_not_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
-  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  assert_missing "$HOME/CVS" 'what the apply linked'
-}
-
-# The day-one state of a local layer: an empty directory, composed into a tree
-# holding nothing but the ignore file shale writes into it.  No apply links
-# that file - stow ignores its own list's name at the top of a package whatever
-# the list holds - so there is nothing here to be unlinked.
-test_doctor_says_nothing_about_a_built_tree_with_nothing_to_link() {
-  conf 'local local'
-  sandbox_mkdir "$HOME/.dotfiles/local"
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  assert_exists "$HOME/.dotfiles/current/.stow-local-ignore" 'the list shale writes'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_not_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
-  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
-}
-
-# --dotfiles is where the question stops being answerable: stow links
-# 'dot-zshrc' as '.zshrc', so an applied tree has nothing in $HOME at any path
-# this walk compares and a note that fired here would fire for ever.  The option
-# name is read and no pattern in the file is, which is the line #96 drew; the
-# note naming that resource file is what the reader has instead.
-test_doctor_says_nothing_about_an_unapplied_tree_where_stow_renames() {
-  conf 'base personal/base'
-  mklayer personal/base dot-zshrc
-  sandbox_write "$HOME" .stowrc '--dotfiles'
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_not_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
-  assert_contains "$shale_out" \
-    "shale: a stow resource file exists at $HOME/.stowrc" 'stdout'
-  assert_contains "$shale_out" 'shale:   line 1: --dotfiles' 'stdout'
-}
-
-# Six options in that file leave an apply having linked nothing at all while
-# exiting 0, so on a machine that applies successfully every time this note
-# would be printed for ever with the remedy that had just been run.  A stow
-# resource file is also a reason the report has already given - the note naming
-# it is printed above this one.
-#
-# The option name is read and no pattern in the file is, which is #96's line, so
-# an --ignore covering nothing silences this too.  That over-suppresses on a
-# machine where nothing was wrong, which is the direction to err in: the other
-# one nags a machine where no apply can help.
-#
-# Every spelling stow takes, because the file is parsed with Getopt::Long and an
-# unambiguous abbreviation is one of them - a check made against the canonical
-# name the parse resolved to, never against the token, would otherwise pass
-# '--ignore=x' and print the note for '--ign=x'.
-test_doctor_says_nothing_about_an_unapplied_tree_a_stowrc_can_empty() {
-  local option
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  # The control: the same tree, with no resource file at all.
-  run_shale doctor
-  assert_status 0 "$shale_status" 'the control'
-  assert_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'the control'
-  for option in --ignore=x --ign=x '--ignore x' --simulate --sim --no -n --help --hel -h --version --vers -V -nv; do
-    sandbox_write "$HOME" .stowrc "$option"
-    run_shale doctor
-    assert_status 0 "$shale_status" "doctor with '$option'"
-    assert_not_contains "$shale_out" \
-      "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" \
-      "doctor with '$option'"
-  done
-  # The premise, run rather than measured: one pattern covering everything, and
-  # a dry run, each leave an apply that exits 0 having linked nothing - and the
-  # note stays silent on the machine that has just applied.
-  for option in '--ignore=.' --simulate; do
-    sandbox_write "$HOME" .stowrc "$option"
-    run_shale apply
-    assert_status 0 "$shale_status" "the apply with '$option'"
-    assert_missing "$HOME/.zshrc" "what the apply with '$option' linked"
-    run_shale doctor
-    assert_status 0 "$shale_status" "doctor after the apply with '$option'"
-    assert_not_contains "$shale_out" \
-      "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" \
-      "doctor after the apply with '$option'"
-  done
-}
-
-# The name stow adds to whatever the package's list holds rather than reading
-# out of it, at the one spelling of it a layer can ship: every build refuses a
-# layer providing '.stow-local-ignore' and every build composes one called
-# '.stow-local-ignore\n' without a word.  It is not a row of STOW_IGNORE_LIST,
-# so nothing but the arm above answers for it, and a tree whose only other entry
-# is that name would be reported unapplied for ever.
-test_doctor_says_nothing_about_a_tree_holding_only_the_name_stow_adds() {
-  local trailing
-  printf -v trailing '.stow-local-ignore\n'
-  conf 'base common/base'
-  mklayer common/base "$trailing" 'composed, and linked by no apply'
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  assert_exists "$HOME/.dotfiles/current/$trailing" 'the composed copy'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  assert_not_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
-  # The premise, run rather than asserted: neither name reaches $HOME.
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  assert_missing "$HOME/$trailing" 'what the apply linked, the composed copy'
-  assert_missing "$HOME/.stow-local-ignore" 'what the apply linked, the list shale writes'
-}
-
-# A note beside a finding, which is the shape the count and the status are about:
-# the finding decides the exit status and the note is printed whole beside it,
-# neither swallowing the other.  The link is one no apply made and no build
-# provides, so it is audit_broken_links' finding and stops nothing.
-test_doctor_the_unapplied_note_sits_beside_a_finding() {
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  sandbox_target "$HOME" .oldrc
-  ln -s "$HOME/.dotfiles/current/.oldrc" "$sandbox_path" ||
-    fail 'could not plant the orphaned link'
-  run_shale doctor
-  assert_status 1 "$shale_status"
-  # A fragment of the finding: 2.3.1 and 2.4.1 report the same link and this
-  # case is about the note beside it rather than about chkstow's wording.
-  assert_contains "$shale_out" \
-    "shale: $HOME/.oldrc points at" 'stdout'
-  assert_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
-  assert_contains "$shale_out" 'shale:   apply it with: shale apply' 'stdout'
-  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
-}
-
-# The remedy is offered only where it would work, which is the rule every line
-# doctor prints that names a command.  An apply builds before it stows, so
-# everything that stops a build stops it; and stow will not write over what it
-# did not create, so a path in $HOME that a layer provides stops the other half.
-# Both are run rather than quoted.
-test_doctor_offers_no_apply_that_would_not_finish() {
-  local saved
-  conf 'base personal/base'
-  mklayer personal/base .zshrc
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  # stow's half: a real file where a layer provides one.
-  sandbox_write "$HOME" .zshrc 'mine, and not a link'
-  run_shale doctor
-  assert_status 1 "$shale_status" 'doctor with the conflict'
-  assert_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
-  assert_contains "$shale_out" \
-    'shale:   no apply will finish until the problems above are fixed' 'stdout'
-  assert_not_contains "$shale_out" 'shale:   apply it with: shale apply' 'stdout'
-  run_shale apply
-  assert_status 1 "$shale_status" 'the apply the line refuses to offer'
-  # build's half: two layers disagreeing about a path, which every build from
-  # now on exits 1 on.
-  sandbox_mkdir "$HOME"
-  rm -f "$sandbox_dir/.zshrc" || fail 'could not remove the conflicting file'
-  conf 'base personal/base' 'work work'
-  mklayer personal/base both/inner
-  mklayer work both
-  run_shale doctor
-  assert_status 1 "$shale_status" 'doctor with the collision'
-  assert_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'the second stdout'
-  assert_contains "$shale_out" \
-    'shale:   no apply will finish until the problems above are fixed' 'the second stdout'
-  assert_not_contains "$shale_out" 'shale:   apply it with: shale apply' 'the second stdout'
-  run_shale apply
-  assert_status 1 "$shale_status" 'the apply after the collision'
-  # stow's other half, which stops no build: the tool an apply links with, and
-  # the one name in doctor's tool list that is deliberately not blocking.
-  conf 'base personal/base'
-  sandbox_mkdir "$HOME/.dotfiles/personal/base"
-  rm -rf "$sandbox_dir/both" || fail 'could not remove the colliding layer path'
-  stub_path_without stow
-  saved=$PATH
-  PATH=$stub_path
-  run_shale doctor
-  PATH=$saved
-  assert_status 1 "$shale_status" 'doctor without stow'
-  assert_contains "$shale_out" 'shale: stow is not installed' 'the third stdout'
-  assert_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'the third stdout'
-  assert_contains "$shale_out" \
-    'shale:   no apply will finish until the problems above are fixed' 'the third stdout'
-  assert_not_contains "$shale_out" 'shale:   apply it with: shale apply' 'the third stdout'
-  PATH=$stub_path
-  run_shale apply
-  PATH=$saved
-  assert_status 1 "$shale_status" 'the apply without stow'
-}
-
-# A tree shale could not read whole is a tree it may not conclude about: a
-# directory that cannot be listed answers every glob with nothing, exactly as an
-# empty one does, and the link this note would deny may be inside it.  The walk
-# that reports the unreadable directory is audit_built_tree's, above, and it is
-# what the reader gets instead.
-test_doctor_says_nothing_about_an_unapplied_tree_it_could_not_read() {
-  local locked
-  conf 'base personal/base'
-  mklayer personal/base .config/nvim/init.lua
-  mklayer personal/base .zshrc
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  sandbox_mkdir "$HOME/.dotfiles/current/.config"
-  locked=$sandbox_dir
-  chmod u-rx "$locked" || fail 'could not lock the built directory'
-  run_shale doctor
-  assert_status 0 "$shale_status"
-  chmod u+rx "$locked" || fail 'could not restore the built directory'
-  assert_contains "$shale_out" \
-    'shale: shale could not read everything this check compares, so what it says about the built tree at' \
-    'stdout'
-  assert_not_contains "$shale_out" \
-    "shale: nothing in the built tree at $HOME/.dotfiles/current is linked in $HOME" 'stdout'
 }
 
 # -------------------------------------------------------------- examples cases
@@ -14212,9 +13619,9 @@ test_which_a_dot_git_says_no_build_composes_one() {
   mklayer common/base .config/nvim/.git/HEAD
   mklayer common/base .gitconfig
   mklayer common/base .zshrc
-  # An apply rather than a build: the near miss below is asserted silent, and
-  # every path in a tree no apply has landed is unlinked - which says so in a
-  # note of its own, which is not what this case is about.
+  # An apply rather than a build, so that the silence asserted below is silence
+  # about the near miss and not about a tree doctor has something else to say
+  # about.
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   assert_missing "$HOME/.dotfiles/current/.git" 'the built tree'
@@ -14272,502 +13679,6 @@ test_which_stows_default_list_table_covers_the_list_build_writes() {
   unjoinable=$(printf '%s\n' "$rows" | sed -e "s/^  '[^']*' '//" -e "s/'\$//" |
     grep -c '[|()]')
   assert_eq 0 "$unjoinable" 'table globs holding a character the alternation would take'
-}
-
-# The residual answer, and the one that needs no model of stow at all: a path
-# that is in the built tree with nothing at it in $HOME did not get linked,
-# whatever the cause.  A ~/.stowrc's --ignore is a cause shale cannot name - its
-# values are perl regexps, and no regexp shale did not write reaches a matcher -
-# so nothing here matches anything.  which reads the two trees and reports what
-# it finds.
-#
-# Both supported stows drop the file and exit 0 saying nothing: checked against
-# 2.3.1 and 2.4.1, which is what makes silence here a defect on both rather than
-# a version difference.  The resource file is named because it exists, which is
-# a fact shale can see without reading a line of it.
-test_which_a_path_a_stowrc_dropped_says_it_reached_the_tree() {
-  conf 'base common/base'
-  mklayer common/base secret
-  mklayer common/base .zshrc
-  sandbox_write "$HOME" .stowrc '--ignore=secret'
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  assert_empty "$shale_err" 'the apply stderr'
-  assert_missing "$HOME/secret"
-  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
-  run_shale which secret
-  assert_status 0 "$shale_status"
-  assert_eq "winner    base  $HOME/.dotfiles/common/base/secret" "$shale_out" 'stdout'
-  assert_eq "shale: note: 'secret' is in the built tree at $HOME/.dotfiles/current/secret, and nothing is at $HOME/secret
-shale:   something has linked other paths from that tree, though not necessarily since this one reached it
-shale:   run 'shale apply': a path still missing after one is a path stow declined to link
-shale:   stow reads $HOME/.stowrc as well, and shale does not act on what is in it
-shale:   shale doctor names the options such a file sets, any of which can keep this path out of an apply" \
-    "$shale_err" 'stderr'
-  # The control beside it, and the whole of what keeps this from being a line
-  # every answer carries: the file that was linked gets nothing.
-  run_shale which .zshrc
-  assert_status 0 "$shale_status" 'the linked path'
-  assert_empty "$shale_err" 'the linked path stderr'
-}
-
-# The other resource file, and a pattern that takes the whole tree with it: the
-# note has to hold where *nothing* is linked as well, and it may not then claim
-# an apply declined this path - which is the one thing it cannot see.
-test_which_a_stowrc_that_drops_everything_is_not_read_as_a_missing_apply() {
-  conf 'base common/base'
-  mklayer common/base .zshrc
-  sandbox_write "$HOME/.dotfiles" .stowrc '--ignore=.*'
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  assert_missing "$HOME/.zshrc"
-  run_shale which .zshrc
-  assert_status 0 "$shale_status"
-  assert_contains "$shale_err" \
-    "shale: note: '.zshrc' is in the built tree at $HOME/.dotfiles/current/.zshrc, and nothing is at $HOME/.zshrc" \
-    'stderr'
-  assert_contains "$shale_err" \
-    "shale:   stow reads $HOME/.dotfiles/.stowrc as well, and shale does not act on what is in it" 'stderr'
-  # Nothing is linked, so this reads as an unapplied tree and says only that.
-  assert_contains "$shale_err" 'shale:   no path in that tree is linked in' 'stderr'
-  assert_not_contains "$shale_err" 'something has linked other paths' 'stderr'
-}
-
-# The shape -ef cannot answer for, from the other side of the same walk: an apply
-# writes an ordinary link for a layer's symlink into nothing, and that link
-# dangles.  A tree whose files are all of that shape is one -ef reads as having
-# nothing linked, and the note would then say so with a link from that tree
-# sitting in $HOME.  home_conflict meets it on its own walk and spends the same
-# readlink on it.
-test_which_a_tree_linked_only_by_a_dangling_link_is_not_called_unapplied() {
-  conf 'base common/base'
-  mklayer common/base secret
-  sandbox_mkdir "$HOME/.dotfiles/common/base"
-  sandbox_leaf "$sandbox_dir" .dangling new
-  ln -s nowhere-at-all "$sandbox_path" || fail 'could not create the symlink'
-  sandbox_write "$HOME" .stowrc '--ignore=secret'
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  # The whole of what that apply linked, and it resolves to nothing.
-  assert_dangling_symlink "$HOME/.dangling" 'the only link the apply wrote'
-  assert_missing "$HOME/secret"
-  run_shale which secret
-  assert_status 0 "$shale_status"
-  assert_contains "$shale_err" \
-    'shale:   something has linked other paths from that tree, though not necessarily since this one reached it' \
-    'stderr'
-  assert_not_contains "$shale_err" 'no path in that tree is linked' 'stderr'
-}
-
-# built_tree_is_linked reads the built tree with a glob of its own, so #110
-# reaches it: on the bash 3.2 floor under a UTF-8 locale, a directory whose name
-# holds a byte the locale cannot decode was not descended into, and the only
-# linked path in the tree sitting under one made this note say 'no path in that
-# tree is linked in $HOME at all, which is what a build nobody has applied looks
-# like' about a tree an apply had just landed.  Measured, on that combination
-# alone, before the walk went through list_dir.
-#
-# Nothing is at the top of the tree but the file shale writes, so the walk has to
-# descend to answer at all, and 'thing' is kept out of the apply by a resource
-# file rather than by hand - which is the shape #106 exists for.  One directory,
-# not one of each: an ASCII sibling would be found by the same walk and the
-# descent this is about would never be needed.  Its name holds the byte where the
-# volume keeps it and is ASCII where it does not, so the wording is pinned
-# everywhere and the byte-locale descent wherever it can be.
-test_which_the_unlinked_note_descends_below_a_hostile_directory() {
-  local utf8 loc dir odd layer
-  find_utf8_locale \
-    'it asserts that the walk behind that note descends into a name the locale cannot decode'
-  utf8=$utf8_locale
-  conf 'base common/base'
-  sandbox_mkdir "$HOME/.dotfiles/common/base"
-  layer=$sandbox_dir
-  dir=plain
-  odd=$(printf 'b\377dir')
-  # The creation is the probe: a volume that refuses the name answers here.
-  if mkdir "$layer/$odd" 2>/dev/null; then
-    rmdir "$layer/$odd" || fail "could not remove the probe at $layer/$odd"
-    dir=$odd
-  fi
-  mklayer common/base "$dir/thing" 'the path asked about'
-  mklayer common/base "$dir/other" 'its sibling, which the apply does link'
-  sandbox_write "$HOME" .stowrc '--ignore=thing'
-  for loc in C "$utf8"; do
-    LC_ALL=$loc run_shale apply
-    assert_status 0 "$shale_status" "the apply under LC_ALL=$loc"
-    assert_empty "$shale_err" "the apply stderr under LC_ALL=$loc"
-    assert_missing "$HOME/$dir/thing"
-    assert_symlink_to "$HOME/$dir/other" "$HOME/.dotfiles/current/$dir/other" \
-      "the sibling under LC_ALL=$loc"
-    LC_ALL=$loc run_shale which "$dir/thing"
-    assert_status 0 "$shale_status" "which under LC_ALL=$loc"
-    assert_eq "shale: note: '$dir/thing' is in the built tree at $HOME/.dotfiles/current/$dir/thing, and nothing is at $HOME/$dir/thing
-shale:   something has linked other paths from that tree, though not necessarily since this one reached it
-shale:   run 'shale apply': a path still missing after one is a path stow declined to link
-shale:   stow reads $HOME/.stowrc as well, and shale does not act on what is in it
-shale:   shale doctor names the options such a file sets, any of which can keep this path out of an apply" \
-      "$shale_err" "the which stderr under LC_ALL=$loc"
-  done
-}
-
-# --dotfiles is the one option a resource file can set that decides where a path
-# lands rather than whether it lands: stow links 'dot-zshrc' as '.zshrc', so the
-# file is in $HOME under a name shale did not compose, nothing in the tree
-# matches the path the walk compares against, and 'a path still missing after an
-# apply is one stow declined' would be said of a path that is not missing at all.
-# Both versions do it - 2.3.1's --help does not list the option and Stow.pm
-# implements it - so the note stops reasoning and says what it cannot follow.
-#
-# The option's name is read and no pattern in the file is, which is the line #96
-# drew: an --ignore value is a perl regexp and stays unread.
-test_which_a_stowrc_setting_dotfiles_is_not_read_as_a_declined_path() {
-  conf 'base common/base'
-  mklayer common/base dot-zshrc
-  sandbox_write "$HOME" .stowrc '--dotfiles'
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/dot-zshrc"
-  assert_missing "$HOME/dot-zshrc"
-  run_shale which dot-zshrc
-  assert_status 0 "$shale_status"
-  assert_eq "shale: note: 'dot-zshrc' is in the built tree at $HOME/.dotfiles/current/dot-zshrc, and nothing is at $HOME/dot-zshrc
-shale:   a stow resource file sets --dotfiles, which links a name beginning dot- under one beginning a full stop
-shale:   so this path may be in $HOME under a name shale cannot work out, and shale does not translate one
-shale:   stow reads $HOME/.stowrc as well, and shale does not act on what is in it
-shale:   shale doctor names the options such a file sets, any of which can keep this path out of an apply" \
-    "$shale_err" 'stderr'
-  # Neither of the two lines that reason from the walk, both of which are false
-  # of a path stow renamed.
-  assert_not_contains "$shale_err" 'stow declined to link' 'stderr'
-  assert_not_contains "$shale_err" 'nobody has applied' 'stderr'
-  assert_not_contains "$shale_err" 'something has linked' 'stderr'
-  # An unambiguous abbreviation is the same option to stow, which parses its
-  # resource file with Getopt::Long: '--dotf' applies alike on 2.3.1 and 2.4.1.
-  sandbox_write "$HOME" .stowrc '--dotf'
-  run_shale which dot-zshrc
-  assert_status 0 "$shale_status" 'the abbreviation'
-  assert_contains "$shale_err" 'shale:   a stow resource file sets --dotfiles' \
-    'the abbreviation stderr'
-  # A resource file setting something else leaves the reasoning where it was -
-  # and on this tree it reasons wrongly, which is the whole of why the option is
-  # read: the one file there is linked, at a name shale did not compose, and the
-  # walk that compares $HOME against the tree path by path can only miss it.
-  sandbox_write "$HOME" .stowrc '--ignore=nothing-of-the-kind'
-  run_shale which dot-zshrc
-  assert_status 0 "$shale_status" 'without the option'
-  assert_not_contains "$shale_err" '--dotfiles' 'stderr without the option'
-  assert_contains "$shale_err" "shale:   run 'shale apply': a path still missing after one is a path stow declined to link" \
-    'stderr without the option'
-  # A file stow reads no option out of is still named, because stow reads it -
-  # and the line sending a reader to the list doctor prints is not, because
-  # doctor names no option for it either.
-  sandbox_write "$HOME" .stowrc
-  run_shale which dot-zshrc
-  assert_status 0 "$shale_status" 'the empty resource file'
-  assert_contains "$shale_err" "shale:   stow reads $HOME/.stowrc as well" \
-    'the empty resource file stderr'
-  assert_not_contains "$shale_err" 'shale doctor names the options' \
-    'the empty resource file stderr'
-}
-
-# The state the note must never claim: a tree nobody has applied has every path
-# in it unlinked, and 'stow declined this one' would be false of all of them.
-# Only what is on disk is stated, and the remedy is the apply that settles it -
-# an apply builds first, so a path missing after one was offered to stow.
-test_which_a_built_tree_no_apply_has_landed_says_which_it_is() {
-  local expected home home_slash
-  conf 'base common/base'
-  mklayer common/base .zshrc
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  run_shale which .zshrc
-  assert_status 0 "$shale_status"
-  expected="shale: note: '.zshrc' is in the built tree at $HOME/.dotfiles/current/.zshrc, and nothing is at $HOME/.zshrc
-shale:   no path in that tree is linked in $HOME at all, which is what a build nobody has applied looks like
-shale:   run 'shale apply': a path still missing after one is a path stow declined to link"
-  assert_eq "$expected" "$shale_err" 'stderr'
-  # The path in the first line is a join and the directory in the second is
-  # printed on its own, which are the two spellings of $HOME shale keeps apart.
-  # They name one directory whatever the environment spells it as, shale
-  # stripping a trailing slash from HOME before either is built.
-  home=$HOME
-  home_slash=$home///
-  HOME=$home_slash
-  run_shale which .zshrc
-  HOME=$home
-  assert_status 0 "$shale_status" 'under a trailing slash'
-  assert_eq "$expected" "$shale_err" 'stderr under a trailing slash'
-  # And the apply the note prescribes ends it.
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  run_shale which .zshrc
-  assert_status 0 "$shale_status" 'after the apply'
-  assert_empty "$shale_err" 'stderr after the apply'
-}
-
-# A build newer than the last apply, which is the state shale cannot tell from a
-# path stow declined: nothing on disk dates one against the other.  So the note
-# says an apply has run and stops there, and the wording that would have been
-# wrong here is the one it does not use.
-test_which_a_path_newer_than_the_apply_is_not_called_declined() {
-  conf 'base common/base'
-  mklayer common/base .zshrc
-  run_shale apply
-  assert_status 0 "$shale_status" 'the first apply'
-  mklayer common/base .vimrc
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  run_shale which .vimrc
-  assert_status 0 "$shale_status"
-  assert_eq "shale: note: '.vimrc' is in the built tree at $HOME/.dotfiles/current/.vimrc, and nothing is at $HOME/.vimrc
-shale:   something has linked other paths from that tree, though not necessarily since this one reached it
-shale:   run 'shale apply': a path still missing after one is a path stow declined to link" \
-    "$shale_err" 'stderr'
-  run_shale apply
-  assert_status 0 "$shale_status" 'the second apply'
-  run_shale which .vimrc
-  assert_status 0 "$shale_status" 'after the second apply'
-  assert_empty "$shale_err" 'stderr after the second apply'
-}
-
-# The silence around all of it.  A note saying a file is not in $HOME while it
-# sits there is worse than no note at all, so every shape an apply leaves is
-# asserted silent: a file at the top, one inside a directory, a name with a
-# space in it, the directory itself, and a relative dangling symlink - which is
-# the shape that answers -e no while the link is plainly there, and is linked by
-# both 2.3.1 and 2.4.1.
-#
-# Twice over, with and without an ignore file: the patterns are read on every
-# which, and a matcher that fell through to the wrong answer would show here.
-test_which_says_nothing_about_a_path_an_apply_linked() {
-  local rels rel round
-  rels=('.zshrc' '.config/nvim/init.lua' 'bin/tool' 'a b/c d' 'notes.txt')
-  conf 'base common/base'
-  for rel in ${rels[@]+"${rels[@]}"}; do
-    mklayer common/base "$rel"
-  done
-  sandbox_mkdir "$HOME/.dotfiles/common/base"
-  sandbox_leaf "$sandbox_dir" .dangling new
-  ln -s nowhere-at-all "$sandbox_path" || fail 'could not create the symlink'
-  for round in bare ignore; do
-    [ "$round" = bare ] || mkignore common '*.swp'
-    run_shale apply
-    assert_status 0 "$shale_status" "the $round apply"
-    assert_empty "$shale_err" "the $round apply stderr"
-    for rel in ${rels[@]+"${rels[@]}"}; do
-      assert_symlink_to "$HOME/$rel" "$HOME/.dotfiles/current/$rel" "the $round link for '$rel'"
-      run_shale which "$rel"
-      assert_status 0 "$shale_status" "the $round which '$rel'"
-      assert_empty "$shale_err" "the $round which '$rel' stderr"
-    done
-    # The directories the files above are in, which stow makes as directories of
-    # their own under --no-folding rather than linking.
-    for rel in .config .config/nvim bin 'a b'; do
-      assert_real_dir "$HOME/$rel" "the $round directory '$rel'"
-      run_shale which "$rel"
-      assert_status 0 "$shale_status" "the $round which '$rel'"
-      assert_empty "$shale_err" "the $round which '$rel' stderr"
-    done
-    # -e is false for this one and -L is true, and the file is in $HOME.
-    [ ! -e "$HOME/.dangling" ] || fail 'the dangling link resolves'
-    [ -L "$HOME/.dangling" ] || fail 'no link at the dangling path'
-    run_shale which .dangling
-    assert_status 0 "$shale_status" "the $round which '.dangling'"
-    assert_empty "$shale_err" "the $round which '.dangling' stderr"
-  done
-}
-
-# Two more shapes $HOME can hold at the path, neither of them this note's
-# business: a file of the reader's own, which is a conflict doctor reports, and a
-# link into somewhere else.  Both are a path with something at it, and calling
-# either of them missing is the false positive.
-test_which_says_nothing_where_home_holds_the_path() {
-  local elsewhere
-  conf 'base common/base'
-  mklayer common/base .zshrc
-  mklayer common/base .vimrc
-  sandbox_write "$HOME" .vimrc 'mine, not a layer copy'
-  run_shale apply
-  # Both versions refuse the whole apply over it, in shale's own words.
-  assert_status 1 "$shale_status" 'the apply over a real file'
-  assert_contains "$shale_err" "shale: stow failed; nothing in $HOME was relinked" \
-    'the apply stderr'
-  run_shale which .vimrc
-  assert_status 0 "$shale_status" 'the real file'
-  assert_empty "$shale_err" 'the real file stderr'
-  # A link, and pointing outside the built tree.
-  sandbox_write "$CASE_DIR/elsewhere" .vimrc 'somewhere else'
-  elsewhere=$sandbox_path
-  sandbox_target "$HOME" .vimrc
-  rm -f "$sandbox_path" || fail 'could not remove the file'
-  sandbox_leaf "$HOME" .vimrc new
-  ln -s "$elsewhere" "$sandbox_path" || fail 'could not create the symlink'
-  run_shale which .vimrc
-  assert_status 0 "$shale_status" 'the foreign link'
-  assert_empty "$shale_err" 'the foreign link stderr'
-}
-
-# The folded directory on its own, because it is the one shape that has nothing
-# at all at the leaf and is still a file in $HOME: ~/.config is one link into
-# the built tree and every file below it is reached through it.  shale passes
-# --no-folding, so no apply of its own makes one - a stow run before shale, or
-# by hand, is where it comes from, and it is here as a link made by hand.
-test_which_says_nothing_about_a_path_below_a_folded_directory() {
-  conf 'base common/base'
-  mklayer common/base .config/nvim/init.lua
-  run_shale build
-  assert_status 0 "$shale_status" 'the build'
-  sandbox_leaf "$HOME" .config new
-  ln -s .dotfiles/current/.config "$sandbox_path" ||
-    fail 'could not create the folded link'
-  # Nothing is at the leaf, and the file is in $HOME through the link above it.
-  [ ! -L "$HOME/.config/nvim/init.lua" ] || fail 'the leaf is a link of its own'
-  [ -e "$HOME/.config/nvim/init.lua" ] || fail 'the folded file is not readable'
-  run_shale which .config/nvim/init.lua
-  assert_status 0 "$shale_status"
-  assert_empty "$shale_err" 'stderr'
-}
-
-# The same rule on the other side of the note: the walk that says whether
-# anything from the tree is linked may not answer 'nothing' for a tree it could
-# not read.  A directory that cannot be listed answers every glob with nothing,
-# exactly as an empty one does, and 'no apply has landed' would be false of a
-# $HOME full of that tree's links.
-test_which_a_built_tree_it_cannot_read_is_never_called_unapplied() {
-  skip_if_root
-  conf 'base common/base'
-  mklayer common/base .zshrc
-  mklayer common/base .vimrc
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
-  # One link gone by hand is what brings the note out; the other stays, so the
-  # tree plainly is applied and only the walk cannot see it.
-  sandbox_mkdir "$HOME"
-  rm -f "$sandbox_dir/.vimrc" || fail 'could not remove the link'
-  # Searchable and unlistable: the path itself is still testable, and the glob
-  # that would find the link beside it returns nothing.
-  chmod 0300 "$HOME/.dotfiles/current" || fail 'could not remove the read bit'
-  run_shale which .vimrc
-  chmod 0755 "$HOME/.dotfiles/current" || fail 'could not restore the mode'
-  assert_status 0 "$shale_status"
-  assert_eq "shale: note: '.vimrc' is in the built tree at $HOME/.dotfiles/current/.vimrc, and nothing is at $HOME/.vimrc
-shale:   shale could not read all of $HOME/.dotfiles/current, so it cannot tell whether anything from that tree is linked
-shale:   run 'shale apply': a path still missing after one is a path stow declined to link" \
-    "$shale_err" 'stderr'
-  # And with the tree readable again, the same path gets the answer the walk can
-  # stand behind.
-  run_shale which .vimrc
-  assert_status 0 "$shale_status" 'once it can be read'
-  assert_contains "$shale_err" 'shale:   something has linked other paths from that tree' \
-    'stderr once it can be read'
-}
-
-# A path shale cannot look at is not a path shale reports on.  Three directories
-# above it answer 'no' to every test below them exactly as the file's absence
-# does, and none of the three is distinguishable from it: one whose search bit is
-# off, one that is a link into a directory whose search bit is off, and one that
-# is a link to nothing.  The last two are one answer here - -L yes and -e no,
-# which is what a link shale cannot follow gives whichever it is.
-test_which_says_nothing_where_it_cannot_look_in_home() {
-  local outside
-  skip_if_root
-  conf 'base common/base'
-  mklayer common/base .config/x
-  mklayer common/base .zshrc
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  chmod 0000 "$HOME/.config" || fail 'could not remove the search bit'
-  run_shale which .config/x
-  chmod 0755 "$HOME/.config" || fail 'could not restore the mode'
-  assert_status 0 "$shale_status"
-  assert_eq "winner    base  $HOME/.dotfiles/common/base/.config/x" "$shale_out" 'stdout'
-  assert_empty "$shale_err" 'stderr'
-  # A link in its place, pointing into a directory nobody can search: -d follows
-  # it and fails, so the search-bit test above never sees this one.
-  sandbox_mkdir "$CASE_DIR/outside/inner"
-  outside=$sandbox_dir
-  sandbox_target "$HOME" .config
-  rm -rf "$sandbox_path" || fail 'could not remove the directory'
-  sandbox_leaf "$HOME" .config new
-  ln -s "$outside" "$sandbox_path" || fail 'could not create the symlink'
-  chmod 0000 "${outside%/*}" || fail 'could not remove the search bit'
-  run_shale which .config/x
-  chmod 0755 "${outside%/*}" || fail 'could not restore the mode'
-  assert_status 0 "$shale_status" 'the unsearchable link target'
-  assert_empty "$shale_err" 'the unsearchable link target stderr'
-  # And the same two answers from a link to nothing at all, which is the one
-  # shape that needs no permissions to make.  sandbox_leaf will not hand back a
-  # path that is a symlink, which this one is, so the directory is resolved and
-  # the leaf removed from it.
-  sandbox_mkdir "$HOME"
-  rm -f "$sandbox_dir/.config" || fail 'could not remove the link'
-  sandbox_leaf "$HOME" .config new
-  ln -s nowhere-at-all "$sandbox_path" || fail 'could not create the symlink'
-  run_shale which .config/x
-  assert_status 0 "$shale_status" 'the link to nothing'
-  assert_empty "$shale_err" 'the link to nothing stderr'
-  # The other side of it: once that ancestor resolves to a directory shale can
-  # search, the path is one shale can speak for again.
-  sandbox_mkdir "$HOME"
-  rm -f "$sandbox_dir/.config" || fail 'could not remove the link'
-  sandbox_leaf "$HOME" .config new
-  ln -s "$outside" "$sandbox_path" || fail 'could not create the symlink'
-  run_shale which .config/x
-  assert_status 0 "$shale_status" 'the readable link target'
-  assert_contains "$shale_err" "shale: note: '.config/x' is in the built tree at" \
-    'the readable link target stderr'
-}
-
-# One note per path.  Every note above this one names a reason a path is not in
-# $HOME, and the residual fact is true of all of them - so a path with a reason
-# gets the reason, and the fact is left for the paths shale has none for.
-test_which_a_path_with_a_reason_gets_the_reason_and_not_the_fact() {
-  local rel
-  conf 'base common/base'
-  mkignore common '.DS_Store'
-  mklayer common/base .DS_Store
-  mklayer common/base 'notes~'
-  mklayer common/base .git/config
-  mklayer common/base .zshrc
-  run_shale apply
-  assert_status 0 "$shale_status" 'the apply'
-  for rel in .DS_Store 'notes~' .git/config; do
-    assert_missing "$HOME/$rel" "'$rel' in \$HOME"
-    run_shale which "$rel"
-    assert_status 0 "$shale_status" "which '$rel'"
-    assert_contains "$shale_err" 'shale: note: ' "which '$rel' stderr"
-    assert_not_contains "$shale_err" 'is in the built tree at' "which '$rel' stderr"
-  done
-  # The file shale writes itself, which no apply has ever linked and which a
-  # layer providing one is told about in build's words instead.
-  mklayer common/base .stow-local-ignore 'a layer may not provide this'
-  run_shale which .stow-local-ignore
-  assert_status 0 "$shale_status" 'the built list'
-  assert_contains "$shale_err" "shale: note: 'build' would fail here" 'the built list stderr'
-  assert_not_contains "$shale_err" 'is in the built tree at' 'the built list stderr'
-  # The ignore file shale reads, which no build composes either.  Only a hand
-  # puts one in the built tree, so one is put there by hand: the reason is the
-  # note above, and the fact must not arrive under it saying the same thing.
-  mklayer common/base .shale-ignore 'read by nothing'
-  sandbox_write "$HOME/.dotfiles/current" .shale-ignore 'planted, not composed'
-  run_shale which .shale-ignore
-  assert_status 0 "$shale_status" 'the ignore file'
-  assert_contains "$shale_err" 'shale: note: no build composes a .shale-ignore' \
-    'the ignore file stderr'
-  assert_not_contains "$shale_err" 'is in the built tree at' 'the ignore file stderr'
-  # The other 'build would fail here', which is the collision between two layers:
-  # the tree still holds the copy an earlier build composed, the link that apply
-  # made is gone from $HOME, and the residual note's remedy is an apply that dies
-  # on the collision without touching the path.
-  rm -f "$HOME/.zshrc" || fail 'could not remove the link'
-  conf 'base common/base' 'local local'
-  mklayer local .zshrc/inside 'a directory where base has a file'
-  run_shale which .zshrc
-  assert_status 0 "$shale_status" 'the collision'
-  assert_contains "$shale_err" "shale: note: 'build' would fail here — .zshrc is a file in 'base' and a directory in 'local'" \
-    'the collision stderr'
-  assert_not_contains "$shale_err" 'is in the built tree at' 'the collision stderr'
 }
 
 # A layer shipping the file shale reads: the table names the layer holding it
@@ -14856,8 +13767,8 @@ test_which_a_declared_file_says_the_mode_travels_through_the_link() {
 }
 
 # And nothing at all about $HOME for a declared file the tree holds and nothing
-# links: the residual note at the end of the answer is what speaks there, and
-# doctor carries the same fact as a note of its own.
+# links: which says where the mode lands in the built tree and stops, an
+# unlinked path being one it has nothing true to say about $HOME for.
 test_which_a_declared_file_that_is_not_linked_claims_nothing_about_home() {
   conf 'base personal/base'
   mklayer personal/base .netrc
@@ -14873,10 +13784,6 @@ test_which_a_declared_file_that_is_not_linked_claims_nothing_about_home() {
     "shale:   $HOME/.netrc is a link into that tree, so that is the mode read through it" 'stderr'
   assert_not_contains "$shale_err" \
     "shale:   and on $HOME/.netrc, where it never widens a directory that was already there" 'stderr'
-  # The residual note is the one that speaks about $HOME here.
-  assert_contains "$shale_err" \
-    "shale: note: '.netrc' is in the built tree at $HOME/.dotfiles/current/.netrc, and nothing is at $HOME/.netrc" \
-    'stderr'
 }
 
 # A path an ignore list covers: no apply links one, so no apply sets a mode on
@@ -15109,10 +14016,9 @@ shale: note: shale writes $HOME/.dotfiles/current/.stow-local-ignore itself, and
 # linked by no apply.  #108 gave doctor its silence here; which named the winner
 # and, since #106, sent the reader to run an apply that can never link it.
 #
-# The answer is checked whole rather than by fragment, because the two things
-# that make it a wrong answer are both absences: the residual note that follows
-# it when nothing accounts for the path, and any claim that the entry is a line
-# in the file shale writes.
+# The answer is checked whole rather than by fragment, because what makes it a
+# wrong answer is an absence: any claim that the entry is a line in the file
+# shale writes.
 test_which_a_stow_local_ignore_ending_in_a_newline_says_no_apply_links_it() {
   local trailing note
   printf -v trailing '.stow-local-ignore\n'
@@ -15138,9 +14044,8 @@ shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfi
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
   assert_missing "$HOME/$trailing" 'the path in the home directory'
-  # After an apply that linked other paths from the same tree, which is where
-  # the residual note fires and where its remedy - run an apply - is one this
-  # path has just had.
+  # After an apply that linked other paths from the same tree, this path being
+  # one no apply ever links however many have run.
   assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
   run_shale which "$trailing"
   assert_status 0 "$shale_status" 'after the apply'
@@ -15655,7 +14560,7 @@ shale:   that list has no line to edit: nothing but a different name gets this p
 
 # The third and last place which resolves a typed path against a real tree, and
 # the only one a name outside the three skipped ones can reach: the test that
-# the path is in the built tree, which is what the residual note is about.
+# the path is in the built tree, which is what the stale-tree note turns on.
 #
 # ALSO RED ONLY ON A CASE-INSENSITIVE VOLUME, on the same machines and for the
 # same reason.  A layer file renamed in case alone leaves the earlier build's
@@ -16233,19 +15138,6 @@ option_fixture() {
   sandbox_write "$HOME/sub" .nested 'mine, and not a link'
 }
 
-# The whole of which's stderr for a path this fixture composes and no ignore
-# pattern covers.  Nothing here ever applies - the fixture plants two files of
-# its own in $HOME so that doctor has a conflict to count - so every such path
-# gets the note for a built tree nobody has stowed.
-option_unlinked_note() {
-  local name=$1
-  printf "shale: note: '%s' is in the built tree at %s, and nothing is at %s\n" \
-    "$name" "$HOME/.dotfiles/current/$name" "$HOME/$name"
-  printf 'shale:   no path in that tree is linked in %s at all, which is what a build nobody has applied looks like\n' \
-    "$HOME"
-  printf "shale:   run 'shale apply': a path still missing after one is a path stow declined to link\n"
-}
-
 # What a build of that fixture composes, on its own because the two cases for
 # the options left in force assert it and cannot assert the rest - stderr under
 # either of them is the script.
@@ -16289,8 +15181,8 @@ assert_option_answers() {
     "winner    base  $HOME/.dotfiles/common/base/notes.txt" "$label: which notes.txt stdout"
   # nocasematch's half: the upper-case pattern on line 5 must not reach this
   # name.  It is the only thing keeping this path off the ignore list, so an
-  # option that folds case moves it to the other note entirely.
-  assert_eq "$(option_unlinked_note notes.txt)" "$shale_err" "$label: which notes.txt stderr"
+  # option that folds case gives this path the ignore note and this silence goes.
+  assert_empty "$shale_err" "$label: which notes.txt stderr"
   # extglob's, four times over.  Read as an alternation the second pattern
   # covers this name too, and the report grows a line naming it.
   run_shale which a.swp
@@ -16318,10 +15210,10 @@ shale:   shale writes that pattern into $HOME/.dotfiles/current/.stow-local-igno
   # start covering, which the documented subset does not reach at all.
   run_shale which a
   assert_status 0 "$shale_status" "$label: which a"
-  assert_eq "$(option_unlinked_note a)" "$shale_err" "$label: which a stderr"
+  assert_empty "$shale_err" "$label: which a stderr"
   run_shale which aa
   assert_status 0 "$shale_status" "$label: which aa"
-  assert_eq "$(option_unlinked_note aa)" "$shale_err" "$label: which aa stderr"
+  assert_empty "$shale_err" "$label: which aa stderr"
   run_shale doctor
   assert_status 1 "$shale_status" "$label: the doctor"
   assert_contains "$shale_out" \
@@ -16578,8 +15470,6 @@ test_meta_an_inherited_xtrace_changes_no_answer_and_is_left_in_force() {
   # the option off.
   assert_contains "$(printf '%s\n' "$shale_err" | sed -n 's/^++* //p')" \
     "$HOME/.dotfiles/current" 'the which stderr, trace lines only'
-  assert_contains "$shale_err" \
-    "shale: note: 'notes.txt' is in the built tree at" 'the which stderr'
 }
 
 # The same for verbose, whose output is the script's lines rather than the
@@ -16599,8 +15489,6 @@ test_meta_an_inherited_verbose_changes_no_answer_and_is_left_in_force() {
     "winner    base  $HOME/.dotfiles/common/base/notes.txt" 'which notes.txt stdout'
   assert_contains "$shale_err" "    usage_error \"unknown command '\$cmd'\"" \
     'the which stderr'
-  assert_contains "$shale_err" \
-    "shale: note: 'notes.txt' is in the built tree at" 'the which stderr'
 }
 
 # The one place leaving xtrace in force was not free, and the guard cmd_apply
