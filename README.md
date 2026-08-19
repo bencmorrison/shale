@@ -366,14 +366,14 @@ it cannot open, that no two layers disagree about whether a path is a file or a 
 nothing in `$HOME` at a path the layers provide is something no apply put there — a file, a
 directory, or a link of your own, none of which stow will write over — that no layer ships
 `.stow-local-ignore`, which shale writes itself, or shale itself, that `~/.dotfiles/current` is a
-directory rather than a file or a link to one, that the
-build lock is neither held nor uncreatable, that nothing in `~/.dotfiles` is a stray, that no
-`current.new` has been left beside `current` and no `current.old` that no build is coming to
-remove, and that no link in `$HOME` points into the built tree at a path it no longer provides, and that something from
+directory rather than a file or a link to one, that the build lock is neither held nor uncreatable,
+that nothing in `~/.dotfiles` whose name does not begin with a dot is a stray, that no `current.new`
+has been left beside `current` and no `current.old` that no build is coming to remove, and that no
+link in `$HOME` points into the built tree at a path it no longer provides, and that something from
 that tree is linked in `$HOME` at all — a built tree with nothing linked is what a machine that has
-never been applied looks like, and nothing in it is in use. Where a `.stowrc` exists
-it names the stow options that file sets, because several of them change an apply and three of them
-make it do nothing at all. It changes nothing itself.
+never been applied looks like, and nothing in it is in use. Where a `.stowrc` exists it names the
+stow options that file sets, because several of them change an apply and three of them make it do
+nothing at all. It changes nothing itself.
 
 ```
 $ shale doctor
@@ -401,6 +401,31 @@ shale:   add a url on that line, or create the directory
 shale: /home/you/.dotfiles/old-tmux is not a configured layer
 shale:   it may be a leftover stow package, a stray clone, or a layer you removed from the config
 shale: 1 problem found
+```
+
+That scan reads the names in `~/.dotfiles` that do not begin with a dot, and only those. The
+directory is usually a git clone, so it is full of dot names that are exactly where they belong —
+`.git`, `.gitignore`, `.github` — and naming those would bury the strays worth reading under a list
+of files there is nothing to do about. What that costs is the dot-named stray: put a `.tmux.conf`,
+or a leftover `.old-layer` directory, straight into `~/.dotfiles` rather than into a layer and
+doctor says nothing about it, where the same two without the dot are both reported. `shale which
+.tmux.conf` will not lead you to it either — it answers about layers, and no layer provides it.
+Dotfiles belong inside a layer, at the path they take in `$HOME`.
+
+The dot names doctor does report come from checks of their own rather than from that scan, and each
+knows one thing: a `.stowrc` gets the note about the stow options it sets, a `.lock` the report on
+the build lock, and `.shale-ignore` and `.shale-modes` are looked for by name beside the config and
+inside every configured layer, so a misplaced one is reported at either, up to the ten doctor names
+before it counts the rest. A copy anywhere else — beside a clone root's layers rather than at the
+top of it, or under a directory no config line makes a layer — is in neither place, and is as
+silent as any other dot name:
+
+```
+$ shale doctor
+shale: /home/you/.dotfiles/.shale-ignore is read by nothing
+shale:   shale reads one .shale-ignore per clone root, at /home/you/.dotfiles/<root>/.shale-ignore
+shale:   move it into the clone root whose layers it is about
+shale: no problems found, but read the note above
 ```
 
 ## Adding to a config file instead of replacing it
