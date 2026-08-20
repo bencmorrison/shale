@@ -48,7 +48,7 @@ command: shale is one file, and the copy you have is whatever the repository hel
 ## Bootstrap on a new machine
 
 ```sh
-mkdir -p ~/.dotfiles
+mkdir -p ~/.dotfiles && chmod 0700 ~/.dotfiles
 cp examples/wsl-work.conf ~/.dotfiles/shale.conf
 $EDITOR ~/.dotfiles/shale.conf     # list this machine's layers
 mkdir -p ~/.dotfiles/local         # a layer with no url is yours to create
@@ -506,7 +506,10 @@ overwrites, and how to carry on from a block that stopped.
   across faithfully, and the working tree after a clone is not what was committed; a directory's
   mode it does not carry at all. Where a mode matters,
   declare it in a `.shale-modes` at the top of the clone root: that file is plain text, which is the
-  one thing about a mode git reproduces exactly.
+  one thing about a mode git reproduces exactly. `doctor` says nothing about a clone root's own mode,
+  group-writable or not, and that is deliberate: the next re-clone puts the mode straight back, so
+  the note would return every time it was acted on. Narrow them yourself if the machine has other
+  people on it.
 - The built tree is `700`, so nothing but you can walk it. Nothing shale runs needs to — stow reads
   it as you — but if your `$HOME` is group-readable by design and something else reads a file shale
   linked, it resolves the link into `~/.dotfiles/current` and stops there. There is no option to
@@ -514,6 +517,11 @@ overwrites, and how to carry on from a block that stopped.
   chmodding it. `shale doctor` notes a `current` whose permission bits are not `700`. Only those
   bits are shale's — a setgid bit inherited from `~/.dotfiles` gives you `2700` on every build, and
   `doctor` says nothing about that.
+- That `700` only holds as far as the directory above it. `~/.dotfiles` is yours — shale never
+  creates it and never chmods it — and anyone who can write there can rename `current` aside and
+  leave a tree of their own at the name, which every link in `$HOME` then resolves into. So `doctor`
+  notes a `~/.dotfiles` that its group or the world can write, and prints the `chmod` that closes it;
+  `700` and `750` are silent, and no build or apply clears the note, because only you can.
 - Shale sets the mode of a directory it creates in `$HOME`, and never widens one that was already
   there. So a `~/.ssh` you keep at `700` survives a layer that declares `755`. `apply` says in one
   line that it left such a directory alone, `doctor` names each one and both ways to settle it —

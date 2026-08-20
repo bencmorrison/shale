@@ -44,6 +44,7 @@ If **your own files are to be the layer** — you are starting shale from your d
 adopting anyone else's — the move is a `mv` and an apply, and there is nothing to reconcile:
 
 ```
+$ mkdir -p ~/.dotfiles && chmod 0700 ~/.dotfiles
 $ mkdir -p ~/.dotfiles/local/.config
 $ printf "local  local\n" > ~/.dotfiles/shale.conf
 $ mv ~/.zshrc ~/.profile ~/.gitconfig ~/.dotfiles/local/
