@@ -224,13 +224,15 @@ pointing at it until stow makes the link, and one deleted from every layer leave
 until stow prunes it. Apply when unsure: it builds first, so it is never less than a build.
 [docs/layers.md](docs/layers.md) has the boundary case by case.
 
-Builds are quiet. A build that finds `current` holding a copy older than the layer file replacing it
-keeps the previous tree at `~/.dotfiles/current.old` and says nothing, because an edited layer leaves
-exactly that state and a message there would be a message on every edit. `shale doctor` is what
-reports the mismatch, as a note rather than a problem, and only until the build that overwrites it.
-After that build nothing reports it: what was there sits at `~/.dotfiles/current.old` until the next
-build removes it, and `doctor` names it again only where a problem it found means no build is coming
-— see [docs/layers.md](docs/layers.md).
+Builds are quiet, bar one line: a build that takes a path out of the tree and leaves a link in
+`$HOME` pointing at nothing counts those links and says so, which is *Links left behind after layers
+change* in [docs/migrating.md](docs/migrating.md). A build that finds `current` holding a copy older
+than the layer file replacing it keeps the previous tree at `~/.dotfiles/current.old` and says
+nothing, because an edited layer leaves exactly that state and a message there would be a message on
+every edit. `shale doctor` is what reports the mismatch, as a note rather than a problem, and only
+until the build that overwrites it. After that build nothing reports it: what was there sits at
+`~/.dotfiles/current.old` until the next build removes it, and `doctor` names it again only where a
+problem it found means no build is coming — see [docs/layers.md](docs/layers.md).
 
 Shale chooses between three exit codes, and no others:
 
@@ -490,9 +492,10 @@ overwrites, and how to carry on from a block that stopped.
   400-directory tree, five lines were not measurable, twenty added 13 milliseconds to the build and
   72 to the apply, and four hundred added 0.9 seconds and 2.4.
 - When a whole directory leaves every layer, stow does not visit it and the links inside it are left
-  dangling by an apply that still exits 0. That apply counts them and says so in one line; `shale
-  doctor` names them and prints what to do about them, and goes on finding them on every later run,
-  which `apply` does not — it speaks only for the apply you just ran.
+  dangling by an apply that still exits 0. The run that took those paths out of the tree counts them
+  and says so in one line — the `build` where you ran it on its own, the `apply` otherwise, never
+  both; `shale doctor` names them and prints what to do about them, and goes on finding them on every
+  later run, which neither does — each speaks only for the run you just made.
   [docs/migrating.md](docs/migrating.md) covers the case in full.
 - A shale that is killed outright — `kill -9`, or the machine losing power — leaves a
   `~/.dotfiles/current.new` behind if it died mid-build. `doctor` notes it, and any `current.old`

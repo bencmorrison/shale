@@ -4880,6 +4880,334 @@ test_build_a_dot_lock_in_dotfiles_is_nothing_to_any_command() {
   assert_real_dir "$HOME/.dotfiles/.lock" 'the planted directory'
 }
 
+# Issue #137's transcript, read from the command that leaves the links.  A
+# directory leaves every layer, and the build composing the tree without it is
+# what takes those paths out - so the build is what counts them, and the apply
+# after it has nothing to add: the tree it reads is the one those paths have
+# already left.  Before this, running the documented 'shale build' first bought
+# silence from both commands.
+#
+# The count is what makes the line worth having: three links from two
+# directories is a number neither a per-link report nor a per-directory one
+# would print.
+test_build_names_how_many_links_it_orphaned() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  mklayer local .config/git/config
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the apply that made the links'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_eq \
+    "shale: 3 links in $HOME point at paths the built tree no longer provides: this build took those paths out of the tree, and 'shale doctor' names them" \
+    "$shale_err" 'the build stderr'
+  # One line and no more: which links they are and which remedy applies are
+  # doctor's, and a block of them here would be a block on every build that
+  # drops a directory.
+  assert_eq 1 "$(printf '%s\n' "$shale_err" | grep -c '^shale: ')" \
+    'lines the build printed'
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the leftover link'
+  assert_dangling_symlink "$HOME/.config/nvim/spell.add" 'the leftover link'
+  assert_dangling_symlink "$HOME/.config/git/config" 'the leftover link'
+  # The apply after it says nothing, which is the whole of what 'once' means
+  # here: the same three links, already named by the command that made them.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply after the build'
+  assert_empty "$shale_err" 'the apply after the build'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  # And doctor, which none of this changes, still holds the detail.
+  run_shale doctor
+  assert_status 1 "$shale_status" 'doctor'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.config/nvim/init.lua points at $HOME/.dotfiles/current/.config/nvim/init.lua, which the built tree no longer provides" \
+    'doctor stdout'
+  assert_contains "$shale_out" 'shale: 3 problems found' 'doctor stdout'
+}
+
+# The other half of that claim, and what decides whether the line above is ever
+# read: a build that orphans nothing says nothing, which is every ordinary
+# build.  Four shapes of one - a first build with no tree to replace, a repeat
+# of it, a file leaving a directory the tree still holds, and a file leaving the
+# top of the tree.
+#
+# The last two are why the count is not 'whatever dangles now'.  Both leave a
+# link that dangles the moment the build ends and both are taken back by the
+# next apply, so a build that reported them would send a reader to doctor over
+# links that go on their own - and would do it on the commonest edit there is.
+#
+# assert_empty is the anchor: a substring test for the message would pass on any
+# message that merely differs from the needle, and what is asserted here is that
+# there is no message at all.
+test_build_says_nothing_when_it_orphans_nothing() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .vimrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the first build'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the second build'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the apply'
+  sandbox_leaf "$HOME/.dotfiles/personal/base" .vimrc
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  sandbox_leaf "$HOME/.dotfiles/personal/base/.config/nvim" spell.add
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale build
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the build that took two files out'
+  # Both links dangle while they wait for the apply, and both are gone after it.
+  # That is what the silence above is a claim about.
+  assert_dangling_symlink "$HOME/.vimrc" 'the link waiting for the apply'
+  assert_dangling_symlink "$HOME/.config/nvim/spell.add" \
+    'the link waiting for the apply'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the apply that pruned two links'
+  assert_missing "$HOME/.vimrc" 'the pruned link'
+  assert_missing "$HOME/.config/nvim/spell.add" 'the pruned link'
+}
+
+# The claim #137 turns on, asserted as a comparison: a build followed by an
+# apply says what a bare apply says, once.  The same shape of path leaves the
+# tree by each route - a directory that left every layer - and the same one link
+# is counted either way.
+#
+# What differs is the cause each names, and it has to: no stow has run when the
+# build speaks, so a build saying stow had declined to remove anything would be
+# describing something that never happened.  The count, the paths and the remedy
+# are the same words in both, which is what a reader acts on.
+test_build_then_apply_says_what_a_bare_apply_says() {
+  local by_build by_apply line
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .local/share/pass/one.gpg
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the apply that made the links'
+  # The build's route.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  by_build=$shale_err
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply after the build'
+  assert_empty "$shale_err" 'the apply after the build'
+  # The apply's route: a second directory leaves, and nothing is built first.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.local"
+  rm -rf "$sandbox_dir/share" || fail 'could not remove the layer directory'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the bare apply'
+  by_apply=$shale_err
+  assert_eq \
+    "shale: 1 link in $HOME points at a path the built tree no longer provides: this build took that path out of the tree, and 'shale doctor' names it" \
+    "$by_build" 'the build stderr'
+  assert_eq \
+    "shale: 1 link in $HOME points at a path the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names it" \
+    "$by_apply" 'the bare apply stderr'
+  # Stated over both rather than read off the two literals above, so that a
+  # change to either wording that dropped the count or the remedy fails here.
+  for line in "$by_build" "$by_apply"; do
+    assert_eq 1 "$(printf '%s\n' "$line" | grep -c '^shale: ')" 'lines one route printed'
+    assert_contains "$line" \
+      "shale: 1 link in $HOME points at a path the built tree no longer provides" \
+      'the count both routes print'
+    assert_contains "$line" "'shale doctor' names it" 'the remedy both routes print'
+  done
+}
+
+# The count belongs to the run that made it, in both directions.  A build that
+# orphans a link and an apply after it that orphans none: the number is the
+# build's and the apply is silent.  Then a build that orphans none and an apply
+# that orphans one of its own: the number is the apply's, and it is 1 rather
+# than the 2 dangling in $HOME by then, the first belonging to the build that
+# named it.
+#
+# Which is the same scope apply has always had, now shared: neither command
+# audits $HOME - that costs a walk of the whole of it and is doctor's - and both
+# answer for the paths their own run took out of the tree.
+test_build_and_apply_each_count_the_links_their_own_run_left() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .local/share/pass/one.gpg
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the apply that made the links'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that orphaned one'
+  assert_eq \
+    "shale: 1 link in $HOME points at a path the built tree no longer provides: this build took that path out of the tree, and 'shale doctor' names it" \
+    "$shale_err" 'the build that orphaned one'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that orphaned none'
+  assert_empty "$shale_err" 'the apply that orphaned none'
+  # The other direction: a build with nothing to take out, and then an apply
+  # doing the whole of it.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that orphaned none'
+  assert_empty "$shale_err" 'the build that orphaned none'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.local"
+  rm -rf "$sandbox_dir/share" || fail 'could not remove the layer directory'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that orphaned one'
+  # An equality rather than a substring test, because the number is the whole
+  # claim: a line counting both orphans would satisfy any needle this one is a
+  # prefix of.
+  assert_eq \
+    "shale: 1 link in $HOME points at a path the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names it" \
+    "$shale_err" 'the apply that orphaned one'
+  # Both links are in $HOME, and doctor - which answers for $HOME rather than
+  # for a run - names both.
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the link the build left'
+  assert_dangling_symlink "$HOME/.local/share/pass/one.gpg" 'the link the apply left'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'doctor'
+  assert_eq 2 \
+    "$(printf '%s\n' "$shale_out" | grep -c 'which the built tree no longer provides')" \
+    'the orphans doctor names'
+}
+
+# The same line under a root outside $HOME, which is the layout where the two
+# halves of the count are different directories: the links are in $HOME and what
+# they point at is under SHALE_DIR.  A count that read the root for the links,
+# or the home for the tree, finds nothing here and reports a clean build.
+test_build_names_the_links_it_orphaned_under_a_root_outside_the_home() {
+  local shale_root
+  shale_dir_fixture
+  sandbox_write "$shale_root/personal/base/.config/nvim" init.lua 'elsewhere/init.lua'
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the apply that made the links'
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$shale_root/current/.config/nvim/init.lua"
+  sandbox_mkdir "$shale_root/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_eq \
+    "shale: 1 link in $HOME points at a path the built tree no longer provides: this build took that path out of the tree, and 'shale doctor' names it" \
+    "$shale_err" 'the build stderr'
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the leftover link'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply after the build'
+  assert_empty "$shale_err" 'the apply after the build'
+  assert_symlink_to "$HOME/.zshrc" "$shale_root/current/.zshrc"
+  run_shale doctor
+  assert_status 1 "$shale_status" 'doctor'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.config/nvim/init.lua points at $shale_root/current/.config/nvim/init.lua, which the built tree no longer provides" \
+    'doctor stdout'
+}
+
+# The guard that no other case reaches: a link spelled as an absolute path is
+# not one the next apply takes back, however ordinary the directory holding it
+# is, so a build counts it even where the built tree still holds that directory.
+# Removing the spelling test from the count leaves every case above green while
+# this state - two absolute links at paths that have left the tree, in a
+# directory that has not - goes from two lines to one silent build and one apply
+# saying 2, which is the very split #137 exists to close.
+#
+# Both routes, because it is the agreement between them that is the claim.  The
+# links are one level down on purpose: 2.3.1 writes a 'BUG in find_stowed_path?'
+# line about an absolute link directly in $HOME and nothing at all about one
+# below it, 2.4.1 is silent about either, and asserting shale's own silence here
+# would otherwise be asserting a stow version.
+test_build_counts_an_absolute_link_a_still_held_directory_will_keep() {
+  local by_build by_apply f dir
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  mklayer personal/base .config/nvim/plugins.lua
+  mklayer personal/base .local/share/pass/one.gpg
+  mklayer personal/base .local/share/pass/two.gpg
+  mklayer personal/base .local/share/pass/three.gpg
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the apply that made the links'
+  # The build's route: the user's own spelling of two links, and then the two
+  # paths under them leaving the tree while the directory holding them stays.
+  #
+  # In that order, and never the reverse: an absolute link at a path the tree
+  # still provides is a conflict stow refuses outright - 'existing target is not
+  # owned by stow' - so the layer file has to go in the same breath.
+  for f in .config/nvim/spell.add .config/nvim/plugins.lua; do
+    sandbox_mkdir "$HOME/${f%/*}"
+    dir=$sandbox_dir
+    # The link the apply made goes by path rather than through a leaf proof, for
+    # the reason every case that replaces one does: the proof refuses a symlink
+    # at the name, and a symlink at the name is what this is here to replace.
+    rm -f "$dir/${f##*/}" || fail "could not remove the link the apply made at $f"
+    sandbox_leaf "$dir" "${f##*/}" new
+    ln -s "$HOME/.dotfiles/current/$f" "$sandbox_path" ||
+      fail "could not plant the absolute link at $f"
+    sandbox_leaf "$HOME/.dotfiles/personal/base/${f%/*}" "${f##*/}"
+    rm -f "$sandbox_path" || fail "could not remove the layer file at $f"
+  done
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  by_build=$shale_err
+  assert_real_dir "$HOME/.dotfiles/current/.config/nvim" \
+    'the directory the tree still holds'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply after the build'
+  assert_empty "$shale_err" 'the apply after the build'
+  assert_dangling_symlink "$HOME/.config/nvim/spell.add" 'the link stow kept'
+  assert_dangling_symlink "$HOME/.config/nvim/plugins.lua" 'the link stow kept'
+  # The apply's route, in the other directory and with nothing built first.
+  for f in .local/share/pass/two.gpg .local/share/pass/three.gpg; do
+    sandbox_mkdir "$HOME/${f%/*}"
+    dir=$sandbox_dir
+    rm -f "$dir/${f##*/}" || fail "could not remove the link the apply made at $f"
+    sandbox_leaf "$dir" "${f##*/}" new
+    ln -s "$HOME/.dotfiles/current/$f" "$sandbox_path" ||
+      fail "could not plant the absolute link at $f"
+    sandbox_leaf "$HOME/.dotfiles/personal/base/${f%/*}" "${f##*/}"
+    rm -f "$sandbox_path" || fail "could not remove the layer file at $f"
+  done
+  run_shale apply
+  assert_status 0 "$shale_status" 'the bare apply'
+  by_apply=$shale_err
+  assert_real_dir "$HOME/.dotfiles/current/.local/share/pass" \
+    'the directory the tree still holds'
+  assert_dangling_symlink "$HOME/.local/share/pass/two.gpg" 'the link stow kept'
+  assert_dangling_symlink "$HOME/.local/share/pass/three.gpg" 'the link stow kept'
+  # The same nonzero count from both, which is what the guard buys: without it
+  # the build says nothing here and the apply still says two.
+  assert_eq \
+    "shale: 2 links in $HOME point at paths the built tree no longer provides: this build took those paths out of the tree, and 'shale doctor' names them" \
+    "$by_build" 'the build stderr'
+  assert_eq \
+    "shale: 2 links in $HOME point at paths the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names them" \
+    "$by_apply" 'the bare apply stderr'
+  # And doctor, which reads the spelling the same way, names all four and offers
+  # no apply for any of them.
+  run_shale doctor
+  assert_status 1 "$shale_status" 'doctor'
+  assert_eq 4 \
+    "$(printf '%s\n' "$shale_out" | grep -c 'which the built tree no longer provides')" \
+    'the orphans doctor names'
+  assert_contains "$shale_out" \
+    'shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
+    'doctor stdout'
+}
+
 # ---------------------------------------------------------------- clone cases
 #
 # Every url here is a path to a repository the case created; no case names a
@@ -9905,10 +10233,12 @@ test_doctor_the_apply_remedy_reads_for_more_than_one_link() {
 }
 
 # The discriminator's other half, which no directory can stand for: a link
-# spelled as an absolute path is one no stow prunes, wherever it sits.  2.3.1
-# says 'BUG in find_stowed_path?' on its stderr and carries on; 2.4.1 says
-# nothing; both leave the link.  So the link here is in a directory the built
-# tree still holds, and the remedy is still the delete.
+# spelled as an absolute path is one no stow prunes, wherever it sits.  Both
+# versions leave it.  2.4.1 says nothing about one; 2.3.1 says 'BUG in
+# find_stowed_path?' on its stderr and carries on, and only for a link directly
+# in $HOME - one further down, as here, it passes over in silence.  So the link
+# here is in a directory the built tree still holds, and the remedy is still the
+# delete.
 test_doctor_an_absolute_link_is_not_one_an_apply_clears() {
   conf 'base personal/base'
   mklayer personal/base .config/nvim/init.lua
