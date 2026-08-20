@@ -60,3 +60,8 @@ output, never a whole line, with a comment saying why it is a fragment.
 
 A branch per issue, one commit, merged when both CI jobs are green. Why the change was made goes in
 the commit message — never into this file or the README.
+
+The scope is closed. New behaviour — a command, a flag, a file format, a check, a new message class —
+needs Ben's approval on an issue before any branch exists. A finding about an environment shale does
+not promise defaults to a wontfix or a documentation line, not code, and a harness-internal defect
+earns work only when it causes a false pass or a false fail.
