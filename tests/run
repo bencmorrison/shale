@@ -4346,7 +4346,8 @@ test_build_the_commands_it_prints_survive_a_space_and_a_quote_in_the_home_path()
   # Before anything creates it, which is the state doctor's mkdir answers.
   run_shale doctor
   assert_status 1 "$shale_status" 'the doctor'
-  assert_command_reads_as "$shale_out" 'create it with: ' mkdir -p "$dots"
+  assert_command_reads_as "$shale_out" 'create it with: ' \
+    mkdir -p "$dots" chmod 0700 "$dots"
   # A clone fetched and then not renamed, which is kept and named.
   mkrepo personal .zshrc
   conf "base personal $repo_url"
@@ -7015,7 +7016,12 @@ test_doctor_a_missing_dotfiles_directory_is_a_finding() {
   run_shale doctor
   assert_status 1 "$shale_status"
   assert_contains "$shale_out" "shale: no dotfiles directory at $HOME/.dotfiles" 'stdout'
-  assert_contains "$shale_out" "shale:   create it with: mkdir -p '$HOME/.dotfiles'" 'stdout'
+  # The chmod is part of the remedy, not a nicety: mkdir alone takes the caller's
+  # umask, and at 'umask 002' this line would create the 0775 that doctor's own
+  # note about the dotfiles directory's mode then reports.
+  assert_contains "$shale_out" \
+    "shale:   create it with: mkdir -p '$HOME/.dotfiles' && chmod 0700 '$HOME/.dotfiles'" \
+    'stdout'
   # The config check runs anyway rather than being skipped as pointless.
   assert_contains "$shale_out" "shale: no config file at $HOME/.dotfiles/shale.conf" 'stdout'
   assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
@@ -8990,6 +8996,363 @@ test_doctor_compares_only_the_permission_bits_of_the_built_tree() {
   run_shale doctor
   assert_status 0 "$shale_status" 'doctor exit status, sticky'
   assert_eq 'shale: no problems found' "$shale_out" 'the whole report, sticky'
+}
+
+# ------------------------------- doctor's cases about the dotfiles directory
+#
+# The directory above the built tree, which shale was pointed at rather than one
+# it made: the cases above narrow $CUR to 0700 so that nothing else can read what
+# the layers put there, and a dotfiles directory somebody else can write undoes
+# that from one level up - they rename the tree aside, leave their own at the
+# name, and every symlink an apply made in $HOME resolves into it.
+#
+# A note and never a finding, matching the only other mode compare doctor makes:
+# nothing is broken, no build or apply is blocked, and the remedy is the reader's
+# to run because shale never sets the mode of a directory it did not create.
+#
+# No skip_if_root anywhere here, exactly as the built tree's mode cases above
+# carry none: these assert what doctor says about a mode rather than what the
+# kernel does with one, and chmod and ls answer the same for uid 0 as for
+# anybody else.  skip_if_root is for the cases that provoke a permission failure,
+# which none of these does.
+
+test_doctor_names_a_group_writable_dotfiles_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  # Built, so the note counted below is this one: an unbuilt tree is a note of
+  # its own.
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles"
+  chmod 0775 "$sandbox_dir" || fail 'could not widen the dotfiles directory'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles is mode 0775, and its group can write to it" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   shale builds $HOME/.dotfiles/current with permission bits 0700 so nothing else can read what the layers put there, and a directory somebody else can write is where that is undone" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   they can rename the built tree aside and leave one of their own at $HOME/.dotfiles/current, and every symlink an apply made in $HOME then resolves into theirs" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   shale never sets the mode of $HOME/.dotfiles - it was there before shale ran - so no build or apply clears this" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   close it with: chmod g-w '$HOME/.dotfiles'" 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+}
+
+# The fixture the bootstrap actually leaves, reached by the umask rather than by
+# a chmod.  Shale cannot tell one 0775 from another, so every other case here
+# covers its behaviour perfectly well - what none of them pins is the decision,
+# which is that this note fires on what 'mkdir -p ~/.dotfiles' leaves on an
+# ordinary Debian or Ubuntu box, where pam_umask gives a user-private group a
+# 002.  That is the contested half of the report and a chmod-made mode cannot
+# state it.
+#
+# The suite pins its own umask, so the 002 is set here and put back: without that
+# pin this coverage would be an accident of whoever ran the suite, which is not
+# coverage.
+test_doctor_the_note_fires_on_the_directory_the_bootstrap_umask_leaves() {
+  local saved
+  saved=$(umask)
+  umask 002
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  umask "$saved"
+  assert_mode "$HOME/.dotfiles" 'drwxrwxr-x' 'the fixture the bootstrap umask leaves'
+  run_shale build
+  assert_status 0 "$shale_status"
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles is mode 0775, and its group can write to it" 'stdout'
+}
+
+# The last line of the note is a command, so what a shell reads it back as is the
+# claim, not what it looks like.  A space, a quote, a bracket and an '&': the
+# first three are what a bare path loses to word splitting, quote removal and
+# globbing, and the '&' is the one that makes the loss silent rather than loud -
+# unquoted, the printed line ends there, backgrounds a chmod of paths that are
+# not this one, and leaves the mode exactly as it was.  Spaced home directories
+# are ordinary on macOS.
+#
+# $HOME is moved rather than the case running under the suite's own, because
+# every path shale prints is built from $HOME, so that is the name that has to
+# hold the awkward characters.  The marker is planted because the sandbox guard
+# reads it out of $HOME on every write.
+test_doctor_the_dotfiles_mode_remedy_survives_a_home_that_needs_quoting() {
+  local home_ok
+  sandbox_mkdir "$CASE_DIR/my 'odd' & [home] dir"
+  home_ok=$sandbox_dir
+  sandbox_leaf "$home_ok" .shale-test-sandbox new
+  : >"$sandbox_path" || fail 'could not mark the sandbox home'
+  HOME=$home_ok
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles"
+  chmod 0775 "$sandbox_dir" || fail 'could not widen the dotfiles directory'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_command_reads_as "$shale_out" 'close it with: ' chmod g-w "$HOME/.dotfiles"
+  # The lines above it are prose rather than commands and carry the path bare,
+  # which is what makes the quoting a property of the line a reader runs and not
+  # of the report.
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles is mode 0775, and its group can write to it" 'stdout'
+}
+
+# The remedy, run rather than quoted, and the claim that nothing shale does
+# clears it.  Unlike the note on the built tree there is no build that settles
+# this one, so the chmod the last line names is the whole of what does - and a
+# case that never ran it would be pinning a line nobody has checked.
+#
+# This is also where shale is held to changing no mode of its own: a doctor, a
+# build and an apply all run against the widened directory and the mode is read
+# back after each.
+test_doctor_the_dotfiles_mode_note_goes_when_the_chmod_is_run() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles"
+  chmod 0775 "$sandbox_dir" || fail 'could not widen the dotfiles directory'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" "shale: $HOME/.dotfiles is mode 0775" 'stdout'
+  assert_mode "$HOME/.dotfiles" 'drwxrwxr-x' 'after the doctor'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_mode "$HOME/.dotfiles" 'drwxrwxr-x' 'after the build'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_mode "$HOME/.dotfiles" 'drwxrwxr-x' 'after the apply'
+  sandbox_mkdir "$HOME/.dotfiles"
+  chmod g-w "$sandbox_dir" || fail 'could not run the remedy'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor after the chmod'
+  assert_not_contains "$shale_out" "shale: $HOME/.dotfiles is mode" 'stdout'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# World-writable, which is strictly worse and is one note rather than a second
+# one: the consequence is the same and the remedy is one chmod, so a 0777 that
+# printed the whole thing twice would be doubling a single fact.
+test_doctor_names_a_world_writable_dotfiles_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles"
+  chmod 0777 "$sandbox_dir" || fail 'could not widen the dotfiles directory'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles is mode 0777, and its group and everyone else on the machine can write to it" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   close it with: chmod go-w '$HOME/.dotfiles'" 'stdout'
+  # One note, not two.
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+}
+
+# The world alone, without the group: the remedy names the class that is open and
+# no other, because a 'go-w' on a directory whose group write bit was deliberate
+# takes off a bit the reader did not ask about.
+test_doctor_names_a_dotfiles_directory_only_the_world_can_write() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles"
+  chmod 0757 "$sandbox_dir" || fail 'could not widen the dotfiles directory'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles is mode 0757, and everyone else on the machine can write to it" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   close it with: chmod o-w '$HOME/.dotfiles'" 'stdout'
+}
+
+# The sticky bit, which changes what a writer can do without changing that there
+# is one: it stops anybody but the owner renaming the built tree aside, and stops
+# nothing being created beside it - and $HOME/.dotfiles/.stowrc is a file stow
+# reads on every apply, because apply runs stow from inside that directory.  So
+# the note still fires and its middle line says something else.
+test_doctor_says_what_a_sticky_dotfiles_directory_still_allows() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles"
+  chmod 1777 "$sandbox_dir" || fail 'could not set the sticky bit'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles is mode 1777, and its group and everyone else on the machine can write to it" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   the sticky bit stops anyone but you renaming the built tree aside, and not a file being written beside it: stow reads $HOME/.dotfiles/.stowrc on every apply" \
+    'stdout'
+  assert_not_contains "$shale_out" 'they can rename the built tree aside' 'stdout'
+}
+
+# The modes that must stay silent: 0700 is the closed one, 0750 is the deliberate
+# choice on a machine with a shared group that is meant to read the tree, and the
+# two below them grant a read and no write.  The whole report is compared so that
+# nothing new can appear anywhere in it.
+test_doctor_says_nothing_about_a_dotfiles_directory_nobody_else_can_write() {
+  local mode
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  for mode in 0700 0750 0755 0705; do
+    sandbox_mkdir "$HOME/.dotfiles"
+    chmod "$mode" "$sandbox_dir" || fail "could not set the dotfiles directory to $mode"
+    run_shale doctor
+    assert_status 0 "$shale_status" "doctor exit status at $mode"
+    assert_eq 'shale: no problems found' "$shale_out" "the whole report at $mode"
+  done
+}
+
+# The set-group-ID bit on its own, which is not a permission bit and grants no
+# write: it decides the group of what is created there and nothing else.  A
+# dotfiles directory on a shared volume is the setup that carries it, and it is
+# the one the note on the built tree had to stop firing about - this must not put
+# the same false report back one directory up.
+test_doctor_says_nothing_about_a_setgid_dotfiles_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles"
+  chmod 2755 "$sandbox_dir" || fail 'could not set the set-group-ID bit'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# Write without search, which grants nothing: an entry has to be looked up before
+# it can be created, renamed or removed, and the lookup is the execute bit.  A
+# 0764 lets the group write to a file it already knows the name of and does not
+# let it put anything at the built tree's name, so the note must not fire.
+test_doctor_says_nothing_about_a_dotfiles_directory_the_group_cannot_search() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles"
+  chmod 0764 "$sandbox_dir" || fail 'could not set the dotfiles directory mode'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# Both notes at once, in the order the exposure runs: the directory holding the
+# tree decides whether the tree is still the one shale built, so it is named
+# before anything about the tree itself.  Nothing else pins the slot - the case
+# that asserts doctor's overall order has no mode report in its fixture - and a
+# reordering would leave every other case here green.
+test_doctor_names_the_dotfiles_directory_before_the_tree_inside_it() {
+  local line seen
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  chmod 0755 "$sandbox_dir" || fail 'could not widen the built tree'
+  sandbox_mkdir "$HOME/.dotfiles"
+  chmod 0775 "$sandbox_dir" || fail 'could not widen the dotfiles directory'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  seen=
+  while IFS= read -r line; do
+    case "$line" in
+      "shale: $HOME/.dotfiles is mode"*) seen="$seen dotfiles" ;;
+      "shale: $HOME/.dotfiles/current is mode"*) seen="$seen current" ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq ' dotfiles current' "$seen" 'the order of the two mode notes'
+  # Both counted as notes and neither as a problem, which is the other half of
+  # the claim: two reports, exit 0.
+  assert_contains "$shale_out" 'shale: no problems found, but read the 2 notes above' 'stdout'
+}
+
+# A dotfiles root outside $HOME, which SHALE_DIR is for: the check is about the
+# mode of that directory and nothing about where it sits, so a /opt-style root
+# the user owns is silent at 0700 and named at 0775 exactly as one in $HOME is.
+# The path printed is the resolved root, never $HOME/.dotfiles, which is the
+# spelling that would send the reader to chmod a directory that does not exist.
+test_doctor_names_a_dotfiles_directory_outside_home() {
+  local shale_root
+  shale_dir_fixture
+  run_shale build
+  assert_status 0 "$shale_status"
+  sandbox_mkdir "$shale_root"
+  chmod 0700 "$sandbox_dir" || fail 'could not narrow the dotfiles root'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status at 0700'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report at 0700'
+  chmod 0775 "$sandbox_dir" || fail 'could not widen the dotfiles root'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status at 0775'
+  assert_contains "$shale_out" \
+    "shale: $shale_root is mode 0775, and its group can write to it" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   close it with: chmod g-w '$shale_root'" 'stdout'
+  assert_not_contains "$shale_out" "$HOME/.dotfiles" 'stdout'
+}
+
+# A symlinked dotfiles directory, which is a setup people have - the tree on
+# another volume, the name in $HOME pointing at it.  'ls -ld' on a symlink
+# reports the link's own mode rather than the directory's, and that mode is
+# 0777 on Linux and whatever the umask gave it on BSD - so a check reading the
+# name would call every one of these world-writable on the one platform and
+# answer at random on the other.  The directory behind it is 0700 here, and the
+# report must be the clean one.
+test_doctor_reads_through_a_symlinked_dotfiles_directory() {
+  local link_before link_after
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status"
+  # Moved aside and linked back, so the name in $HOME is a symlink and the tree
+  # behind it is the one every path below still resolves to.
+  sandbox_mkdir "$CASE_DIR/elsewhere"
+  sandbox_leaf "$HOME" .dotfiles
+  mv "$sandbox_path" "$CASE_DIR/elsewhere/store" || fail 'could not move the dotfiles directory'
+  chmod 0700 "$CASE_DIR/elsewhere/store" || fail 'could not narrow the moved directory'
+  ln -s "$CASE_DIR/elsewhere/store" "$sandbox_path" || fail 'could not link the dotfiles directory'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+  # And the mode behind the link is what decides it, not the link's own.
+  chmod 0775 "$CASE_DIR/elsewhere/store" || fail 'could not widen the moved directory'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor exit status, widened'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles is mode 0775, and its group can write to it" 'stdout'
+  # And the remedy it printed names the link, which is the path the reader has:
+  # chmod follows one, so what it narrows is the directory behind it.  A remedy
+  # that had to be rewritten before it worked would be one this note got wrong.
+  assert_command_reads_as "$shale_out" 'close it with: ' chmod g-w "$HOME/.dotfiles"
+  # Read before and compared after, rather than asserted against a literal: a
+  # symlink's own mode is a real one on BSD, taken from the umask when it was
+  # made, and always 0777 on Linux - so 'lrwxrwxrwx' is one platform's spelling
+  # of a claim that is really 'this did not change'.  ls -ld does not follow a
+  # link, so both reads answer for the name in $HOME.
+  link_before=$(ls -ld "$HOME/.dotfiles") || fail 'could not read the link'
+  chmod g-w "$HOME/.dotfiles" || fail 'could not run the remedy'
+  assert_mode "$CASE_DIR/elsewhere/store" 'drwxr-xr-x' 'the directory behind the link'
+  link_after=$(ls -ld "$HOME/.dotfiles") || fail 'could not read the link again'
+  assert_eq "${link_before:0:10}" "${link_after:0:10}" 'the mode of the link itself'
+  assert_symlink_to "$HOME/.dotfiles" "$CASE_DIR/elsewhere/store" 'the link after the chmod'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'doctor after the chmod'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report after the chmod'
 }
 
 # ------------------------------------------ doctor's apply-conflict cases
@@ -16390,6 +16753,20 @@ guard_abort() {
 
 run_case() {
   local name=$1 case_dir=$2 case_home case_out case_err leaf status reason
+  # Pinned for the same reason LC_ALL is: a suite whose result depends on the
+  # login shell it was started from is not answering about the code.  Without
+  # this the mode of every fixture the harness and the case bodies create is
+  # whoever's umask is running, and the cases that assert one are then asserting
+  # that - test_build_composes_no_shale_modes_at_any_depth wants -rw-r--r-- on a
+  # file whose mode is really the developer's, and fails on any machine at
+  # 'umask 002', which is what pam_umask gives a user-private group on Debian and
+  # Ubuntu.  022 rather than any other value because it is what the container and
+  # both CI runners already have, so this changes nothing there and only removes
+  # the variance elsewhere.  Here rather than at the top of the script so that it
+  # is re-established before every case: the ones that exercise a umask of their
+  # own set and restore it inside their own body, and this puts the floor back
+  # for the next one either way.
+  umask 022
   # Nothing is created until the path for it has been proven, the case directory
   # included: run_all names it after the case, so anything already there was put
   # there by an earlier case.  mkdir without -p is the write and the second half

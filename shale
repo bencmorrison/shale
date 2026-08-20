@@ -3242,6 +3242,115 @@ scan_built_tree() {
   done
 }
 
+# The mode of $DOTFILES, which is the directory holding the built tree rather
+# than the tree: audit_current_mode below narrows $CUR to $OWN_DIR_MODE so that
+# nothing else can read what the layers put there, and a $DOTFILES somebody else
+# can write undoes that from one level up - the tree is renamed aside, one of
+# their own is left at the name, and every symlink an apply made in $HOME
+# resolves into it.
+#
+# A note and never a finding, for audit_current_mode's reason: nothing is broken
+# and no build or apply is blocked.  What is different from that note is the
+# remedy - $CUR fixes itself at the next build, and this cannot, because shale
+# creates $DOTFILES nowhere and chmods it nowhere.  So the chmod is printed.
+#
+# Write *and* search, per class.  Neither bit alone lets anything be put into a
+# directory or taken out of it: the entry has to be looked up before it can be
+# created, renamed or removed, and the lookup is the execute bit.  A 0764 is
+# therefore silent, and so are the 0700 and 0750 that are the ordinary answers.
+#
+# What is deliberately not asked is whether anyone else is in the group, which
+# would be the one thing that could tell an exposed 0775 from the one a 'umask
+# 002' leaves on Debian and Ubuntu.  No portable reader answers it: 'id' speaks
+# only for this user, /etc/group lists no members at all for macOS's 'staff'
+# though every local account has it as its primary group, and on a machine behind
+# a directory service the file is not the answer for any group.  A reader that
+# under-reports would be silent on exactly the setup this note is for, so the
+# note is about the mode - which is true, checkable, and cleared for good by one
+# chmod that costs the reader nothing, nothing but them needing to write there.
+#
+# Nor is it asked whether anything can reach $DOTFILES: that is the mode of every
+# directory above it, $HOME included, and answering it half way - stopping at
+# $HOME, which $DOTFILES need not even be under, SHALE_DIR being free to put it
+# on another volume - would trade a note that is merely wide for a silence that
+# is wrong.
+#
+# It stops at $DOTFILES and says nothing about the clone roots below it, and not
+# because they matter less.  A group-writable clone root does not let anybody
+# replace the built tree; it lets them replace local/.zshrc, which the next build
+# copies and the next apply links into $HOME - arbitrary code in the reader's
+# shell, which is worse rather than smaller.  What decides it is that no note
+# about one could be terminal.  There may be several, 'git clone' and 'mkdir -p'
+# under a 'umask 002' leave every one of them group-writable, and the next fetch
+# of a re-cloned root puts the mode back - so the note would return having been
+# acted on, which is the defect the everyday-state notes were removed for.  This
+# one is cleared by a single chmod that nothing undoes, and that difference is
+# the whole of why one is here and the other is not.
+#
+# The set-group-ID bit is not reported: it grants no write, it decides the group
+# of what is created there, and it is the bit audit_current_mode had to stop
+# comparing.  The sticky bit is reported, because it changes what a writer can
+# do: with it, only the owner of an entry may rename or remove it, so $CUR cannot
+# be swapped - but nothing stops a new name being created beside it, and
+# $DOTFILES/.stowrc is read by stow on every apply, cmd_apply running it from
+# inside this directory.  So it moves the consequence line and not the verdict.
+audit_dotfiles_mode() {
+  local perm group other classes remedy consequence
+  [ -d "$DOTFILES" ] || return 0
+  # '/.' rather than the name itself: ls -ld on a symlink reports the link's own
+  # mode, and that mode is 0777 on Linux and whatever umask made it on BSD - so a
+  # $DOTFILES that is a link to a tree on another volume, a setup people have and
+  # one SHALE_DIR does not have to be used for, would read as world-writable on
+  # every run of the one and answer for the wrong file on the other.  The
+  # trailing component resolves to the directory whether or not the name above it
+  # is a link, and the message still prints the name the reader configured.
+  dir_mode "$DOTFILES/." 2>/dev/null || return 0
+  # 8# because a mode with a set-id or sticky bit has no leading zero and bash
+  # would otherwise read it as decimal.  Both sides of each compare are
+  # arithmetic: '[ x -eq 0030 ]' is a decimal 30 and would answer for no mode at
+  # all.
+  perm=$((8#$DIR_MODE_RAW))
+  group=0
+  other=0
+  [ $((perm & 0030)) -ne $((0030)) ] || group=1
+  [ $((perm & 0003)) -ne $((0003)) ] || other=1
+  # One note for both classes rather than one each: the consequence is the same
+  # and the remedy is a single chmod, so a 0777 that printed it twice would be
+  # doubling one fact.  The remedy names only the class that is open, because a
+  # 'go-w' on a 0757 takes off a bit the reader did not ask about, and a remedy
+  # that does more than it was asked for is one they will not run.
+  if [ "$group" -eq 1 ] && [ "$other" -eq 1 ]; then
+    classes='its group and everyone else on the machine can write to it'
+    remedy='chmod go-w'
+  elif [ "$group" -eq 1 ]; then
+    classes='its group can write to it'
+    remedy='chmod g-w'
+  elif [ "$other" -eq 1 ]; then
+    classes='everyone else on the machine can write to it'
+    remedy='chmod o-w'
+  else
+    return 0
+  fi
+  if [ $((perm & 01000)) -ne 0 ]; then
+    consequence="the sticky bit stops anyone but you renaming the built tree aside, and not a file being written beside it: stow reads $DOTFILES/.stowrc on every apply"
+  else
+    consequence="they can rename the built tree aside and leave one of their own at $CUR, and every symlink an apply made in $HOME then resolves into theirs"
+  fi
+  # The last line is the one a reader pastes, so the path in it is quoted and the
+  # ones above it are not: a $HOME holding a space and an '&' otherwise prints a
+  # command that backgrounds at the '&' and chmods two paths that are not this
+  # one.  Every other prescription shale prints does the same.
+  shell_quote "$DOTFILES"
+  # The raw mode, as audit_current_mode prints it, so a 2775 shows the reader the
+  # digit this is not talking about as well as the ones it is.
+  note "$DOTFILES is mode $DIR_MODE_RAW, and $classes" \
+    "shale builds $CUR with permission bits $OWN_DIR_MODE so nothing else can read what the layers put there, and a directory somebody else can write is where that is undone" \
+    "$consequence" \
+    "shale never sets the mode of $DOTFILES - it was there before shale ran - so no build or apply clears this" \
+    "close it with: $remedy $QUOTED"
+}
+
+
 # The mode of the built tree itself, which is shale's own and not a layer's: it
 # is the one directory in the whole design that every symlink shale makes in
 # $HOME resolves through, so what may be read out of the tree - and, group-write
@@ -5387,8 +5496,15 @@ cmd_doctor() {
         "shale cannot tell whether there is a dotfiles directory at $DOTFILES"
     else
       shell_quote "$DOTFILES"
+      # The chmod is not decoration: mkdir takes the caller's umask, so on the
+      # 'umask 002' that pam_umask gives a user-private group this line alone
+      # creates a 0775 - which audit_dotfiles_mode then reports on the very next
+      # run, doctor having prescribed the state it goes on to complain about.
+      # 0700 written out rather than $OWN_DIR_MODE: that constant is the mode
+      # shale gives the directories it creates itself, and this is one the reader
+      # creates and owns.  The two agreeing is not a coupling to hold.
       blocking_finding "no dotfiles directory at $DOTFILES" \
-        "create it with: mkdir -p $QUOTED"
+        "create it with: mkdir -p $QUOTED && chmod 0700 $QUOTED"
     fi
   fi
 
@@ -5662,9 +5778,12 @@ cmd_doctor() {
     fi
   done
 
-  # Ahead of the walk below it, and of everything that walk says about what is
+  # Ahead of the walk below them, and of everything that walk says about what is
   # inside the built tree: the mode of the tree itself is what decides who else
-  # can see any of it.
+  # can see any of it, and the mode of the directory holding it is what decides
+  # whether that tree is still the one shale built.  Outermost first, so a reader
+  # meeting both notes meets them in the order the exposure runs.
+  audit_dotfiles_mode
   audit_current_mode
 
   # The two walks, in size order: the built tree, then the whole of $HOME.
