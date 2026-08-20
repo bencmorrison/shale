@@ -373,7 +373,7 @@ is correct, and which remedy fits. Doctor is also what still reports them afterw
 ```
 shale: /home/you/.config/foo/a.conf points at /home/you/.dotfiles/current/.config/foo/a.conf, which the built tree no longer provides
 shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying
-shale:   stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links
+shale:   stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds, so none of these is one of them
 shale:   stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:
 shale:     stow -D -p --no-folding -d '/home/you/.dotfiles' -t '/home/you' current && shale apply
 shale:   earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory

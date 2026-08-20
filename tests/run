@@ -10143,7 +10143,7 @@ test_doctor_a_link_into_the_built_tree_it_no_longer_provides_is_a_finding() {
     'shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
     'stdout'
   assert_contains "$shale_out" \
-    'shale:   stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links' \
+    'shale:   stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds, so none of these is one of them' \
     'stdout'
   assert_contains "$shale_out" \
     'shale:   stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:' \
