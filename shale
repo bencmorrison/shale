@@ -4152,7 +4152,8 @@ EOF
   # one of them.  A file that left its only layer leaves a link the next apply
   # removes on its own, and telling the reader to rm it - and that reapplying
   # will not help - is both more work than the state needs and false about it.
-  # A directory that left every layer is the case that needs the rm, and the
+  # A directory that left every layer, or a link spelled as an absolute path in
+  # a directory the tree still holds, is the case that needs the rm, and the
   # sweep under it is the alternative to doing that by hand.  Where the two are
   # mixed, the rm is what covers all of them and the apply is named for what it
   # takes off the list.
@@ -4200,7 +4201,7 @@ EOF
       remedy+=("an apply would clear $prunable of them and leave the rest: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds" \
         'no apply will finish until the problems above are fixed')
     else
-      remedy+=('stow prunes a link only from a directory the built tree still holds, so a directory that left every layer keeps its links')
+      remedy+=('stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds, so none of these is one of them')
     fi
     # The sweep goes with the apply rather than standing without it.  Its '&&'
     # is on stow's exit status and not on the apply's, so where the apply cannot
