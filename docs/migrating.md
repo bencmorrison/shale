@@ -339,10 +339,17 @@ When a file leaves a layer, the next `shale apply` prunes its link. When an enti
 every layer, the links inside it are left dangling and the apply still exits 0: stow's unstow phase
 only visits directories the package still has.
 
+Spelling is the other reason a link is kept. Stow takes back only the relative links an apply wrote,
+so a link at a managed path that you re-spelled as an absolute one stays where it is even though the
+built tree still holds the directory around it — and on stow 2.3.1, an absolute link directly in
+`$HOME` makes every apply print `BUG in find_stowed_path? Absolute/relative mismatch ...` on stderr,
+which shale passes through unchanged under its own `stow exited 0 and wrote output` warning. Either
+way the link is left behind, and the apply counts it.
+
 The apply says so, in one line and no more:
 
 ```
-shale: 3 links in /home/you point at paths the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names them
+shale: 3 links in /home/you point at paths the built tree no longer provides: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds; 'shale doctor' names them
 ```
 
 Where you run `shale build` on its own, the build is what says it, naming itself as what took the
