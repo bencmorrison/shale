@@ -345,7 +345,18 @@ The apply says so, in one line and no more:
 shale: 3 links in /home/you point at paths the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names them
 ```
 
-It counts the links that apply itself left behind — the paths its own build took out of the tree —
+Where you run `shale build` on its own, the build is what says it, naming itself as what took the
+paths out, and the apply after it does not say it again:
+
+```
+shale: 3 links in /home/you point at paths the built tree no longer provides: this build took those paths out of the tree, and 'shale doctor' names them
+```
+
+Either way you are told once. A build says nothing about a file that left a directory the tree still
+holds: that link dangles until the next apply and the apply prunes it, so there is nothing there to
+act on.
+
+It counts the links the run itself left behind — the paths its own build took out of the tree —
 and stops there. An apply that stow then refuses says it too, as the last line under what stow
 reported, because the build has already taken those paths out of the tree; the apply after your fix
 will not mention them again. Run `shale doctor` for the rest: which links they are, that `current`
