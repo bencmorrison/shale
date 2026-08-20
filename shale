@@ -5069,10 +5069,10 @@ cmd_build() {
   #
   # One line, whatever the count, and the detail is doctor's - the same split as
   # apply's.  The line itself is orphan_line's, which apply prints too where
-  # stow refused; apply's success line is its own literal and says stow declined
-  # to remove them, which is the one thing a build cannot say, no stow having
-  # run.  What both spell the same way is the count, the subject and the remedy,
-  # which is the whole of what a reader acts on.
+  # stow refused; apply's success line is its own literal and answers with what
+  # stow prunes and so left these behind, which is the one thing a build cannot
+  # say, no stow having run.  What both spell the same way is the count, the
+  # subject and the remedy, which is the whole of what a reader acts on.
   #
   # A warning rather than a failure, and the status stays 0: the tree is built
   # and correct, and what is left over is a link in $HOME that nothing has
@@ -5365,7 +5365,9 @@ cmd_apply() {
   # one's either.  With stow refused, the count holds every link the tree stopped
   # providing, including the ones an apply that had run would have pruned - so
   # what is said is that the build took the paths out, which is true of all of
-  # them, rather than that stow declined to remove them, which is true of some.
+  # them, rather than which links stow prunes, which would speak for a stow that
+  # finished: this one did not, so the links it would have taken back are in the
+  # count too.
   count_dangling_links all
   orphan_line
   lines=()
@@ -5404,13 +5406,19 @@ cmd_apply() {
     printf '%s\n' "$err" >&2
   fi
 
-  # The links this apply has just left pointing at nothing, which stow neither
-  # removes nor mentions: its unstow phase walks only the directories the
-  # package still holds, so a directory that left every layer keeps every link
-  # inside it and the apply exits 0.  Measured on stow 2.3.1 and on 2.4.1, which
-  # agree about this and write nothing at all about it.  Counted above, in the
-  # one place both this and the failures share; stow having run to the end is
-  # the whole of what lets this wording name it as the cause.
+  # The links this apply has just left pointing at nothing, which stow does not
+  # remove.  Two shapes reach here and the clause answers for both: the unstow
+  # phase walks only the directories the package still holds, so a directory
+  # that left every layer keeps every link inside it; and in the directories it
+  # does walk it takes back only relative links, so an absolutely spelled one
+  # stays however ordinary its directory is.  Measured on stow 2.3.1 and on
+  # 2.4.1, which agree on both and say nothing about the first; about the second
+  # 2.3.1 prints a 'BUG in find_stowed_path?' line for a link directly in $HOME,
+  # which reaches the reader through the generic 'stow exited 0 and wrote output'
+  # warning above and is otherwise unexplained - naming the spelling here is the
+  # whole of what a reader gets to make sense of it.  Counted above,
+  # in the one place both this and the failures share; stow having run to the
+  # end is the whole of what lets this wording name it as the cause.
   #
   # One line, whatever the count, and the detail is doctor's - the same split as
   # the directory modes below.  Nothing here reproduces doctor's report: which
@@ -5423,9 +5431,9 @@ cmd_apply() {
   # A warning rather than a failure, and the status stays 0: the tree is built,
   # $HOME is linked, and what is left over is a link stow declined to remove.
   if [ "$DANGLING" -eq 1 ]; then
-    warn "1 link in $HOME points at a path the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names it"
+    warn "1 link in $HOME points at a path the built tree no longer provides: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds; 'shale doctor' names it"
   elif [ "$DANGLING" -gt 0 ]; then
-    warn "$DANGLING links in $HOME point at paths the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names them"
+    warn "$DANGLING links in $HOME point at paths the built tree no longer provides: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds; 'shale doctor' names them"
   fi
 
   # The declared modes, put onto the directories in $HOME.  Stow does not carry

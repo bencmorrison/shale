@@ -4985,7 +4985,7 @@ test_build_says_nothing_when_it_orphans_nothing() {
 # is counted either way.
 #
 # What differs is the cause each names, and it has to: no stow has run when the
-# build speaks, so a build saying stow had declined to remove anything would be
+# build speaks, so a build answering with which links stow prunes would be
 # describing something that never happened.  The count, the paths and the remedy
 # are the same words in both, which is what a reader acts on.
 test_build_then_apply_says_what_a_bare_apply_says() {
@@ -5016,7 +5016,7 @@ test_build_then_apply_says_what_a_bare_apply_says() {
     "shale: 1 link in $HOME points at a path the built tree no longer provides: this build took that path out of the tree, and 'shale doctor' names it" \
     "$by_build" 'the build stderr'
   assert_eq \
-    "shale: 1 link in $HOME points at a path the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names it" \
+    "shale: 1 link in $HOME points at a path the built tree no longer provides: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds; 'shale doctor' names it" \
     "$by_apply" 'the bare apply stderr'
   # Stated over both rather than read off the two literals above, so that a
   # change to either wording that dropped the count or the remedy fails here.
@@ -5070,7 +5070,7 @@ test_build_and_apply_each_count_the_links_their_own_run_left() {
   # claim: a line counting both orphans would satisfy any needle this one is a
   # prefix of.
   assert_eq \
-    "shale: 1 link in $HOME points at a path the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names it" \
+    "shale: 1 link in $HOME points at a path the built tree no longer provides: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds; 'shale doctor' names it" \
     "$shale_err" 'the apply that orphaned one'
   # Both links are in $HOME, and doctor - which answers for $HOME rather than
   # for a run - names both.
@@ -5194,7 +5194,7 @@ test_build_counts_an_absolute_link_a_still_held_directory_will_keep() {
     "shale: 2 links in $HOME point at paths the built tree no longer provides: this build took those paths out of the tree, and 'shale doctor' names them" \
     "$by_build" 'the build stderr'
   assert_eq \
-    "shale: 2 links in $HOME point at paths the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names them" \
+    "shale: 2 links in $HOME point at paths the built tree no longer provides: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds; 'shale doctor' names them" \
     "$by_apply" 'the bare apply stderr'
   # And doctor, which reads the spelling the same way, names all four and offers
   # no apply for any of them.
@@ -5206,6 +5206,65 @@ test_build_counts_an_absolute_link_a_still_held_directory_will_keep() {
   assert_contains "$shale_out" \
     'shale: remove the links named above; the built tree is correct, and nothing needs rebuilding or reapplying' \
     'doctor stdout'
+}
+
+# The two classes of kept link in one apply, which is the state the line's
+# wording answers for and the one no other case builds: a link under a
+# directory that left every layer, and an absolutely spelled one in a directory
+# the tree still holds.  Each class alone has a case above; the count that adds
+# them has none, so a kept/all fork in count_dangling_links that passed over one
+# class in the presence of the other would say 1 here and leave every case
+# either side of this one green.
+#
+# The absolute link is one level down rather than directly in $HOME, for the
+# reason the case above gives: 2.3.1 writes a 'BUG in find_stowed_path?' line
+# about a top-level one, and a whole-line assertion on stderr would then be
+# asserting a stow version.
+test_apply_counts_both_kinds_of_kept_link_in_one_run() {
+  local f dir
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .local/share/pass/one.gpg
+  mklayer personal/base .local/share/pass/two.gpg
+  run_shale apply
+  assert_status 0 "$shale_status"
+  assert_empty "$shale_err" 'the apply that made the links'
+  # The first class: .config leaves every layer, so stow's unstow phase never
+  # walks into it and the link inside it stays.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  rm -rf "$sandbox_dir/.config" || fail 'could not remove the layer directory'
+  # The second, in a directory the tree keeps: the user's own spelling of the
+  # link, and the layer file leaving in the same breath - an absolute link at a
+  # path the tree still provides is a conflict stow refuses outright.
+  f=.local/share/pass/two.gpg
+  sandbox_mkdir "$HOME/${f%/*}"
+  dir=$sandbox_dir
+  rm -f "$dir/${f##*/}" || fail "could not remove the link the apply made at $f"
+  sandbox_leaf "$dir" "${f##*/}" new
+  ln -s "$HOME/.dotfiles/current/$f" "$sandbox_path" ||
+    fail "could not plant the absolute link at $f"
+  sandbox_leaf "$HOME/.dotfiles/personal/base/${f%/*}" "${f##*/}"
+  rm -f "$sandbox_path" || fail "could not remove the layer file at $f"
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply over both classes'
+  # The whole line, because the number is the claim: a count that reached one
+  # class and not the other reads as a 1 that any needle short of this would
+  # take.
+  assert_eq \
+    "shale: 2 links in $HOME point at paths the built tree no longer provides: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds; 'shale doctor' names them" \
+    "$shale_err" 'stderr'
+  assert_eq 1 "$(printf '%s\n' "$shale_err" | grep -c '^shale: ')" 'lines shale printed'
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" \
+    'the link under the departed directory'
+  assert_dangling_symlink "$HOME/$f" 'the absolute link stow kept'
+  assert_real_dir "$HOME/.dotfiles/current/.local/share/pass" \
+    'the directory the tree still holds'
+  assert_missing "$HOME/.dotfiles/current/.config" 'the built tree'
+  # The apply did everything else it was asked to do.
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  assert_symlink_to "$HOME/.local/share/pass/one.gpg" \
+    "$HOME/.dotfiles/current/.local/share/pass/one.gpg"
 }
 
 # ---------------------------------------------------------------- clone cases
@@ -6437,7 +6496,7 @@ test_apply_a_directory_removed_from_every_layer_leaves_a_dangling_link() {
   assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the leftover link'
   assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
   assert_eq \
-    "shale: 1 link in $HOME points at a path the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names it" \
+    "shale: 1 link in $HOME points at a path the built tree no longer provides: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds; 'shale doctor' names it" \
     "$shale_err" 'stderr'
 }
 
@@ -6464,7 +6523,7 @@ test_apply_names_how_many_links_a_departed_directory_left_dangling() {
   run_shale apply
   assert_status 0 "$shale_status"
   assert_eq \
-    "shale: 3 links in $HOME point at paths the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names them" \
+    "shale: 3 links in $HOME point at paths the built tree no longer provides: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds; 'shale doctor' names them" \
     "$shale_err" 'stderr'
   # One line and no more: which links they are, that the built tree is correct,
   # and which remedy applies are doctor's, and a block of them here would be a
@@ -6668,7 +6727,7 @@ test_apply_names_only_the_orphans_this_run_made_when_stow_refuses() {
   run_shale apply
   assert_status 0 "$shale_status" 'the apply that made the first orphan'
   assert_contains "$shale_err" \
-    "shale: 1 link in $HOME points at a path the built tree no longer provides: stow does not remove a link from a directory that left the tree; 'shale doctor' names it" \
+    "shale: 1 link in $HOME points at a path the built tree no longer provides: stow prunes only the links an apply wrote — relative, and in a directory the built tree still holds; 'shale doctor' names it" \
     'the apply that made the first orphan'
   # A second directory leaves, and stow refuses the whole operation over
   # something else entirely.
