@@ -3886,12 +3886,68 @@ audit_declared_modes() {
   note ${lines[@]+"${lines[@]}"}
 }
 
-# Whether the built tree still holds the directory that a link at $1 - a path
-# relative to $HOME - sits in, which is what stow's unstow phase walks; what
-# that was measured against is under apply_prunes_link below.  A directory the
-# ignore list covers is the exception both versions make - they skip it before
-# recursing, so nothing inside one is swept - and no apply links into one of
-# those either, so no link this counts is in one.
+# Whether stow walks into the built tree's path $1, $1 being absolute: it is one
+# question for both phases of a restow, because an apply that walks a directory
+# walks it in each of them and an apply that refuses does neither.  Written
+# apart from its one reader below because what it answers is a fact about stow
+# rather than about the link being asked after.
+#
+# A symlink to a directory is one stow walks into, which is where this parts
+# company with the composer: a link is a leaf to the composer, and stow follows
+# it.  unstow_node hands any target that is a real directory to unstow_contents,
+# and stow_node any that is, to stow_contents; each asks -d of the package's
+# path, which follows the link, and walks what is at the end of it.  Measured
+# both ways round on 2.3.1 and against 2.4.1's source, with the tree's
+# '.config/nvim' a symlink and $HOME's a real directory: the contents were
+# linked into it and the apply exited 0, and a dangling link inside it was
+# pruned, for a link into the tree and one out of it alike.
+#
+# An absolutely spelled link is the one shape the versions disagree about, and
+# it answers no on both.  2.4.1 refuses the whole apply over it - 'source is an
+# absolute symlink ... All operations aborted' - and touches nothing anywhere;
+# 2.3.1 walks it as above, because the test it makes for that is against a path
+# relative to the wrong directory below the top level, so it catches only a
+# top-level one.  2.3.1's tolerance is the bug rather than the contract, and no
+# is the answer that is true of the apply a reader is about to run on either.
+#
+# A dangling link and a link to a file answer no through -d, and both are a
+# state stow dies in - 'unstow_contents() called with non-directory path' on
+# both versions, an apply that exits non-zero having relinked nothing.
+stow_walks_into() {
+  local dir=$1 dest
+  # -d as stow's own test is -d: it follows a link, and a dangling one or one to
+  # a file is out on the same line as a path holding nothing at all.
+  [ -d "$dir" ] || return 1
+  # The readlink is spent only where the answer turns on it, an ordinary
+  # directory being done above.  A missing readlink answers no, which is the
+  # conservative half: a link left to be removed by hand rather than an apply
+  # promised for it that then leaves it where it was.
+  [ -L "$dir" ] || return 0
+  # Defence for a caller that does not exist yet: both of today's return before
+  # they reach this - audit_broken_links on the tool, count_dangling_links on its
+  # own readlink a few lines earlier - so nothing here can reach the
+  # substitution without it.  A third caller that skipped that check would
+  # otherwise have the shell report the missing command on its own stderr, which
+  # is a line shale did not write.
+  command -v readlink >/dev/null 2>&1 || return 1
+  dest=$(readlink "$dir") || return 1
+  case "$dest" in
+    /*) return 1 ;;
+  esac
+  return 0
+}
+
+# Whether stow's unstow phase runs its cleanup in the directory that a link at
+# $1 - a path relative to $HOME - sits in, that sweep being what takes a link
+# out of $HOME without a hand; what the answer is used for is under
+# apply_prunes_link below.  The path asked about is the built tree's, because
+# the walk is of the built tree: a directory it no longer holds is never
+# visited, whatever $HOME still has there.  Which directories stow walks into is
+# stow_walks_into's question, measured there.
+#
+# A directory the ignore list covers is the exception both versions make - they
+# skip it before recursing, so nothing inside one is swept - and no apply links
+# into one of those either, so no link this counts is in one.
 #
 # Two readers, asking the same question from opposite ends: doctor of a link
 # chkstow handed it, and the dangling-link count of a path a build's own
@@ -3904,9 +3960,7 @@ tree_holds_the_directory_of() {
     # A link directly in $HOME, whose directory is the built tree itself.
     *) dir=$CUR ;;
   esac
-  # A symlink to a directory is a leaf to stow as it is to the composer, so it
-  # is not a directory the unstow phase walks into.
-  [ -d "$dir" ] && [ ! -L "$dir" ]
+  stow_walks_into "$dir"
 }
 
 # Non-zero unless the next apply removes the orphaned link $1 by itself, so that

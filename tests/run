@@ -5267,6 +5267,132 @@ test_apply_counts_both_kinds_of_kept_link_in_one_run() {
     "$HOME/.dotfiles/current/.local/share/pass/one.gpg"
 }
 
+# The class neither of the two above is: a directory the built tree holds
+# through a symlink.  A symlink is a leaf to the composer and not one to stow -
+# unstow_contents asks -d of the package's path, which follows the link, walks
+# what is at the end of it and sweeps the target directory on the way out - so
+# the links inside it are pruned exactly as a real directory's are.  Measured on
+# 2.3.1 and against 2.4.1's source, both of which prune below and exit 0.
+#
+# The state is a layer swapping a directory for a symlink to one it keeps
+# elsewhere, which is the everyday shape of it: '.config/nvim' pointing at
+# '.vim'.  The file that does not come across is what leaves a link behind, and
+# the file that does is the control - a build that reported this pair would have
+# to say 1, and the apply after it takes that one back.
+test_build_says_nothing_about_a_link_stow_prunes_from_a_symlinked_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the links'
+  assert_empty "$shale_err" 'the apply that made the links'
+  mklayer personal/base .vim/init.lua
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  rm -rf "$sandbox_dir/nvim" || fail 'could not remove the layer directory'
+  sandbox_leaf "$sandbox_dir" nvim new
+  ln -s ../.vim "$sandbox_path" || fail 'could not plant the layer symlink'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_empty "$shale_err" 'the build'
+  assert_dangling_symlink "$HOME/.config/nvim/spell.add" \
+    'the link waiting for the apply'
+  # The claim is stow's rather than this suite's: the apply the build said
+  # nothing about is run, and the link is gone after it.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply'
+  assert_missing "$HOME/.config/nvim/spell.add" 'the pruned link'
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua" 'the link the tree still answers for'
+}
+
+# Apply's own count, on the same state and with no build of its own before it:
+# it is taken once stow has run, so the link stow has just pruned is not there
+# to be counted and the run says nothing.  That was true before the tree ever
+# held a directory through a symlink and this is what pins it, the count being
+# the one of the three readers this class of directory never reached.
+test_apply_counts_nothing_where_stow_pruned_a_link_from_a_symlinked_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the links'
+  mklayer personal/base .vim/init.lua
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  rm -rf "$sandbox_dir/nvim" || fail 'could not remove the layer directory'
+  sandbox_leaf "$sandbox_dir" nvim new
+  ln -s ../.vim "$sandbox_path" || fail 'could not plant the layer symlink'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_empty "$shale_err" 'the apply'
+  assert_missing "$HOME/.config/nvim/spell.add" 'the pruned link'
+}
+
+# The spelling of the tree's own symlink, which is the one shape the two
+# versions disagree about and so the one that answers no on both.  2.4.1 refuses
+# the whole apply over an absolutely spelled source - 'source is an absolute
+# symlink' - and prunes nothing anywhere; 2.3.1 makes that test against a path
+# relative to the wrong directory below the top level, so it stows this one and
+# sweeps below it.  Measured, both.
+#
+# So the link is counted, and the remedy the reader gets for it is the rm that
+# works on either.  No apply is run here for the same reason the answer is no:
+# its status is the version, not the behaviour under test.
+test_build_counts_a_link_under_an_absolutely_spelled_symlink_to_a_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the links'
+  mklayer personal/base .vim/init.lua
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  rm -rf "$sandbox_dir/nvim" || fail 'could not remove the layer directory'
+  sandbox_leaf "$sandbox_dir" nvim new
+  # Where it points makes no difference; how it is spelled is the whole of it.
+  ln -s "$HOME/.dotfiles/personal/base/.vim" "$sandbox_path" ||
+    fail 'could not plant the layer symlink'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_eq \
+    "shale: 1 link in $HOME points at a path the built tree no longer provides: this build took that path out of the tree, and 'shale doctor' names it" \
+    "$shale_err" 'the build stderr'
+  assert_dangling_symlink "$HOME/.config/nvim/spell.add" 'the link the build counted'
+}
+
+# The other shape -d turns away, and this one both versions agree on: a symlink
+# with nothing at the end of it is not a directory stow walks into, it is a
+# directory stow dies in.  'unstow_contents() called with non-directory path' on
+# 2.3.1 and on 2.4.1's source alike, an apply that exits non-zero, and both
+# links still in $HOME afterwards - so a build that had passed over them on the
+# grounds that an apply takes them back would have been wrong about an apply
+# that does not run at all.
+test_build_counts_the_links_a_dangling_symlink_in_the_built_tree_left() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the links'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  rm -rf "$sandbox_dir/nvim" || fail 'could not remove the layer directory'
+  sandbox_leaf "$sandbox_dir" nvim new
+  ln -s ../.vim "$sandbox_path" || fail 'could not plant the layer symlink'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  assert_eq \
+    "shale: 2 links in $HOME point at paths the built tree no longer provides: this build took those paths out of the tree, and 'shale doctor' names them" \
+    "$shale_err" 'the build stderr'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+  # A fragment of shale's own line rather than stow's: what stow prints there is
+  # its internal error text, and only the shape of the failure - a die rather
+  # than the planned refusal that exits 1 - is the same on both versions.
+  assert_contains "$shale_err" "shale: stow failed part-way: $HOME may be partly relinked" \
+    'the apply stderr'
+  assert_dangling_symlink "$HOME/.config/nvim/init.lua" 'the link the apply left'
+  assert_dangling_symlink "$HOME/.config/nvim/spell.add" 'the link the apply left'
+}
+
 # ---------------------------------------------------------------- clone cases
 #
 # Every url here is a path to a repository the case created; no case names a
@@ -10320,6 +10446,123 @@ test_doctor_an_absolute_link_is_not_one_an_apply_clears() {
   assert_dangling_symlink "$HOME/.config/nvim/gone.lua" 'the link the apply left'
 }
 
+# A link in a directory the built tree holds through a symlink, which is the
+# class this issue is about: stow follows the link, walks what is at the end of
+# it and sweeps on the way out, so the link is one the next apply clears and not
+# one to send a reader to remove by hand.  Measured on 2.3.1 and against 2.4.1's
+# source, and the apply is run below so the claim is stow's rather than this
+# suite's.
+#
+# The remedy asserted is the sentence about which links stow prunes, not 'clear
+# it with: shale apply'.  Doctor has a finding of its own about this state - a
+# layer providing a symlink where $HOME has a real directory is a path it calls
+# one holding something no apply put there - and while that stands, no line in
+# the report names a command, which is the rule for every line that does.  That
+# finding is the conservative half of a trade doctor makes deliberately: the
+# apply below finishes and exits 0, so the finding costs a reader a look at a
+# path that was not in anybody's way, and the alternative is a report that
+# passes states an apply refuses.  What the classification below fixes is the
+# other line: the link inside that directory is one an apply takes back, and the
+# remedy no longer prescribes an rm for it.
+test_doctor_a_link_in_a_symlinked_directory_is_one_an_apply_clears() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/spell.add
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the links'
+  # The layer swaps the directory for a symlink to one it keeps elsewhere, and
+  # '.vim' has the one file: the other link is left pointing at a path the tree
+  # no longer provides.
+  mklayer personal/base .vim/init.lua
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  rm -rf "$sandbox_dir/nvim" || fail 'could not remove the layer directory'
+  sandbox_leaf "$sandbox_dir" nvim new
+  ln -s ../.vim "$sandbox_path" || fail 'could not plant the layer symlink'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.config/nvim/spell.add points at $HOME/.dotfiles/current/.config/nvim/spell.add, which the built tree no longer provides" \
+    'stdout'
+  assert_contains "$shale_out" \
+    'shale:   stow prunes the links an apply wrote — relative, and in a directory the built tree still holds — and this is one of them' \
+    'stdout'
+  # What ships while the conflict finding stands, and it is about this link
+  # rather than about the directory the finding names.
+  assert_contains "$shale_out" \
+    'shale: no apply will finish until the problems above are fixed, so this link stays' \
+    'stdout'
+  # The remedy this must never be: it prescribes an rm for a link the apply
+  # below takes back on its own, and 'nothing needs reapplying' is false of it.
+  assert_not_contains "$shale_out" 'remove the links named above' 'stdout'
+  assert_not_contains "$shale_out" 'nothing needs rebuilding or reapplying' 'stdout'
+  assert_not_contains "$shale_out" 'stow -D -p' 'stdout'
+  # And the apply that classification speaks for, which is the whole of the
+  # claim: the link goes, and the report stops naming it.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_missing "$HOME/.config/nvim/spell.add" 'the link the apply cleared'
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua" 'the link the tree still answers for'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor after the apply'
+  assert_not_contains "$shale_out" 'which the built tree no longer provides' \
+    'the stdout after the apply'
+}
+
+# A layer's symlink to a directory where $HOME has a real directory of the
+# reader's own: stow walks into the link and links what is at the end of it into
+# that directory, so an apply over the settled state finishes and exits 0 -
+# measured on 2.3.1 and against 2.4.1's source.  Doctor names the path all the
+# same, and this pins that it does.
+#
+# The finding is conservative and deliberately so.  What is at the far end is
+# not the built tree's to answer for - the next apply builds before it stows, so
+# the layers decide it, and a link's target text can leave the tree, cross
+# another link or name a path no build composes.  Doctor cannot resolve that
+# exactly, so it says the one thing that is always true: it cannot promise this
+# apply.  The second half below is the state that makes the choice worth its
+# cost - the layer grows a file at the far end and the reader has one of their
+# own at that name, with no build in between - where the apply refuses and a
+# report that had passed the first half on the strength of the built tree would
+# have passed this one too.
+test_doctor_names_a_layer_symlink_over_a_real_directory_in_home() {
+  conf 'base personal/base'
+  mklayer personal/base .vim/init.lua
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  sandbox_leaf "$sandbox_dir" nvim new
+  ln -s ../.vim "$sandbox_path" || fail 'could not plant the layer symlink'
+  sandbox_mkdir "$HOME/.config/nvim"
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor on the settled state'
+  assert_contains "$shale_out" \
+    "shale: 1 path in $HOME holds something no apply put there, and a layer provides it" \
+    'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.config/nvim" 'stdout'
+  # The cost of that answer, stated rather than wished away: this apply works.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply doctor would not promise'
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua" 'the link stow made through the symlink'
+  # And what it buys: the layer grows a file at the far end, the reader has one
+  # of their own at that name, and no build has run.  Doctor says the same
+  # thing, and the apply refuses.
+  mklayer personal/base .vim/newthing
+  sandbox_write "$HOME/.config/nvim" newthing 'mine, and not a link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor with no build in between'
+  assert_contains "$shale_out" "shale:   $HOME/.config/nvim" 'the second stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply'
+  assert_contains "$shale_err" "shale: stow failed; nothing in $HOME was relinked" \
+    'the apply stderr'
+  assert_eq 'mine, and not a link' "$(cat "$HOME/.config/nvim/newthing")" \
+    'the file of the reader own'
+}
+
 # Both causes at once, which is the shape neither remedy alone is right for: the
 # rm covers all of them and is what leads, and the apply is named for the ones it
 # takes off the list rather than left out.
@@ -10789,6 +11032,38 @@ test_doctor_a_missing_readlink_warns_without_failing() {
 $shale_out
 EOF
   assert_eq 1 "$notes" 'the number of readlink notes'
+}
+
+# The same missing tool where a layer provides a symlink to a directory, which
+# is the shape whose answer turns on a link's own target text.  Doctor stops
+# before it reads one - it says the tool is missing and returns - so the path
+# stays the finding it was, and the run says that in its own words on stdout.
+#
+# stderr, because a shell reporting a command it could not find is the failure
+# this pins, and a doctor run has nothing of its own to put there.  What holds
+# it is the early return rather than the guard inside stow_walks_into, which no
+# caller can reach without readlink; the case is why a caller that changed that
+# would be noticed here.
+test_doctor_a_missing_readlink_says_nothing_of_its_own_on_stderr() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .vim/init.lua
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  sandbox_leaf "$sandbox_dir" nvim new
+  ln -s ../.vim "$sandbox_path" || fail 'could not plant the layer symlink'
+  sandbox_write "$HOME/.config/nvim" mine.lua 'mine, and not a link'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  stub_path_without readlink
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_empty "$shale_err" 'the doctor stderr'
+  assert_contains "$shale_out" \
+    'shale: readlink is not installed, and shale reads what a link points at with it' 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.config/nvim" 'stdout'
 }
 
 # The shape the audit's own check could never report: no build has run, so the
