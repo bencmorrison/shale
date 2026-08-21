@@ -294,6 +294,14 @@ A symlink is copied as a symlink, target text unchanged, and it is a leaf: shale
 one, so a layer's symlink to a directory collides with a lower layer's real directory rather than
 merging into it.
 
+Stow does follow one, which is where it parts company with the composer. Where `$HOME` already holds
+a real directory at that path, an apply links the contents of the link's directory into it and
+leaves your own files there untouched — measured on stow 2.3.1 and 2.4.1. `doctor` reports that path
+all the same, as one holding something no apply put there: what a build will put at the far end of a
+link is not something it can read off the link, and one file of yours at a name that directory
+provides is a refusal stow abandons the whole apply over. Move your directory aside if you want the
+link, or leave it and read what the apply says.
+
 The target is resolved from where the link ends up inside `current/`, not from `$HOME`. A link to a
 sibling works — `.exrc -> .vimrc` resolves inside `current/` and reading `~/.exrc` gets the file.
 A link written as though it started in `$HOME`, such as `.exrc -> .dotfiles/current/.vimrc`, dangles
