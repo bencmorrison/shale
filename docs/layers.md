@@ -13,6 +13,12 @@ Fragment directories, numeric prefixes and shared helper files are conventions f
 expressed in the config formats themselves and implemented by the files you write. Shale has no
 knowledge of any of them and treats every one as an ordinary file.
 
+The one thing a layer cannot carry in the tree itself is a mode. Git records no permission bits for
+a directory and only the executable bit for a file, so an `.ssh`, a credentials file or anything
+else private arrives on the next machine at that clone's umask — typically `755` and `644` — and no
+command says so. Declare those modes in a `.shale-modes` at the top of the clone root before the
+layer's first apply; [Permissions](#permissions) below is the whole of it.
+
 ## Where a layer lives
 
 Give a layer a subdirectory of its repository rather than the repository root:
