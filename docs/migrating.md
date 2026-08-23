@@ -25,8 +25,9 @@ it replaces gets three lines on stderr naming it and naming its copy in `current
 — which is what `--adopt` leaves when the file in `$HOME` predates the layer's — gets nothing,
 because an edited layer leaves that same state and the message would be on the loop you run all day.
 `shale doctor` is what covers the silent direction, and the time to run it is before you build,
-while it still names the file: after the build the copy is in `current.old` and doctor says nothing
-about it either, that tree being what every rebuild leaves. Or copy the file into a layer instead,
+while it still names the file: after the build the copy is in `current.old`, older than the layer
+copy that replaced it, which is the shape an ordinary rebuild leaves as well — so doctor says
+nothing about it, and the file is one build from gone. Or copy the file into a layer instead,
 and there is nothing to recover. The refusals themselves are covered below, each with what to do
 about it.
 
@@ -328,9 +329,12 @@ same note from a `doctor` run any time after pulling a layer and before building
 to act on there —
 which is why it is a note and `doctor` still exits 0. Either way the previous tree is at
 `current.old` and your file is in it, until the next clean build removes it. The note above is the
-last warning you get: after that build `doctor` cannot see the mismatch any more, because the built
-copy matches the layer again, and it says nothing about `current.old` either — every rebuild leaves
-one, so a line about it would be a line after every edit. Copy the file into a layer instead and
+last thing that names your file: after that build `doctor` cannot see the mismatch any more, because
+the built copy matches the layer again, and it says nothing about `current.old` either — an adopted
+file that predates the layer copy leaves a tree shaped exactly like the one every rebuild leaves,
+and a line about that would be a line after every edit. A file adopted *newer* than the layer copy
+is the other case: the build names it as it replaces it, `doctor` reports the tree for as long as it
+stands, and the build that removes it says so. Copy the file into a layer instead and
 there is nothing to recover.
 
 ## Links left behind after layers change

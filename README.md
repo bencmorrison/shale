@@ -224,15 +224,21 @@ pointing at it until stow makes the link, and one deleted from every layer leave
 until stow prunes it. Apply when unsure: it builds first, so it is never less than a build.
 [docs/layers.md](docs/layers.md) has the boundary case by case.
 
-Builds are quiet, bar one line: a build that takes a path out of the tree and leaves a link in
-`$HOME` pointing at nothing counts those links and says so, which is *Links left behind after layers
-change* in [docs/migrating.md](docs/migrating.md). A build that finds `current` holding a copy older
-than the layer file replacing it keeps the previous tree at `~/.dotfiles/current.old` and says
-nothing, because an edited layer leaves exactly that state and a message there would be a message on
-every edit. `shale doctor` is what reports the mismatch, as a note rather than a problem, and only
-until the build that overwrites it. After that build nothing reports it: what was there sits at
-`~/.dotfiles/current.old` until the next build removes it, and `doctor` names it again only where a
-problem it found means no build is coming — see [docs/layers.md](docs/layers.md).
+Builds are quiet. Three things make one say anything beyond the `composed layer` line it prints per
+layer, and nothing else does. A build that takes a path out of the tree and leaves a link in `$HOME`
+pointing at nothing counts those links and reports them, which is *Links left behind after layers
+change* in [docs/migrating.md](docs/migrating.md). A build that finds `current` holding a copy
+*newer* than the layer file replacing it reports that per file, naming where it kept what it
+replaced. And a build about to remove a `~/.dotfiles/current.old` reports that removal where the
+tree holds something the layers cannot produce again — a file newer than its layer copy, one whose
+kind the layers have changed, or one at a path no layer provides — where anything that is not a tree
+shale composed is sitting at the name, or where the state is one an interrupted build leaves. A
+build that finds `current` holding a copy *older* than the layer file replacing it keeps the
+previous tree and says nothing, because an edited layer leaves exactly that state and a message
+there would be a message on every edit; `shale doctor` is what reports that mismatch, as a note
+rather than a problem, and only until the build that overwrites it. `doctor` names a `current.old`
+on the same conditions the removal is announced on, and also where a problem it found means no build
+is coming — see [docs/layers.md](docs/layers.md).
 
 Shale chooses between three exit codes, and no others:
 
@@ -258,7 +264,8 @@ one at a time.
 and building again — and it should never be edited or versioned. Edit the layer, not the result. A
 build that finds a regular file in `current` differing in age from the layer's copy keeps the tree it
 replaced at `~/.dotfiles/current.old`, so what was there is recoverable until the next build, which
-removes it. Newer means either that something wrote or moved a file into the built tree — which is
+removes it — and says so as it goes, where that tree holds anything the layers cannot produce again,
+or is not a tree shale composed at all. Newer means either that something wrote or moved a file into the built tree — which is
 what `stow --adopt` does with a file newer than the layer's copy — or that a different layer now
 provides the path with an older copy; the build says so per file, stating both. Older means
 either that something moved a file into it, which is what `stow --adopt` does, or that a layer has
@@ -361,8 +368,8 @@ directory, or a link of your own, none of which stow will write over — that no
 `.stow-local-ignore`, which shale writes itself, or shale itself, that `~/.dotfiles/current` is a
 directory rather than a file or a link to one, that a build could create the tree it composes into,
 that nothing in `~/.dotfiles` whose name does not begin with a dot is a stray, that no `current.new`
-has been left beside `current` and no `current.old` that no build is coming to remove, and that no
-link in `$HOME` points into the built tree at a path it no longer provides. Where a `.stowrc` exists
+has been left beside `current` and no `current.old` holding anything the layers cannot produce again,
+and that no link in `$HOME` points into the built tree at a path it no longer provides. Where a `.stowrc` exists
 it says so, because stow appends its `--ignore` patterns to the ones shale passes and one of them can
 drop a file from an apply without a word. It reads nothing out of that file, and changes nothing
 itself.

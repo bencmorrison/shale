@@ -3165,6 +3165,134 @@ winning_layer() {
   return 1
 }
 
+# Zero when the tree at $1, walked from the relative path $2 - empty for the
+# whole of it - holds an entry the layers as configured now do not account for.
+# $3 is list_dir's dots flag, 1 for a caller without dotglob and 0 for build,
+# which sets it: passing 1 there lists every dotfile twice and doubles the walk
+# again at each level below.  $4 is 1 where a path no layer provides is to be
+# counted, and 0 where that verdict cannot be trusted.  Asked by build and by
+# doctor, of a current.old and of nothing else.
+#
+# What it is for: current.old is left by two histories that leave the same
+# directory behind, and shale remembers neither.  A build keeps it because
+# something in the tree it replaced did not match the layer copy - which an
+# edited layer does to every path that layer provides, so most of them hold a
+# copy of files every layer still has - and a kill after the swap leaves one
+# holding whatever the tree held.  Nothing on disk says which; but the evidence
+# each would leave can be looked for, and this is that look.
+#
+# Newer than the layer copy, which is build's own divergence test asked one
+# build later, of the tree that was kept rather than the tree being composed.
+# An edit written through a link and a file moved into the built tree both land
+# there with a timestamp of their own, ahead of the layer copy that superseded
+# them; a copy the everyday loop keeps is the layer's own file from the build
+# before, older than the layer copy that has since been edited and never newer
+# than it.  So the everyday tree answers no and stays unmentioned, and #133's
+# quiet is what a reader gets for editing a layer.
+#
+# Or a different kind from the layer copy, which no age comparison reaches at
+# all: a layer that turned .zshrc into a directory of its own, or one that ships
+# a symlink where the kept tree holds a file, replaces that file with something
+# that is not a version of it, and the copy going away is the only one there is.
+# A kept symlink where the layer has a file is the same thing from the other
+# side, and is the shape a hand-made link in the built tree leaves.  Two
+# symlinks are the one pair left alone: there is no portable way to read the age
+# of a link rather than of what it points at, and a layer retargeting its own
+# link is an everyday change.
+#
+# Or provided by no layer at all, which is the same answer arrived at from the
+# other side: a path the layers have dropped since the kept build, or one
+# nothing ever provided, has no copy anywhere but here.  That verdict is $4's,
+# because it is only as good as the layers being all here - with a clone still
+# to be fetched, every path the missing layer provides looks dropped, and a walk
+# that counted them would call every tree evidence until the fetch.
+#
+# The current config decides the counterpart, not the config the kept build ran
+# under - the question is what is recoverable from somewhere else *now*, and a
+# layer dropped from shale.conf in between is a layer that no longer answers for
+# anything.
+#
+# One direction of the age comparison only, and the reason is the one that keeps
+# this quiet: a file moved into the built tree *older* than the layer copy -
+# which is what stow --adopt leaves for a file in $HOME that predates the
+# layer's - is shaped exactly like the everyday tree and cannot be told from it
+# here.  audit_built_tree is where that file is named, in the window before the
+# build that replaces it, and this cannot reopen a window that has closed.
+holds_unaccounted() {
+  local root=$1 rel=$2 dots=$3 unprovided=$4 here e base srel
+  here=$root${rel:+/$rel}
+  # A directory that cannot be listed answers every glob with nothing, exactly
+  # as an empty one does, so a subtree that could not be read would otherwise
+  # come back accounted for - which is the answer that keeps the line off the
+  # screen, and the wrong one to give from a walk that did not happen.
+  { [ -r "$here" ] && [ -x "$here" ]; } || return 0
+  # '.' and '..' are dropped by name, whatever the glob options say about them,
+  # and an unmatched pattern arrives as itself wherever nullglob is unset.  The
+  # list is expanded once, before the body runs, so the recursion below may
+  # write DIR_ENTRIES again.
+  list_dir "$here" "$dots"
+  for e in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
+    base=${e##*/}
+    case "$base" in
+      . | ..) continue ;;
+      '*' | '.*')
+        { [ -e "$e" ] || [ -L "$e" ]; } || continue
+        ;;
+    esac
+    # The two names no layer ever accounts for and neither may be read as
+    # evidence: shale writes .stow-local-ignore into the top of every tree it
+    # composes and refuses any layer that ships one, and a build copies no .git
+    # at any depth.  Without the first, every tree shale has ever composed
+    # answers yes and the whole check is a line on every run.
+    [ "$base" = .git ] && continue
+    if [ -z "$rel" ] && [ "$base" = .stow-local-ignore ]; then
+      continue
+    fi
+    srel=${rel:+$rel/}$base
+    # A symlink to a directory is a leaf here as it is in the composer, and
+    # descending one would walk out of the tree being asked about.
+    if [ -d "$e" ] && [ ! -L "$e" ]; then
+      # The kind question again, asked of the directory before anything inside
+      # it is: a build composes a layer's symlink as a leaf, so a layer
+      # providing this path as anything but a real directory replaces the whole
+      # of what is kept here rather than merging into it, and every file below
+      # is going with it.  Asking only per file would answer through the layer's
+      # link - winning_layer's -e resolves it - so a target that happens to hold
+      # the same names reads as though the layers still had all of this, and the
+      # subtree goes in silence.  The everyday shape is a real directory on both
+      # sides, which this leaves alone.
+      #
+      # A path no layer provides at all is not answered here: the files below
+      # are what carry that verdict, and $unprovided is what decides whether it
+      # counts - deciding it for the directory would take the pending clone's
+      # suppression away from everything under it.
+      if winning_layer "$srel" -1 &&
+        { [ ! -d "$WINNER" ] || [ -L "$WINNER" ]; }; then
+        return 0
+      fi
+      holds_unaccounted "$root" "$srel" "$dots" "$unprovided" && return 0
+      continue
+    fi
+    if ! winning_layer "$srel" -1; then
+      [ "$unprovided" -eq 1 ] && return 0
+      continue
+    fi
+    # Kind before age, because a difference in kind is what no age can express:
+    # the two sides are not two versions of one file, and the layer's is not a
+    # copy of what is going away.
+    if [ -d "$WINNER" ] && [ ! -L "$WINNER" ]; then
+      return 0
+    fi
+    if [ -L "$e" ]; then
+      [ -L "$WINNER" ] || return 0
+      continue
+    fi
+    [ -L "$WINNER" ] && return 0
+    [ "$e" -nt "$WINNER" ] && return 0
+  done
+  return 1
+}
+
 # The built tree under $1, relative to $CUR and '' for the whole of it, walked
 # for files older than the layer copy that provides them.  Counts them into
 # MISMATCH_COUNT, keeps the first $2 in MISMATCH_PATHS and folds each into
@@ -4748,7 +4876,7 @@ check_layers() {
 BUILD_REPORTS_ORPHANS=1
 
 cmd_build() {
-  local i dir n had_current qcur qold rel file lineno bits errors
+  local i dir n had_current had_scratch qcur qold rel file lineno bits errors
 
   parse_config || exit 1
 
@@ -4785,6 +4913,14 @@ cmd_build() {
       'shale builds into it' \
       'remove it, or move it aside'
   fi
+
+  # Recorded before the reap below and read at the announcement further down: a
+  # tree standing here is the shape doctor calls an interrupted build, and this
+  # build removes it along with the current.old that shape leaves beside it -
+  # the one doctor has been telling the reader to copy out of.  After this rm
+  # nothing can tell that state from an ordinary run.
+  had_scratch=0
+  { [ ! -e "$NEW" ] && [ ! -L "$NEW" ]; } || had_scratch=1
 
   # Reaping whatever a killed run left behind.
   rm -rf "$NEW" || die "could not remove $NEW"
@@ -4988,6 +5124,41 @@ cmd_build() {
       die "could not write $NEW/.stow-local-ignore"
   fi
 
+  # Announced where what is going holds something the layers do not account for.
+  # The build that left it here named a file in it recoverable 'until the next
+  # build', and this is that build, so the deadline expiring is a thing that
+  # happens rather than a silence: one line, on stderr with build's other
+  # advisories, the build carrying on and exiting 0.  It is not a fault.
+  #
+  # Gated on holds_unaccounted rather than on the name being there, because the
+  # everyday loop leaves a current.old after every edit and #75 is what a build
+  # sounds like.  A tree holding the layers' own files from the build before is
+  # nothing to announce the removal of; one holding an edit written through a
+  # link, or a path no layer provides any more, is.
+  #
+  # The other three arms are doctor's, spelt the same way round: whatever that
+  # report names here, this line answers for.  Doctor tells a reader to copy
+  # what they want out of this tree before the next build, and a build that then
+  # removed it in silence would be the same asymmetry #168 was about, one state
+  # along.  So anything at the name that is not a directory is announced
+  # unlooked-at - no build composed it, and nothing accounts for it - and so is
+  # a removal made from either shape doctor calls an interrupted build, which
+  # are a $CUR that was not there when this build started and a $NEW that was.
+  #
+  # Only what was already here when this build started, either way.  The
+  # current.old this build is about to make is reaped further down instead.
+  #
+  # 'removing' rather than 'removed': the rm below can fail, and it dies naming
+  # the path when it does, so this line is what that message is about rather
+  # than a claim contradicting it.
+  if { [ -e "$OLD" ] || [ -L "$OLD" ]; } &&
+    { [ ! -d "$OLD" ] || [ -L "$OLD" ] ||
+      [ "$had_scratch" -eq 1 ] ||
+      { [ ! -e "$CUR" ] && [ ! -L "$CUR" ]; } ||
+      holds_unaccounted "$OLD" '' 0 1; }; then
+    warn "removing $OLD, where a build leaves the tree it replaced"
+  fi
+
   # current.old must be gone, not merely attempted: mv a b where b is an
   # existing directory moves a *into* b, so a failed rm -rf that went unnoticed
   # would yield a stale current.old/current and a build that reported success.
@@ -5107,6 +5278,11 @@ cmd_build() {
 
   # The tree the walk above has just read, where there was nothing to keep it
   # for.  A divergence keeps it instead, and says so in the lines above.
+  #
+  # Silent, and deliberately: what goes here is the tree this same run replaced,
+  # for which the run has just composed the replacement, and a line about it
+  # would be a line on every build that ever replaced anything - which is the
+  # everyday-noise problem the announcement above is gated to avoid.
   if [ "$n" -eq 0 ] && [ "$OLDER_COUNT" -eq 0 ]; then
     rm -rf "$OLD" || warn "could not remove $OLD"
   fi
@@ -5613,7 +5789,7 @@ cmd_apply() {
 # before it found, and only the finding count decides the exit status.
 cmd_doctor() {
   local tool i n name path root dir entry leaf known lines layers
-  local pending removed covers
+  local pending removed covers kept
 
   FINDINGS=0
   NOTES=0
@@ -6057,44 +6233,68 @@ cmd_doctor() {
       note "$OLD is at the path a build moves $CUR aside to" \
         'shale clears that path before it swaps' \
         "$removed"
-    elif [ -d "$CUR" ] && [ ! -L "$CUR" ]; then
-      # Only where the build that reaps it is not going to run.  Either
-      # direction of the comparison keeps this tree, and an edited layer is one
-      # of them - it leaves every path that layer provides newer than the copy
-      # in the tree - so the everyday loop keeps one on every rebuild, and a
-      # line about it on every run is a line nobody reads.  Neither direction is
-      # named, for the reason the build names neither: what is in the tree is
-      # not doctor's to say, and a cause guessed at sends a reader looking for
-      # the wrong file.  What is left is the one thing the build that kept it
-      # could not know, which is that nothing is coming to clear it.
-      #
-      # What the path is for, never what is in it: nothing here has looked, and
-      # a build that kept it because one file differed leaves a whole tree, while
-      # an empty one told that it holds the last copy of something is a lie in
-      # the direction that costs a reader time.
-      if [ "$BUILD_BLOCKED" -gt 0 ]; then
-        note "$OLD is where a build leaves the tree it replaced" \
-          'the last build kept it because the copies it replaced were not the ones the layers now provide' \
-          "$removed" \
-          'copy anything in it you want to keep into a layer first'
-      fi
     else
-      # The shape a kill between the two renames leaves, and the one a hand that
-      # removed $CUR leaves too.  Only what is on disk is stated: the composed
-      # tree still standing at $NEW is what distinguishes the interrupted build
-      # from the removal, and without it no cause is named.  $CUR is spoken for
-      # only where there is nothing at it at all - every other shape it can be
-      # in is a finding above, in the words build refuses it with.
-      lines=("$OLD is where a build leaves the tree it replaced")
-      { [ -e "$CUR" ] || [ -L "$CUR" ]; } ||
-        lines[${#lines[@]}]="there is nothing at $CUR"
-      if [ -e "$NEW" ] || [ -L "$NEW" ]; then
-        lines[${#lines[@]}]="a build was interrupted between moving it there and moving the tree it had composed into place, which is still at $NEW"
+      # One note for every shape a real directory here can be, because nothing
+      # on disk tells them apart: a divergence keeps this tree deliberately and
+      # a kill after the swap leaves the same directory behind, and doctor
+      # cannot say which build it is looking at the leavings of.  So no cause is
+      # named - a cause guessed at sends a reader looking for the wrong file -
+      # and every line below is true of both.
+      #
+      # What the path is for, never what is in it: the walk below asks one
+      # question and keeps no answer, and a whole tree told that it holds the
+      # last copy of something is a lie in the direction that costs a reader
+      # time.
+      #
+      # $CUR is spoken for only where there is nothing at it at all - every
+      # other shape it can be in is a finding above, in the words build refuses
+      # it with - and the composed tree still standing at $NEW is the only thing
+      # that separates a build killed between the two renames from a hand that
+      # removed $CUR.
+      #
+      # Printed on the everyday shape only where the tree holds something the
+      # layers do not account for.  A rebuild after an edit keeps one of these
+      # every time, so a note on the name being there is a note after every
+      # edit, which is what #133 took out; and a note on nothing at all is what
+      # let an apply reap a hand-edited file seconds after 'no problems found'.
+      # holds_unaccounted is the question that separates them, and it is asked
+      # only in that shape: a kill leaves a tree $HOME is linked against, an
+      # empty one included, and no build is between the reader and it.  Nor
+      # where a finding has stopped the build that would clear this, which the
+      # last line of the note is about and nothing in the tree can answer.
+      #
+      # A pending clone takes the 'no layer provides it' half of the question
+      # away rather than the whole of it: every path the layer being fetched
+      # provides looks dropped until it arrives, and a walk that counted those
+      # would name this tree on every run between the config and the clone.
+      # What survives the wait is the age comparison, which is about the layers
+      # that are here.
+      kept=1
+      if [ -d "$CUR" ] && [ ! -L "$CUR" ] &&
+        [ ! -e "$NEW" ] && [ ! -L "$NEW" ] &&
+        [ "$BUILD_BLOCKED" -eq 0 ]; then
+        kept=0
+        ! holds_unaccounted "$OLD" '' 1 "$((1 - pending))" || kept=1
       fi
-      lines[${#lines[@]}]='it may hold the only copy of anything that was moved into the built tree rather than composed from a layer'
-      lines[${#lines[@]}]=$removed
-      lines[${#lines[@]}]='copy anything in it you want to keep into a layer first'
-      note ${lines[@]+"${lines[@]}"}
+      if [ "$kept" -eq 1 ]; then
+        lines=("$OLD is where a build leaves the tree it replaced")
+        { [ -e "$CUR" ] || [ -L "$CUR" ]; } ||
+          lines[${#lines[@]}]="there is nothing at $CUR"
+        # Only where the swap did not finish, which is what a $CUR that is not a
+        # directory is and what a healthy one rules out: a tree standing there
+        # is a rename that completed, whatever else is beside it, so a scratch
+        # tree left by some earlier killed compose says nothing about how this
+        # current.old got here.  The line above it is the other half of the same
+        # reading - together they are the state, and neither is a guess.
+        if { [ ! -d "$CUR" ] || [ -L "$CUR" ]; } &&
+          { [ -e "$NEW" ] || [ -L "$NEW" ]; }; then
+          lines[${#lines[@]}]="a build was interrupted between moving it there and moving the tree it had composed into place, which is still at $NEW"
+        fi
+        lines[${#lines[@]}]='it may hold the only copy of a file a divergence replaced, of one that was moved into the built tree rather than composed from a layer, or of one at a path no layer provides any more'
+        lines[${#lines[@]}]=$removed
+        lines[${#lines[@]}]='copy anything in it you want to keep into a layer first'
+        note ${lines[@]+"${lines[@]}"}
+      fi
     fi
   fi
 
