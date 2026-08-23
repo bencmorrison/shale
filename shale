@@ -2500,6 +2500,18 @@ APPLY_TOOL_MISSING=0
 IGNORED_FILE_COUNT=0
 IGNORED_WALK_PARTIAL=0
 
+# Non-zero when audit_broken_links returned without walking $HOME at all, which
+# it does on four states: no chkstow, no readlink, no built tree to tell a link
+# into it from any other broken one, and no $HOME to walk.  The summary reads
+# it, because 'no problems found' after a check that did not run is a clean bill
+# nothing established - and the check that did not run is the only one that
+# looks outside $DOTFILES, so what it would have found is invisible to every
+# other line in the report.  One flag rather than a list of names: it is the one
+# audit that can be skipped and still leave a report saying nothing is wrong,
+# and a second would need its own words in the summary rather than another
+# increment of this.
+UNCHECKED_LINKS=0
+
 # Zero when doctor may offer an apply.  Every line it prints that names 'shale
 # apply' is gated on this - one question, answered in one place, so that the
 # report cannot refuse an apply in one check and offer it in the next.  It gates
@@ -4136,6 +4148,13 @@ audit_broken_links() {
   local out err marker line link dest target cur dots home qdots qhome n lines
   local stream cap rest msg samples remedy where nlink nhome spelling prunable
 
+  # Set here and cleared below once the last of the four guards has passed,
+  # rather than at each of the four returns: a fifth reason to give up added
+  # above the clear then reports itself without being told to, where a fifth
+  # return that forgot to set it would put a clean bill on a check that never
+  # ran.
+  UNCHECKED_LINKS=1
+
   # Before every other check here, which all need a built tree to mean anything.
   #
   # The two states build refuses are findings, in build's own words: a link to a
@@ -4181,6 +4200,7 @@ audit_broken_links() {
   # failure of a missing command: every link would arrive with an empty target,
   # be judged to point outside the built tree, and the audit would report clean.
   command -v readlink >/dev/null 2>&1 || return 0
+  UNCHECKED_LINKS=0
 
   normalise_path "$CUR"
   cur=$NORMALISED
@@ -5789,7 +5809,7 @@ cmd_apply() {
 # before it found, and only the finding count decides the exit status.
 cmd_doctor() {
   local tool i n name path root dir entry leaf known lines layers
-  local pending removed covers kept
+  local pending removed covers kept verdict joiner where files
 
   FINDINGS=0
   NOTES=0
@@ -5818,9 +5838,18 @@ cmd_doctor() {
     finding "$tool is not installed" \
       "install it with your system package manager: shale installs nothing"
   done
+  # A note, printed one line under a finding of the same shape whenever stow is
+  # missing too, so it says in its own words which of the two it is: the summary
+  # counts problems and cannot point at a line, and nothing else on screen
+  # separates 'stow is not installed' from this.  The package is named because
+  # the tool's name is not it: neither Debian nor Homebrew has a package called
+  # 'chkstow', and both carry it in the 'stow' one - Debian's ships both
+  # binaries, and Homebrew's formula builds the GNU tarball, whose Makefile
+  # installs both.
   command -v chkstow >/dev/null 2>&1 ||
-    note "chkstow is not installed" \
-      "it comes with GNU stow, and without it shale cannot audit ${HOME-} for broken links"
+    note "chkstow is not installed, so this report cannot audit ${HOME-} for broken links" \
+      'it stops no build and no apply: what it costs is that one check' \
+      "it ships with GNU stow, so the package to install is 'stow', the same one that provides stow itself"
   command -v readlink >/dev/null 2>&1 ||
     note 'readlink is not installed, and shale reads what a link points at with it' \
       "without it shale cannot audit ${HOME-} for broken links" \
@@ -6139,61 +6168,68 @@ cmd_doctor() {
 
   # The patterns in force, under the walk that says whether they are doing
   # anything: one that matches more than it was meant to leaves a real file
-  # unlinked with apply exiting 0, and this is the only place they are all shown
-  # without reading the built tree by hand.  A note, never a finding - somebody
-  # wrote them on purpose.
+  # unlinked with apply exiting 0, and the count below is what says so - a
+  # number larger than the junk the list was written for is the whole of the
+  # symptom, and the file to open is named beside it.
+  #
+  # One line, and no note: a list of patterns is the shape of a setup somebody
+  # wrote on purpose and it is in force on every run they will ever make, so
+  # counted as a note it put 'read the note above' under every report for ever
+  # and taught the reader that the suffix means nothing.  #133's rule is that a
+  # clean, expected state reads as clean, and having ignore patterns is one.
+  # What is lost with the pattern list is a review surface doctor was the only
+  # place for; the file is named so it can be read where it is written, and
+  # 'shale which PATH' still answers for a single path, with the line number.
   #
   # Printed where the built tree holds a file they cover, which is what gives
-  # the reader something to check the list against.  Having patterns is not
-  # news: README tells a first-time reader to write '.DS_Store' into an ignore
-  # file, and a report that named the list for existing put five lines above
-  # every run they ever made and left 'no problems found' saying nothing by
-  # never appearing alone.  A pattern that covers nothing is withholding
-  # nothing, and has no file in $HOME or in the tree to be wrong about.
+  # the reader something to check the count against.  A pattern that covers
+  # nothing is withholding nothing, and has no file in $HOME or in the tree to
+  # be wrong about.
   #
   # And printed where the walk could not read the whole tree, with the count
   # left off rather than stated: a directory it could not open is where a
   # covered file hides, so silence there would be this report answering 'none'
   # to a question it did not get to ask.  audit_built_tree has already named the
   # directory; this says the list exists, which is the half that walk cannot.
-  #
-  # Grouped by file, because they concatenate across clone roots and 'which
-  # file do I edit' is the question the list is read with.
   if [ "${#IGNORE_PATTERNS[@]}" -gt 0 ] &&
     { [ "$IGNORED_FILE_COUNT" -gt 0 ] || [ "$IGNORED_WALK_PARTIAL" -eq 1 ]; }; then
     n=${#IGNORE_PATTERNS[@]}
-    entry='files'
-    [ "$IGNORED_FILE_COUNT" -ne 1 ] || entry='file'
-    # The second line says what an apply does and the third what it does not
-    # undo, because without the third this headline reads as a claim about
-    # $HOME as it stands - and the links audit_ignored_links names above are
-    # exactly the paths it would then be contradicting.
-    if [ "$n" -eq 1 ]; then
-      covers=
-      [ "$IGNORED_WALK_PARTIAL" -eq 1 ] ||
-        covers=", and the built tree holds $IGNORED_FILE_COUNT $entry it covers"
-      lines=("1 ignore pattern is in force$covers"
-        "shale writes it into $CUR/.stow-local-ignore, below stow's own list, so no apply links a path it matches"
-        'a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named above')
-    else
-      covers=
-      [ "$IGNORED_WALK_PARTIAL" -eq 1 ] ||
-        covers=", and the built tree holds $IGNORED_FILE_COUNT $entry they cover"
-      lines=("$n ignore patterns are in force$covers"
-        "shale writes them into $CUR/.stow-local-ignore, below stow's own list, so no apply links a path they match"
-        'a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named above')
-    fi
+    # The files they were read from, counted the way the report used to group
+    # them: parse_ignore_files reads one per clone root and appends the whole of
+    # it, so a change of name is a change of file.  Named where there is one,
+    # counted where there are more - a line naming four paths is the multi-line
+    # note again under another name, and the directory holding them is where a
+    # reader goes to find them all.
+    files=0
     entry=
     i=0
     while [ "$i" -lt "$n" ]; do
       if [ "${IGNORE_FILES[$i]}" != "$entry" ]; then
         entry=${IGNORE_FILES[$i]}
-        lines[${#lines[@]}]=$entry
+        files=$((files + 1))
       fi
-      lines[${#lines[@]}]="line ${IGNORE_LINES[$i]}: ${IGNORE_PATTERNS[$i]}"
       i=$((i + 1))
     done
-    note ${lines[@]+"${lines[@]}"}
+    if [ "$files" -eq 1 ]; then
+      where="in $entry"
+    else
+      where="in $files $IGNORE_NAME files under $DOTFILES"
+    fi
+    covers=
+    if [ "$IGNORED_WALK_PARTIAL" -eq 0 ]; then
+      entry='files'
+      [ "$IGNORED_FILE_COUNT" -ne 1 ] || entry='file'
+      if [ "$n" -eq 1 ]; then
+        covers=", and the built tree holds $IGNORED_FILE_COUNT $entry it covers"
+      else
+        covers=", and the built tree holds $IGNORED_FILE_COUNT $entry they cover"
+      fi
+    fi
+    if [ "$n" -eq 1 ]; then
+      report "1 ignore pattern is in force, $where$covers"
+    else
+      report "$n ignore patterns are in force, $where$covers"
+    fi
   fi
 
   # The declarations against $HOME: the detail behind the one line an apply
@@ -6304,13 +6340,36 @@ cmd_doctor() {
   # something with a line saying nothing was said: the notes above it include
   # the one about a file that is one build from unrecoverable, and a reader
   # scanning for the verdict stops at this line.
+  #
+  # And it is a verdict on the checks that ran.  Where the one audit that looks
+  # outside $DOTFILES did not run, the verdict says so and the notes above it
+  # say why: unqualified, it is a clean bill for a home directory nothing
+  # opened, which is the state a first-time reader is in before their first
+  # build.  The qualification is on this branch alone - 'N problems found'
+  # counts what was found and claims nothing about what was not looked at,
+  # where 'no problems found' is read as the report having covered everything.
   if [ "$FINDINGS" -eq 0 ]; then
+    verdict='no problems found'
+    # ', but' before the note count, so the one line does not carry two of them.
+    joiner=', but'
+    if [ "$UNCHECKED_LINKS" -ne 0 ]; then
+      # An empty HOME is one of the four reasons the audit gives up, and it is
+      # the one with no path to print: named the same way, the line comes out
+      # with a doubled space where the home should be.  Reachable, a SHALE_DIR
+      # putting the layers somewhere absolute being all doctor otherwise needs.
+      if [ -n "${HOME-}" ]; then
+        verdict="no problems found, but $HOME was not audited for broken links"
+      else
+        verdict='no problems found, but there was no home directory to audit for broken links'
+      fi
+      joiner=':'
+    fi
     if [ "$NOTES" -eq 0 ]; then
-      report 'no problems found'
+      report "$verdict"
     elif [ "$NOTES" -eq 1 ]; then
-      report 'no problems found, but read the note above'
+      report "$verdict$joiner read the note above"
     else
-      report "no problems found, but read the $NOTES notes above"
+      report "$verdict$joiner read the $NOTES notes above"
     fi
     exit 0
   fi

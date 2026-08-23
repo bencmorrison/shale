@@ -680,17 +680,16 @@ before this syntax existed.
 The file is still composed into `current/`; the pattern changes only what stow links. Two commands
 report what the list is doing. `doctor` names the list where the built tree holds a file it covers,
 and says nothing about a list that is covering nothing — a pattern written before the junk it is for
-is withholding no file from `$HOME` and has nothing to report:
+is withholding no file from `$HOME` and has nothing to report. One line, and it is not counted among
+the notes the closing verdict asks you to read: the list is in force on every run you will ever make,
+so a report that asked you to read about it every time would be asking for ever. What to check it
+against is the count — a number larger than the junk you wrote the list for is a pattern matching
+more than it was meant to — and the file to open is named beside it:
 
 ```
 $ shale doctor
-shale: 3 ignore patterns are in force, and the built tree holds 1 file they cover
-shale:   shale writes them into /home/you/.dotfiles/current/.stow-local-ignore, below stow's own list, so no apply links a path they match
-shale:   a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named above
-shale:   /home/you/.dotfiles/personal/.shale-ignore
-shale:   line 3: .DS_Store
-shale:   line 4: *.swp
-shale:   line 5: Thumbs.db
+shale: 3 ignore patterns are in force, in /home/you/.dotfiles/personal/.shale-ignore, and the built tree holds 1 file they cover
+shale: no problems found
 
 $ shale which .config/nvim/.init.lua.swp
 winner    base  /home/you/.dotfiles/personal/base/.config/nvim/.init.lua.swp

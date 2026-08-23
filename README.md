@@ -410,7 +410,14 @@ and the two stow versions disagree about — so shale asserts nothing about it, 
 [docs/layers.md](docs/layers.md) covers it — nor whether `$HOME` is writable, which fails an apply
 rather than a build, nor whether a leftover `current.old` can be removed, nor an *absolute* link in
 `$HOME` pointing at the built tree's own copy of that same path, which stow refuses and which only
-a hand ever makes. Below, a `vim  vim` line
+a hand ever makes.
+
+That verdict is about the checks that ran. The audit of `$HOME` for broken links is the only one that
+looks outside `~/.dotfiles`, and it needs a built tree, `chkstow`, `readlink` and a `$HOME` to walk.
+Without any one of them doctor says which in a note and closes `no problems found, but /home/you was
+not audited for broken links: read the note above` rather than the bare verdict.
+
+Below, a `vim  vim` line
 was added to the config for a layer that is not
 there, and a stray `~/.dotfiles/old-tmux` directory was created — the first is the problem, the
 second the note:

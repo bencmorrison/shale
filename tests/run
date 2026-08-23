@@ -8383,13 +8383,16 @@ test_doctor_a_home_with_a_trailing_slash_prints_single_slashes() {
 
 # Both locations stow reads: ~/.stowrc, and the one in the directory apply runs
 # from.  Neither can be defended against, hence a note rather than silence.
-# The patterns in force, named where they can be read without opening the built
-# tree.  A pattern that matches more than it was meant to leaves a real file
-# unlinked with every command exiting 0, which is why this is said at all; it is
-# a note and never a finding, because somebody wrote them on purpose.
+# The patterns in force, in the one line that says what they are doing without
+# opening the built tree.  A pattern that matches more than it was meant to
+# leaves a real file unlinked with every command exiting 0, and a count larger
+# than the junk the list was written for is the whole of that symptom; the file
+# to edit is named beside it, or counted where there is more than one.
 #
-# Grouped by file with the line numbers, because they concatenate across clone
-# roots and 'which file do I edit' is the question the list is read with.  The
+# The closing line is the point of the case and is asserted whole.  The list is
+# in force on every run its author will ever make, so counted as a note it put
+# 'read the note above' under every report for ever and taught the reader that
+# the suffix means nothing; uncounted, an expected state reads as clean.  The
 # singular half is asserted too: a report that said '1 ignore patterns are in
 # force' would be the first thing a reader distrusts.
 test_doctor_names_the_ignore_patterns_in_force() {
@@ -8410,36 +8413,30 @@ test_doctor_names_the_ignore_patterns_in_force() {
   assert_status 0 "$shale_status" 'the apply'
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_contains "$shale_out" \
-    'shale: 3 ignore patterns are in force, and the built tree holds 3 files they cover' 'stdout'
-  assert_contains "$shale_out" \
-    "shale:   shale writes them into $HOME/.dotfiles/current/.stow-local-ignore, below stow's own list, so no apply links a path they match" \
-    'stdout'
-  # The qualification is not decoration: without it this headline reads as a
-  # claim about $HOME as it stands, above findings naming links at exactly the
-  # paths it just said nothing links.
-  assert_contains "$shale_out" \
-    'shale:   a link an earlier apply made at such a path stays until it is removed by hand, and any this report found are named above' \
-    'stdout'
-  assert_contains "$shale_out" "shale:   $HOME/.dotfiles/common/.shale-ignore" 'stdout'
-  assert_contains "$shale_out" 'shale:   line 2: .DS_Store' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 3: *.swp' 'stdout'
-  assert_contains "$shale_out" "shale:   $HOME/.dotfiles/local/.shale-ignore" 'stdout'
-  assert_contains "$shale_out" 'shale:   line 1: Thumbs.db' 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+  # Two files, so the line counts them and names the directory they are under
+  # rather than printing both paths: a line naming every file is the multi-line
+  # note again under another name.
+  assert_eq "shale: 3 ignore patterns are in force, in 2 .shale-ignore files under $HOME/.dotfiles, and the built tree holds 3 files they cover
+shale: no problems found" "$shale_out" 'the whole report'
+  # Anchored on the prefix report gives a continuation line: the old note's
+  # per-pattern listing is what made this five lines long, and nothing may bring
+  # it back under a different first line.
+  assert_not_contains "$shale_out" 'shale:   line 2: .DS_Store' 'stdout'
+  assert_not_contains "$shale_out" 'shale:   line 1: Thumbs.db' 'stdout'
+  assert_not_contains "$shale_out" "shale:   $HOME/.dotfiles/common/.shale-ignore" 'stdout'
+  assert_not_contains "$shale_out" 'shale: no problems found, but' 'stdout'
   mkignore local '# nothing here now'
   run_shale doctor
   assert_status 0 "$shale_status" 'the second doctor'
-  assert_contains "$shale_out" \
-    'shale: 2 ignore patterns are in force, and the built tree holds 2 files they cover' 'the second stdout'
+  # One file left with a pattern in it, so it is named.  The other still exists
+  # and holds nothing but a comment, which is no file to edit for a pattern.
+  assert_eq "shale: 2 ignore patterns are in force, in $HOME/.dotfiles/common/.shale-ignore, and the built tree holds 2 files they cover
+shale: no problems found" "$shale_out" 'the whole second report'
   mkignore common '.DS_Store'
   run_shale doctor
   assert_status 0 "$shale_status" 'the third doctor'
-  assert_contains "$shale_out" \
-    'shale: 1 ignore pattern is in force, and the built tree holds 1 file it covers' 'the third stdout'
-  assert_contains "$shale_out" \
-    "shale:   shale writes it into $HOME/.dotfiles/current/.stow-local-ignore, below stow's own list, so no apply links a path it matches" \
-    'the third stdout'
+  assert_eq "shale: 1 ignore pattern is in force, in $HOME/.dotfiles/common/.shale-ignore, and the built tree holds 1 file it covers
+shale: no problems found" "$shale_out" 'the whole third report'
 }
 
 # The silence that goes with it: a tree with no ignore file reports exactly as
@@ -8475,12 +8472,54 @@ test_doctor_names_the_ignore_patterns_where_it_could_not_read_the_tree() {
   doctor_status=$shale_status
   chmod 0755 "$HOME/.dotfiles/current/sub" || fail 'could not restore the mode'
   assert_status 0 "$doctor_status"
-  assert_contains "$doctor_out" 'shale: 1 ignore pattern is in force' 'stdout'
   # The only file the pattern covers is under the directory nothing could open,
-  # so there is no count to state and none is stated.
+  # so there is no count to state and none is stated - and the file is still
+  # named, because that half does not depend on the walk.
+  assert_contains "$doctor_out" \
+    "shale: 1 ignore pattern is in force, in $HOME/.dotfiles/common/.shale-ignore" 'stdout'
   assert_not_contains "$doctor_out" 'the built tree holds' 'stdout'
-  assert_contains "$doctor_out" "shale:   $HOME/.dotfiles/common/.shale-ignore" 'stdout'
-  assert_contains "$doctor_out" 'shale:   line 1: .DS_Store' 'stdout'
+}
+
+# The permanence the one-line form exists to stop.  Shale keeps no state, so
+# 'changed since the last run' is a question it cannot answer and every run sees
+# the list for the first time; a note counted into the closing line therefore put
+# 'read the note above' under every report its author would ever see, and a
+# suffix that is always there is one nobody reads when it means something.
+#
+# Two runs with nothing between them and one after a rebuild, because the state
+# this is about is the one that never changes.  The last half is the delta
+# against a home with no ignore file at all: one line, and the verdict is the
+# same verdict.
+test_doctor_an_ignore_list_in_force_never_asks_to_be_read() {
+  local first
+  conf 'base common/base'
+  mklayer common/base .zshrc
+  mklayer common/base .DS_Store
+  mkignore common '.DS_Store'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_eq "shale: 1 ignore pattern is in force, in $HOME/.dotfiles/common/.shale-ignore, and the built tree holds 1 file it covers
+shale: no problems found" "$shale_out" 'the whole report'
+  first=$shale_out
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the second doctor'
+  assert_eq "$first" "$shale_out" 'the second report'
+  run_shale build
+  assert_status 0 "$shale_status" 'the rebuild'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the third doctor'
+  assert_eq "$first" "$shale_out" 'the report after the rebuild'
+  # The same home with the list taken away: the line goes and nothing else
+  # changes, which is what says the line is all the list costs the report.
+  sandbox_mkdir "$HOME/.dotfiles/common"
+  rm -f "$sandbox_dir/.shale-ignore" || fail 'could not remove the ignore file'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build without the list'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor without the list'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report without the list'
 }
 
 # And the silence that matters more, because README tells a first-time reader to
@@ -8882,12 +8921,13 @@ test_doctor_names_links_left_behind_by_a_new_pattern() {
   assert_contains "$shale_out" 'shale: remove the links named above' 'stdout'
   assert_contains "$shale_out" \
     'shale:   stow skips an ignored path rather than unstowing it, so no build or apply removes one' 'stdout'
-  # The list itself, under the links it covers: this is the report that has a
-  # reason to show which pattern took which file out of $HOME, and the file to
-  # edit is the one thing a reader with a link to remove still has to find.
+  # The list itself, under the links it covers: a reader with a link to remove
+  # still has to find the pattern that took it out of $HOME, and the file
+  # holding it is what this line gives them in place of the listing it used to
+  # print.
   assert_contains "$shale_out" \
-    'shale: 2 ignore patterns are in force, and the built tree holds 2 files they cover' 'stdout'
-  assert_contains "$shale_out" 'shale:   line 2: junk' 'stdout'
+    "shale: 2 ignore patterns are in force, in $HOME/.dotfiles/common/.shale-ignore, and the built tree holds 2 files they cover" 'stdout'
+  assert_not_contains "$shale_out" 'shale:   line 2: junk' 'stdout'
   assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
   # The remedy is the whole of the fix: no rebuild, no reapply.  The directory
   # is resolved and the leaf removed from it, sandbox_leaf refusing to hand back
@@ -9076,7 +9116,7 @@ test_doctor_notes_an_ignore_file_nothing_reads() {
   assert_not_contains "$shale_out" \
     "shale: $HOME/.dotfiles/local/.shale-ignore is read by nothing" 'stdout'
   assert_contains "$shale_out" \
-    'shale: 1 ignore pattern is in force, and the built tree holds 1 file it covers' 'stdout'
+    "shale: 1 ignore pattern is in force, in $HOME/.dotfiles/local/.shale-ignore, and the built tree holds 1 file it covers" 'stdout'
   # Once, however many layers' walks reach it: 'local' descends into 'sub' and
   # 'local/sub' lists it directly, so without the dedup this file is named
   # twice and counted twice.
@@ -9377,20 +9417,61 @@ test_doctor_names_all_the_missing_tools_in_one_run() {
 }
 
 # chkstow degrades the report rather than being a defect in the setup, so it
-# warns and the run still exits 0.
+# warns and the run still exits 0 - and the warning says both of those things
+# itself, because nothing else on screen does.  The package is named because
+# the tool's name is not it: 'apt install chkstow' and 'brew install chkstow'
+# both fail, where the 'stow' package carries chkstow on Debian-family systems
+# and in Homebrew alike.
+#
+# Applied first, so the whole report is this warning and the verdict it
+# qualifies: an unbuilt tree is a note of its own.
 # shellcheck disable=SC2123
 test_doctor_a_missing_chkstow_warns_without_failing() {
   local saved
   conf 'base personal/base'
   mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
   stub_path_without chkstow
   saved=$PATH
   PATH=$stub_path
   run_shale doctor
   PATH=$saved
   assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale: chkstow is not installed' 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  assert_eq "shale: chkstow is not installed, so this report cannot audit $HOME for broken links
+shale:   it stops no build and no apply: what it costs is that one check
+shale:   it ships with GNU stow, so the package to install is 'stow', the same one that provides stow itself
+shale: no problems found, but $HOME was not audited for broken links: read the note above" \
+    "$shale_out" 'the whole report'
+}
+
+# The report that has both lines in it, which is the one they are told apart in:
+# a finding and a note in the same shape, one under the other, with a summary
+# that counts and cannot point.  The words are the whole of the difference, so
+# each is asserted whole and in place.
+#
+# Built first and never applied, so the tree is there and $HOME holds no link:
+# every line below is about the two tools.
+# shellcheck disable=SC2123
+test_doctor_tells_a_missing_chkstow_from_a_missing_stow() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  stub_path_without stow chkstow
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  # One of the two, and the summary says how many without saying which.
+  assert_status 1 "$shale_status"
+  assert_eq "shale: stow is not installed
+shale:   install it with your system package manager: shale installs nothing
+shale: chkstow is not installed, so this report cannot audit $HOME for broken links
+shale:   it stops no build and no apply: what it costs is that one check
+shale:   it ships with GNU stow, so the package to install is 'stow', the same one that provides stow itself
+shale: 1 problem found" "$shale_out" 'the whole report'
 }
 
 # ------------------------------------------ doctor's declared-mode cases
@@ -11366,8 +11447,11 @@ test_doctor_a_broken_link_that_misses_the_built_tree_is_not_a_finding() {
 # arrives with an empty target, misses the built tree, and the audit reports
 # clean on a home full of orphans.  Degraded, so it warns and does not count.
 #
-# The audit runs here, and the note comes from the prerequisite block, so this is
-# also where the two could both speak.  Counted, not just found: one telling.
+# Everything the audit needs is here but the tool itself, so this is where the
+# note from the prerequisite block and the verdict have to agree that it did not
+# run: the link planted below is an orphan nothing names, and a bare 'no
+# problems found' is a clean bill for the home directory holding it.  The note
+# is counted, not just found: one telling.
 # shellcheck disable=SC2123
 test_doctor_a_missing_readlink_warns_without_failing() {
   local saved line notes
@@ -11386,7 +11470,8 @@ test_doctor_a_missing_readlink_warns_without_failing() {
   assert_status 0 "$shale_status"
   assert_contains "$shale_out" \
     'shale: readlink is not installed, and shale reads what a link points at with it' 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  assert_contains "$shale_out" \
+    "shale: no problems found, but $HOME was not audited for broken links: read the note above" 'stdout'
   notes=0
   while IFS= read -r line; do
     case "$line" in
@@ -11452,9 +11537,12 @@ test_doctor_a_missing_readlink_is_reported_before_the_first_build() {
   assert_contains "$shale_out" \
     "shale:   and 'shale which' refuses a path that a layer provides as a symlink" 'stdout'
   # A note, so the machine is reported as sound: severity is what keeps this
-  # uncounted, and being reported at all is what the case is for.
+  # uncounted, and being reported at all is what the case is for.  Sound is not
+  # audited, though - two reasons the walk did not run, this note and the
+  # unbuilt tree above it, and one verdict that says so once.
   assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  assert_contains "$shale_out" \
+    "shale: no problems found, but $HOME was not audited for broken links: read the 2 notes above" 'stdout'
 }
 
 # The other early return, and the same claim: with no chkstow there is no audit
@@ -11472,10 +11560,13 @@ test_doctor_reports_readlink_with_no_chkstow_to_audit_with() {
   run_shale doctor
   PATH=$saved
   assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale: chkstow is not installed' 'stdout'
+  assert_contains "$shale_out" \
+    "shale: chkstow is not installed, so this report cannot audit $HOME for broken links" 'stdout'
   assert_contains "$shale_out" \
     'shale: readlink is not installed, and shale reads what a link points at with it' 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  # Two reasons the audit did not run and one verdict, which says so once.
+  assert_contains "$shale_out" \
+    "shale: no problems found, but $HOME was not audited for broken links: read the 2 notes above" 'stdout'
 }
 
 # The mechanical form of the trap: a chkstow that reports an orphan and exits
@@ -11645,8 +11736,23 @@ test_doctor_says_when_there_is_no_built_tree_to_check_links_against() {
     "shale: there is no built tree at $HOME/.dotfiles/current, so shale cannot tell a link into it from any other broken link" \
     'stdout'
   assert_contains "$shale_out" 'shale:   build one with: shale build' 'stdout'
-  # Uncounted: an unbuilt tree is a state 'shale build' makes, not a defect.
-  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  # The whole report, because the link planted above is an orphan that nothing
+  # in it names: uncounted, an unbuilt tree is a state 'shale build' makes and
+  # not a defect, but the verdict may not then be the unqualified one.  Asserted
+  # as a substring, 'no problems found' matches the qualified line as readily,
+  # and that is how this passed on a report giving a clean bill to a home
+  # directory nothing had opened.
+  assert_eq "shale: there is no built tree at $HOME/.dotfiles/current, so shale cannot tell a link into it from any other broken link
+shale:   build one with: shale build
+shale: no problems found, but $HOME was not audited for broken links: read the note above" \
+    "$shale_out" 'the whole report'
+  # And the build that makes the audit possible takes the qualification with the
+  # note: the everyday state is byte for byte the report it has always been.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the build'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report after the build'
 }
 
 # ------------------------------------------------- doctor's leftover-tree cases
@@ -11894,7 +12000,11 @@ test_doctor_names_the_tree_left_at_current_old_when_current_is_gone() {
   # different words: only one of them holds anything worth keeping.
   assert_contains "$shale_out" \
     "shale: $HOME/.dotfiles/current.new is left over from a build that did not finish" 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found, but read the 3 notes above' 'stdout'
+  # No built tree, so the one audit that looks outside $DOTFILES did not run and
+  # the verdict says which one: unqualified it would be a clean bill for a home
+  # directory whose links nothing opened.
+  assert_contains "$shale_out" \
+    "shale: no problems found, but $HOME was not audited for broken links: read the 3 notes above" 'stdout'
   # Under the build it qualifies, not above it.
   seen=
   while IFS= read -r line; do
@@ -11941,7 +12051,8 @@ test_doctor_names_no_interrupted_build_where_there_cannot_have_been_one() {
     'shale:   it may hold the only copy of a file a divergence replaced, of one that was moved into the built tree rather than composed from a layer, or of one at a path no layer provides any more' \
     'stdout'
   assert_contains "$shale_out" 'shale:   the next build removes it' 'stdout'
-  assert_contains "$shale_out" 'shale: no problems found, but read the 2 notes above' 'stdout'
+  assert_contains "$shale_out" \
+    "shale: no problems found, but $HOME was not audited for broken links: read the 2 notes above" 'stdout'
 }
 
 # And the line that may not be reached from a healthy current: a tree standing
