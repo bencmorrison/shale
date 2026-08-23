@@ -402,7 +402,13 @@ It also unstows everything else, hence the `shale apply` after it, and the walk 
 `info stow` warns "can be prohibitive if your target tree is very large" — so it is a remedy rather
 than what every apply does.
 
-The audit needs `chkstow`, which ships with GNU stow; `doctor` says so and skips it if it is missing.
+The audit needs `chkstow`, which ships with GNU stow, so the package to install is `stow` — the same
+one that provides `stow` itself. Without it `doctor` says so in a note, skips the audit, and closes
+`no problems found, but /home/you was not audited for broken links: read the note above` rather than
+with the bare verdict: a check that did not run is not a clean bill. The same qualification appears
+before your first build, the audit having no built tree to tell a link into it from any other broken
+one.
+
 Running `chkstow -b -t ~` yourself lists more than `doctor` does — every broken symlink under `$HOME`
 as `Bogus link: /home/you/.config/foo/a.conf`, which includes your own layers and anything under
 `current.old`, and a symlink a layer ships that points at nothing is not a fault. Doctor reports only
