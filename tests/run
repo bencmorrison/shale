@@ -1344,8 +1344,8 @@ test_usage_readme_quotes_the_usage_text_verbatim() {
 # The usage text went through cat, so on a machine without one the first command
 # anyone runs printed nothing and exited 0 - the silent success shape, on the one
 # output that is meant to explain the tool.  Nothing in usage runs a tool now,
-# and both paths to it are here: the bare invocation, and the usage a wrong one
-# prints on stderr.
+# and neither does the diagnostic that sends a reader to it: the bare invocation
+# prints the text, and a wrong one prints the two lines pointing at it.
 #
 # run_shale reads shale's output back with cat, under the case's PATH, so this
 # case runs shale itself and reads the captures with PATH restored.
@@ -1383,14 +1383,18 @@ test_usage_prints_without_cat() {
   assert_status 2 "$status" 'the wrong invocation without cat'
   assert_empty "$(cat "$bad_out")" 'the wrong invocation stdout'
   assert_contains "$(cat "$bad_err")" "shale: unknown command 'buld'" 'stderr'
-  assert_contains "$(cat "$bad_err")" 'usage:' 'stderr'
+  assert_contains "$(cat "$bad_err")" "shale:   run 'shale help' for usage" 'stderr'
 }
 
+# Two lines and no more: what was wrong, and where the usage text is.  Asserted
+# whole rather than by fragment, because the thing this pins is the absence of
+# the other twenty lines - a mistyped word used to answer with the entire usage
+# block, which put the one line naming the word off the top of a short terminal.
 test_usage_unknown_command_exits_2() {
   run_shale buld
   assert_status 2 "$shale_status"
-  assert_contains "$shale_err" "shale: unknown command 'buld'" 'stderr'
-  assert_contains "$shale_err" 'usage:' 'stderr'
+  assert_eq "shale: unknown command 'buld'
+shale:   run 'shale help' for usage" "$shale_err" 'stderr'
   assert_empty "$shale_out" 'stdout'
 }
 
@@ -1400,7 +1404,7 @@ test_usage_empty_command_exits_2() {
   run_shale ''
   assert_status 2 "$shale_status"
   assert_contains "$shale_err" "shale: unknown command ''" 'stderr'
-  assert_contains "$shale_err" 'usage:' 'stderr'
+  assert_contains "$shale_err" "shale:   run 'shale help' for usage" 'stderr'
   assert_empty "$shale_out" 'stdout'
 }
 
@@ -1409,7 +1413,7 @@ test_usage_unknown_option_exits_2() {
   assert_status 2 "$shale_status"
   assert_contains "$shale_err" 'shale: unknown option -n' 'stderr'
   assert_contains "$shale_err" 'shale has no options' 'stderr'
-  assert_contains "$shale_err" 'usage:' 'stderr'
+  assert_contains "$shale_err" "shale:   run 'shale help' for usage" 'stderr'
   assert_empty "$shale_out" 'stdout'
 }
 
@@ -1417,7 +1421,7 @@ test_usage_extra_argument_exits_2() {
   run_shale build extra
   assert_status 2 "$shale_status"
   assert_contains "$shale_err" 'shale: build takes no arguments' 'stderr'
-  assert_contains "$shale_err" 'usage:' 'stderr'
+  assert_contains "$shale_err" "shale:   run 'shale help' for usage" 'stderr'
   assert_empty "$shale_out" 'stdout'
 }
 
@@ -1425,7 +1429,30 @@ test_usage_which_without_a_path_exits_2() {
   run_shale which
   assert_status 2 "$shale_status"
   assert_contains "$shale_err" 'shale: which takes exactly one PATH' 'stderr'
+  assert_contains "$shale_err" "shale:   run 'shale help' for usage" 'stderr'
   assert_empty "$shale_out" 'stdout'
+}
+
+# The usage text has one home and it is stdout: 'shale' bare and 'shale help'
+# print it and exit 0, and no wrong invocation prints any of it.  Every arm of
+# usage_error is here, because the reason for each is the same one and a reader
+# reaching for the text after any of them types the same command.  The needles
+# are whole lines of the block, so nothing passes by matching a word the
+# diagnostic itself uses.
+test_usage_a_wrong_invocation_does_not_print_the_usage_text() {
+  local invocation
+  for invocation in 'buld' '-n' 'build extra' 'which'; do
+    # Deliberately unquoted: each entry is the whole argument list.
+    # shellcheck disable=SC2086
+    run_shale $invocation
+    assert_status 2 "$shale_status" "'shale $invocation' exit status"
+    assert_not_contains "$shale_err" 'shale - layered dotfiles builder' \
+      "'shale $invocation' stderr"
+    assert_not_contains "$shale_err" 'usage:' "'shale $invocation' stderr"
+    assert_not_contains "$shale_err" '  shale which PATH     show which layer provides PATH' \
+      "'shale $invocation' stderr"
+    assert_empty "$shale_out" "'shale $invocation' stdout"
+  done
 }
 
 # 'shale which -odd-name' must work without a '--' separator, so nothing may
@@ -5789,6 +5816,12 @@ stub_git() {
 # The assertion on stderr is git's own 'Cloning into' line, which pins both that
 # the clone runs into the temporary name and that nothing passes --quiet; the
 # path is asserted rather than the sentence, which git translates.
+#
+# Shale's own line names that same path first, which is the whole of what makes
+# git's readable: the line git writes carries a '.personal.cloning' nobody
+# configured, on a stream shale neither reads nor rewrites, and until this ran
+# ahead of it the first thing a bootstrap printed was a path found in no config
+# and gone by the time anyone looked for it.
 test_clone_a_missing_root_is_cloned_and_composed() {
   mkrepo personal .zshrc .config/git/config
   conf "base personal $repo_url"
@@ -5796,6 +5829,9 @@ test_clone_a_missing_root_is_cloned_and_composed() {
   assert_status 0 "$shale_status"
   assert_contains "$shale_out" \
     "shale: cloning 'personal' from $repo_url into $HOME/.dotfiles/personal" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   git clones into $HOME/.dotfiles/.personal.cloning and shale renames it, so git's own output names that path" \
+    'stdout'
   assert_contains "$shale_err" "$HOME/.dotfiles/.personal.cloning" 'stderr'
   assert_eq 'personal/.zshrc' "$(cat "$HOME/.dotfiles/personal/.zshrc")" 'the clone'
   assert_eq 'personal/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built tree'
@@ -5822,6 +5858,7 @@ test_clone_one_clone_serves_every_layer_under_its_root() {
   clones=$(grep -c '^clone ' "$git_log")
   assert_eq 1 "$clones" 'git clone invocations'
   assert_eq "shale: cloning 'personal' from $repo_url into $HOME/.dotfiles/personal
+shale:   git clones into $HOME/.dotfiles/.personal.cloning and shale renames it, so git's own output names that path
 shale: composed layer 'base' from $HOME/.dotfiles/personal/base
 shale: composed layer 'wsl' from $HOME/.dotfiles/personal/wsl
 shale: composed layer 'work' from $HOME/.dotfiles/personal/work" "$shale_out" 'stdout'
@@ -5839,7 +5876,9 @@ test_clone_every_missing_root_with_a_url_is_cloned() {
   run_shale build
   assert_status 0 "$shale_status"
   assert_eq "shale: cloning 'personal' from $personal_url into $HOME/.dotfiles/personal
+shale:   git clones into $HOME/.dotfiles/.personal.cloning and shale renames it, so git's own output names that path
 shale: cloning 'work' from $repo_url into $HOME/.dotfiles/work
+shale:   git clones into $HOME/.dotfiles/.work.cloning and shale renames it, so git's own output names that path
 shale: composed layer 'base' from $HOME/.dotfiles/personal
 shale: composed layer 'work' from $HOME/.dotfiles/work" "$shale_out" 'stdout'
   assert_eq 'personal/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the built tree'
@@ -6212,6 +6251,32 @@ test_apply_links_every_file_of_the_built_tree_into_home() {
     "$HOME/.dotfiles/current/.config/git/config"
   assert_eq 'personal/base/.zshrc' "$(cat "$HOME/.zshrc")" 'the linked file'
   assert_eq 'local/.netrc' "$(cat "$HOME/.netrc")" 'the linked file'
+}
+
+# An apply over layers nothing has touched prints the same layer lines as the
+# one before it, and that is the intended output rather than an oversight.  The
+# lines are true of every run: this apply did compose each layer, whatever the
+# result turned out to equal.  Saying nothing instead would mean deciding the
+# tree just composed matches the one it replaced, and nothing decides that
+# without comparing the two trees file by file, contents included - which is the
+# one thing shale never does with a file it copies.  A guess from mtimes is not
+# the same claim: a checkout, a 'cp -p' or an untarred backup restores a file's
+# old timestamp with new bytes under it, and the wrong guess suppresses the only
+# line saying which layers this apply used and where they came from.
+test_apply_repeats_the_layer_lines_on_an_unchanged_rerun() {
+  local first
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .netrc
+  run_shale apply
+  assert_status 0 "$shale_status"
+  first=$shale_out
+  assert_eq "shale: composed layer 'base' from $HOME/.dotfiles/personal/base
+shale: composed layer 'local' from $HOME/.dotfiles/local" "$first" 'the first apply stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the second apply'
+  assert_eq "$first" "$shale_out" 'the second apply stdout'
+  assert_empty "$shale_err" 'the second apply stderr'
 }
 
 # What --no-folding buys, and the only assertion that can tell it took effect:

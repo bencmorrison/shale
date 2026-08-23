@@ -28,7 +28,9 @@ exercised rather than assumed. WSL is Linux for shale's purposes. No other platf
 
 ## Install
 
-Copy the script to any directory on your `PATH`:
+Clone this repository, and copy the script from the clone to any directory on your `PATH`. These
+commands and the bootstrap below run from the clone's root, which is where `shale` and the example
+configs are:
 
 ```sh
 mkdir -p ~/.local/bin
@@ -49,9 +51,9 @@ command: shale is one file, and the copy you have is whatever the repository hel
 
 ```sh
 mkdir -p ~/.dotfiles && chmod 0700 ~/.dotfiles
-cp examples/wsl-work.conf ~/.dotfiles/shale.conf
-$EDITOR ~/.dotfiles/shale.conf     # list this machine's layers
-mkdir -p ~/.dotfiles/local         # a layer with no url is yours to create
+cp examples/wsl-work.conf ~/.dotfiles/shale.conf   # examples/ is in this repository
+$EDITOR ~/.dotfiles/shale.conf                     # list this machine's layers
+mkdir -p ~/.dotfiles/local                         # a layer with no url is yours to create
 ```
 
 Declare any mode that matters before that first apply. Git records no permission bits for a
