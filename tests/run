@@ -3759,6 +3759,362 @@ test_build_warns_when_the_built_tree_was_edited() {
   assert_missing "$HOME/.dotfiles/current.old/junk"
 }
 
+# The whole recovery, driven by nothing but what shale printed.  Every path the
+# case copies is read back out of build's stderr and doctor's stdout rather than
+# written here, so a message that stops naming a path fails this case instead of
+# a user's afternoon: this is the walk #168 came out of, where the only line
+# that ever named the file was the first one, and the two commands a reader runs
+# next closed the window without a word.
+#
+# Two files are edited and one is copied out, which is what makes the last build
+# still worth a line: the tree it removes holds the one that was not, and the
+# announcement is about a tree holding something the layers cannot produce
+# again.  It is also the honest end of the walk - the file nobody copied out is
+# gone, and the messages are what decided which.
+test_build_a_diverged_file_is_recovered_by_following_the_messages() {
+  local line kept layer tree named
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .vimrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  # Dated, so that the edits below are newer than the built copies by more than
+  # a filesystem's timestamp resolution, whatever that resolution is.
+  touch -t 200001010000 "$sandbox_dir/.zshrc" "$sandbox_dir/.vimrc" ||
+    fail 'could not date the layer files'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  # A build with nothing at current.old says nothing new: the line below is
+  # about a tree that was already there.
+  assert_empty "$shale_err" 'the first apply stderr'
+  # The writes an editor makes through ~/.zshrc and ~/.vimrc, which are links
+  # into the tree.
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  # '>|': the apply above put these files here, and editing them is the point.
+  printf 'HAND EDITED\n' >|"$sandbox_path" || fail 'could not edit the built tree'
+  sandbox_leaf "$sandbox_dir" .vimrc
+  printf 'ALSO EDITED\n' >|"$sandbox_path" || fail 'could not edit the built tree'
+  assert_eq 'HAND EDITED' "$(cat "$HOME/.zshrc")" 'through the link'
+
+  # One: the build that replaces the edits says where it put what it replaced,
+  # once per file.
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that keeps the tree'
+  kept=
+  layer=
+  named=
+  while IFS= read -r line; do
+    case "$line" in
+      *'/.zshrc was newer than '*) layer=${line##* was newer than } ;;
+      *'what was there is kept at '*)
+        named="$named${named:+ }${line##*what was there is kept at }"
+        case "$line" in
+          *'/.zshrc until the next build'*)
+            kept=${line#*what was there is kept at }
+            kept=${kept%% until the next build*}
+            ;;
+        esac
+        ;;
+    esac
+  done <<EOF
+$shale_err
+EOF
+  assert_eq "$HOME/.dotfiles/current.old/.zshrc" "$kept" 'the path the build named'
+  assert_eq "$HOME/.dotfiles/personal/base/.zshrc" "$layer" 'the layer the build named'
+  assert_eq 'HAND EDITED' "$(cat "$kept")" 'the kept copy'
+  # Both files, so the one left behind below was offered too.
+  assert_contains "$named" '/.vimrc until the next build' 'the paths the build named'
+
+  # Two: doctor, which is what a reader runs before touching anything, says the
+  # window is still open and names the directory the files above are in.
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  tree=
+  while IFS= read -r line; do
+    case "$line" in
+      'shale: '*' is where a build leaves the tree it replaced')
+        tree=${line#shale: }
+        tree=${tree% is where a build leaves the tree it replaced}
+        ;;
+    esac
+  done <<EOF
+$shale_out
+EOF
+  assert_eq "$HOME/.dotfiles/current.old" "$tree" 'the directory doctor named'
+  # The two messages have to agree about where the file is, or following them
+  # both lands nowhere.
+  case "$kept" in
+    "$tree"/*) ;;
+    *) fail "the build named $kept, which is not under the $tree doctor named" ;;
+  esac
+  assert_contains "$shale_out" \
+    'shale:   copy anything in it you want to keep into a layer first' 'stdout'
+
+  # Three: that line, carried out with the two paths above and no others.
+  cp "$kept" "$layer" || fail "could not copy $kept to $layer"
+
+  # Four: the build that closes the window says so before it does it - the tree
+  # going away still holds the .vimrc nobody copied out - and the .zshrc is in a
+  # layer by then rather than in that tree.
+  run_shale build
+  assert_status 0 "$shale_status" 'the reaping build'
+  assert_contains "$shale_err" \
+    "shale: removing $tree, where a build leaves the tree it replaced" \
+    'the reaping build stderr'
+  assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the rebuilt file'
+  assert_eq 'HAND EDITED' "$(cat "$HOME/.zshrc")" 'through the link'
+  # The one that was not copied out is gone, which is what the messages were
+  # for: 'ALSO EDITED' existed nowhere else.
+  assert_eq 'personal/base/.vimrc' "$(cat "$HOME/.vimrc")" 'the file nobody kept'
+
+  # And the report is clean again: what stands at the name now is this build's
+  # own, holding the copies the recovered file replaced - the layers account for
+  # every one of them, so there is nothing left to say.
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the reap'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report after the reap'
+}
+
+# The announcement is about what was at the name when the build started and
+# about nothing else.  A build that found nothing there says nothing new,
+# whatever it does with the name afterwards - and it does: this same build makes
+# a current.old of its own in the swap and reaps that one without a word, the
+# tree going away then being the one it has just composed a replacement for.
+#
+# Both shapes that are nobody's build, because the two are answered by different
+# halves of the check.  Anything at the name that is not a directory is not a
+# tree shale composed, so nothing walks it and nothing accounts for it; a
+# directory is walked, and a file in it at a path no layer provides is the same
+# answer arrived at the long way.
+test_build_announces_only_a_current_old_it_did_not_make() {
+  local reaped
+  reaped="shale: removing $HOME/.dotfiles/current.old, where a build leaves the tree it replaced"
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the first build'
+  assert_empty "$shale_err" 'the first build stderr'
+  assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
+  sandbox_write "$HOME/.dotfiles" current.old 'left behind by an older build'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that reaps the stray file'
+  assert_eq "$reaped" "$shale_err" 'the stderr of the build that reaps the file'
+  # Nothing kept it: this build's own current.old went in the reap below the
+  # swap, where the tree replaced was the one it composed the replacement for.
+  assert_missing "$HOME/.dotfiles/current.old" 'after the build that reaps the file'
+  sandbox_write "$HOME/.dotfiles/current.old" notes 'the only copy of something'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that reaps the stray tree'
+  assert_eq "$reaped" "$shale_err" 'the stderr of the build that reaps the tree'
+  assert_missing "$HOME/.dotfiles/current.old" 'after the build that reaps the tree'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build after'
+  assert_empty "$shale_err" 'the build after stderr'
+}
+
+# What doctor names, the build that removes it answers for.  In both shapes
+# doctor calls an interrupted build, its note tells the reader to copy anything
+# they want out of this tree first; a build that then took it away without a
+# word would be the asymmetry #168 was about, one state along.  Neither tree
+# here holds anything the layers cannot produce again, which is what makes these
+# two arms about the shape rather than about the contents.
+test_build_announces_the_reap_of_a_tree_an_interrupted_build_left() {
+  local reaped
+  reaped="shale: removing $HOME/.dotfiles/current.old, where a build leaves the tree it replaced"
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the first build'
+  assert_empty "$shale_err" 'the first build stderr'
+  # Shape one: nothing at current, which is what a kill between the two renames
+  # leaves and what a hand that removed current leaves too.
+  sandbox_mkdir "$HOME/.dotfiles"
+  sandbox_leaf "$sandbox_dir" current.old new
+  mv "$HOME/.dotfiles/current" "$sandbox_path" || fail 'could not move the tree aside'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor before the reap'
+  assert_contains "$shale_out" \
+    'shale:   copy anything in it you want to keep into a layer first' 'doctor stdout'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that reaps it'
+  assert_eq "$reaped" "$shale_err" 'the stderr of the build after the removal'
+  assert_missing "$HOME/.dotfiles/current.old" 'after that build'
+  # Shape two: current is a tree again, and the scratch tree a killed compose
+  # left is still beside it.
+  cp -RPp "$HOME/.dotfiles/current" "$HOME/.dotfiles/current.old" ||
+    fail 'could not copy the tree aside'
+  sandbox_write "$HOME/.dotfiles/current.new" .zshrc 'half of a composed tree'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor before the second reap'
+  assert_contains "$shale_out" \
+    'shale:   copy anything in it you want to keep into a layer first' 'doctor stdout'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that reaps both'
+  assert_eq "$reaped" "$shale_err" 'the stderr of the build after the scratch tree'
+  assert_missing "$HOME/.dotfiles/current.new" 'after that build'
+  # And with neither shape in play, the same tree is reaped in silence: what
+  # was different was the state, not what the tree held.
+  cp -RPp "$HOME/.dotfiles/current" "$HOME/.dotfiles/current.old" ||
+    fail 'could not copy the tree aside'
+  run_shale build
+  assert_status 0 "$shale_status" 'the ordinary build'
+  assert_empty "$shale_err" 'the ordinary build stderr'
+}
+
+# A symlink in the kept tree is a leaf, and two symlinks are the one pair with
+# no answer here: there is no portable way to read the age of a link rather than
+# of what it points at, and a layer retargeting its own link is an everyday
+# change.  Every other pairing is a difference in kind, and a difference in kind
+# is not two versions of one file - what the next build puts there is not a copy
+# of what is going away, whatever the two timestamps say.
+test_build_a_kept_symlink_counts_unless_the_layer_ships_one_too() {
+  local reaped
+  reaped="shale: removing $HOME/.dotfiles/current.old, where a build leaves the tree it replaced"
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  ln -s .zshrc "$sandbox_dir/.zprofile" || fail 'could not make the layer link'
+  run_shale build
+  assert_status 0 "$shale_status" 'the first build'
+  assert_empty "$shale_err" 'the first build stderr'
+  # A link where the layer ships a link: nothing to compare, and nothing to say.
+  sandbox_mkdir "$HOME/.dotfiles/current.old"
+  sandbox_leaf "$sandbox_dir" .zprofile new
+  ln -s elsewhere "$sandbox_path" || fail 'could not make the kept link'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that reaps the retargeted link'
+  assert_empty "$shale_err" 'the stderr of the build that reaps the link'
+  # A link where the layer ships a file, which is the shape a hand-made link in
+  # the built tree leaves: where it pointed is recorded nowhere else.
+  sandbox_mkdir "$HOME/.dotfiles/current.old"
+  sandbox_leaf "$sandbox_dir" .zshrc new
+  ln -s elsewhere "$sandbox_path" || fail 'could not make the kept link'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that reaps the link over a file'
+  assert_eq "$reaped" "$shale_err" \
+    'the stderr of the build that reaps the link over a file'
+  # And a link at a path no layer provides at all.
+  sandbox_mkdir "$HOME/.dotfiles/current.old"
+  sandbox_leaf "$sandbox_dir" .vimrc new
+  ln -s elsewhere "$sandbox_path" || fail 'could not make the orphaned link'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that reaps the orphaned link'
+  assert_eq "$reaped" "$shale_err" 'the stderr of the build that reaps the orphan'
+}
+
+# The data-loss shape one kind along from the one #168 was reported for, and why
+# kind is asked before age: the edit is kept, the layer then turns that path into
+# a directory of its own - a .zshrc becoming a .zshrc/ of fragments is the
+# ordinary way that happens - and there is no age comparison left to reach.  Read
+# as accounted for, the kept copy went in silence, with 'no problems found' in
+# between.
+test_doctor_and_build_name_a_kept_file_the_layer_turned_into_a_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  # Dated, so that the edit below is newer than the built copy by more than a
+  # filesystem's timestamp resolution, whatever that resolution is.
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  # '>|': the apply above put this file here, and editing it is the point.
+  printf 'HAND EDITED\n' >|"$sandbox_path" || fail 'could not edit the built tree'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that keeps the tree'
+  assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
+  # The refactor, which is what takes the comparison away: the path the kept copy
+  # is at is a directory in the layer now.
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  mklayer personal/base .zshrc/00-path
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+  run_shale build
+  assert_status 0 "$shale_status" 'the reaping build'
+  assert_contains "$shale_err" \
+    "shale: removing $HOME/.dotfiles/current.old, where a build leaves the tree it replaced" \
+    'the reaping build stderr'
+  assert_eq 'personal/base/.zshrc/00-path' \
+    "$(cat "$HOME/.dotfiles/current/.zshrc/00-path")" 'the rebuilt tree'
+}
+
+# The same, the other way about: the kept tree holds a file and the layer ships a
+# symlink at that path now.  What lands is a link, and the file it replaces is
+# the last copy of its own contents.
+test_build_names_a_kept_file_the_layer_turned_into_a_symlink() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .zprofile
+  run_shale build
+  assert_status 0 "$shale_status" 'the first build'
+  assert_empty "$shale_err" 'the first build stderr'
+  # Every other path in the kept tree is the built tree's own copy at the built
+  # tree's own age, so the one change below is the only thing being measured.
+  sandbox_write "$HOME/.dotfiles/current.old" .zprofile 'the only copy'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .zprofile
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  ln -s .zshrc "$sandbox_path" || fail 'could not make the layer link'
+  run_shale build
+  assert_status 0 "$shale_status" 'the reaping build'
+  assert_eq \
+    "shale: removing $HOME/.dotfiles/current.old, where a build leaves the tree it replaced" \
+    "$shale_err" 'the reaping build stderr'
+}
+
+# And the kind question asked of a directory, which is the one a per-file walk
+# cannot reach.  A build composes a layer's symlink as a leaf, so a layer that
+# provides this path as a link replaces the whole kept subtree rather than
+# merging into it - and where what the link points at happens to hold the same
+# names, every file below reads as though the layers still had all of it.  The
+# decoy is dated to the built copy's own age on purpose: if this case ever
+# passes on the timestamps it has stopped measuring the kind.
+test_doctor_and_build_name_a_kept_directory_the_layer_turned_into_a_symlink() {
+  conf 'base personal/base'
+  mklayer personal/base .config/foo
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config"
+  touch -t 200001010000 "$sandbox_dir/foo" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status" 'the first build'
+  assert_empty "$shale_err" 'the first build stderr'
+  # The built tree copied aside, and the only copy of something put inside the
+  # directory that is about to stop being one.
+  cp -RPp "$HOME/.dotfiles/current" "$HOME/.dotfiles/current.old" ||
+    fail 'could not copy the tree aside'
+  sandbox_write "$HOME/.dotfiles/current.old/.config" foo 'the only copy'
+  touch -t 200001010000 "$sandbox_path" || fail 'could not date the kept copy'
+  # What the layer link points at, holding a foo of its own at the same age as
+  # the copy in the built tree, so no age comparison anywhere has anything to
+  # say and every child of the kept directory resolves through the link.
+  mklayer personal/base elsewhere/foo
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/elsewhere"
+  touch -t 200001010000 "$sandbox_dir/foo" || fail 'could not date the decoy'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .config
+  rm -rf "$sandbox_path" || fail 'could not remove the layer directory'
+  ln -s elsewhere "$sandbox_path" || fail 'could not make the layer link'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+  run_shale build
+  assert_status 0 "$shale_status" 'the reaping build'
+  assert_contains "$shale_err" \
+    "shale: removing $HOME/.dotfiles/current.old, where a build leaves the tree it replaced" \
+    'the reaping build stderr'
+  # What the build put there, which is the link and not a directory: the kept
+  # subtree was replaced whole, exactly as the note said it would be.
+  assert_symlink_to "$HOME/.dotfiles/current/.config" \
+    "$HOME/.dotfiles/current/elsewhere"
+}
+
 # The same state, reached with nothing edited anywhere.  Removing an override is
 # an everyday act, and the copy that wins the path in its place can be older than
 # the built copy it replaces - two clone roots pulled minutes apart is enough.
@@ -3772,6 +4128,10 @@ test_build_warns_when_the_built_tree_was_edited() {
 test_build_does_not_blame_an_edit_when_the_winning_layer_changes() {
   local older newer message
   message='shale:   either something wrote or moved a file into the built tree, or a different layer now provides this path and its copy is older'
+  # Every build below but the first reaps the tree the build before it kept, and
+  # none of them says so: what is in each of those trees is a layer's own copy
+  # of the one path, at the age that layer's file still has, so there is nothing
+  # in one that the layers do not account for.
   conf 'personal personal/base' 'work work/base'
   mklayer personal/base .zshrc
   mklayer work/base .zshrc
@@ -3924,6 +4284,10 @@ test_build_keeps_every_older_file_and_forgets_them_next_build() {
   assert_eq 'local/.zshrc' "$(cat "$HOME/.dotfiles/current/.zshrc")" 'the rebuilt file'
   run_shale build
   assert_status 0 "$shale_status"
+  # Silent, and the honest limit of the announcement: the files going away here
+  # are the ones moved into the tree, and they are *older* than the layer copies
+  # that replaced them - which is the shape an ordinary rebuild leaves too, and
+  # is why doctor names them in the window before the build rather than after.
   assert_empty "$shale_err" 'the next build stderr'
   assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
 }
@@ -11287,11 +11651,14 @@ test_doctor_says_when_there_is_no_built_tree_to_check_links_against() {
 
 # ------------------------------------------------- doctor's leftover-tree cases
 #
-# The two names a build works under, both of which only a build that did not
-# finish leaves behind - and current.old also every build that replaced a file
-# not matching its layer copy.  Notes, not findings: neither stops a build, and
-# the next build removes both, which is also why nothing else in the report
-# mentions them - the stray scan skips both names because shale owns them.
+# The two names a build works under.  current.new is left only by a build that
+# did not finish; current.old also by every build that replaced a file not
+# matching its layer copy, which is one of the everyday ones.  Notes, not
+# findings: neither stops a build, and the next build removes both - and that
+# removal is exactly why current.old is worth a line, since the build that kept
+# it called what is in it recoverable 'until the next build' and doctor is the
+# command a reader runs in between.  Nothing else in the report mentions either
+# name: the stray scan skips both, shale owning them.
 
 test_doctor_notes_a_leftover_scratch_tree() {
   conf 'base personal/base'
@@ -11325,19 +11692,21 @@ test_doctor_notes_a_leftover_scratch_tree() {
   assert_eq 'shale: no problems found' "$shale_out" 'the whole report after the build'
 }
 
-# The tree a build keeps deliberately, and the state that made 'no problems
-# found' unreachable: editing a layer is what keeps it, so a report that named
-# it said something on every run for two builds after every edit.  The build
-# that kept it is what names the file it kept - here, the hand-edited copy - and
-# the next build reaps the tree, so doctor has nothing of its own to add.
-test_doctor_says_nothing_about_the_tree_the_last_build_kept() {
+# The tree a build keeps deliberately, which is the window the build that kept
+# it called recoverable 'until the next build'.  Doctor is the command a reader
+# runs in that window - and answering 'no problems found' there is what let the
+# next apply take the hand-edited copy with nothing having said it was going.
+#
+# The note goes when the tree does, which is what makes it a note about what is
+# on disk rather than a line about the setup.
+test_doctor_names_the_tree_a_divergence_kept_until_a_build_reaps_it() {
   conf 'base personal/base' 'local local'
   mklayer personal/base .zshrc
   mklayer local .zshrc
   sandbox_mkdir "$HOME/.dotfiles/local"
   touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
-  # Applied, so that a clean report here is the bare verdict: an unbuilt tree is
-  # a note of its own.
+  # Applied, so that the report below is this note and nothing else: an unbuilt
+  # tree is a note of its own.
   run_shale apply
   assert_status 0 "$shale_status" 'the first apply'
   assert_missing "$HOME/.dotfiles/current.old" 'after a clean build'
@@ -11348,21 +11717,55 @@ test_doctor_says_nothing_about_the_tree_the_last_build_kept() {
   run_shale build
   assert_status 0 "$shale_status" 'the build that keeps the tree'
   assert_eq 'HAND EDITED' "$(cat "$HOME/.dotfiles/current.old/.zshrc")" 'the kept copy'
-  # The signal that survives this silence, and the one that names the path: the
-  # build itself, at the moment it keeps the tree.
+  # The message the note has to still be true of: the build names the file, and
+  # names the deadline this note is about.
   assert_contains "$shale_err" \
     "shale:   the layer copy wins; what was there is kept at $HOME/.dotfiles/current.old/.zshrc until the next build, to copy into a layer if it was your edit" \
     'the build stderr'
   run_shale doctor
   assert_status 0 "$shale_status"
-  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   it may hold the only copy of a file a divergence replaced, of one that was moved into the built tree rather than composed from a layer, or of one at a path no layer provides any more' \
+    'stdout'
+  assert_contains "$shale_out" 'shale:   the next build removes it' 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   copy anything in it you want to keep into a layer first' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
   assert_empty "$shale_err" 'stderr'
+  # A note and not a finding, and no cause guessed at: an edited layer leaves
+  # the same tree, and a reader told their build replaced a file that did not
+  # match goes looking for damage that is not there.
+  assert_not_contains "$shale_out" 'did not match the layer copy' 'stdout'
+  assert_not_contains "$shale_out" 'do not match the layer copies' 'stdout'
+  assert_not_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  # And silent again once there is nothing to be silent about - after a build
+  # that says what it is taking away, this tree being one nothing else holds a
+  # copy of.
+  run_shale build
+  assert_status 0 "$shale_status" 'the reaping build'
+  assert_eq \
+    "shale: removing $HOME/.dotfiles/current.old, where a build leaves the tree it replaced" \
+    "$shale_err" 'the reaping build stderr'
+  assert_missing "$HOME/.dotfiles/current.old" 'after the reaping build'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the reap'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report after the reap'
+  assert_empty "$shale_err" 'stderr after the reap'
 }
 
-# The everyday loop the report has to stay quiet through: edit one line of one
-# layer file, rebuild, and every path that layer provides is newer than the copy
-# the build replaces, so the build keeps current.old.  Doing what README
-# recommends may not cost a reader their clean report.
+# The everyday loop both of them have to stay quiet through: edit one line of
+# one layer file, rebuild, and every path that layer provides is newer than the
+# copy the build replaces, so the build keeps current.old.  Doing what README
+# recommends may not cost a reader their clean report, and the build that clears
+# it a fortnight of edits later may not start talking either.
+#
+# It is the shape of the tree that buys that silence rather than its name: every
+# copy in it is the layer's own file from the build before, so it is older than
+# the layer copy that replaced it and never newer, and nothing in it is at a
+# path the layers have dropped.  The two cases below this one are the same tree
+# with something in it that is not, and they are the ones that speak.
 test_doctor_says_nothing_about_the_tree_an_ordinary_rebuild_kept() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
@@ -11382,13 +11785,27 @@ test_doctor_says_nothing_about_the_tree_an_ordinary_rebuild_kept() {
   assert_status 0 "$shale_status"
   assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
   assert_empty "$shale_err" 'stderr'
+  # And the build that reaps it says nothing either: what is going away is the
+  # layers' own files, which the layers still have.
+  run_shale build
+  assert_status 0 "$shale_status" 'the reaping build'
+  assert_empty "$shale_err" 'the reaping build stderr'
+  assert_missing "$HOME/.dotfiles/current.old" 'after the reaping build'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the reap'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report after the reap'
 }
 
-# And where that silence would be wrong: the tree is reaped by the next build,
-# so it is worth a line exactly where there is not going to be one.  The note
-# says what happened rather than reporting a fault - an edited layer is the
-# ordinary cause, and a reader told their build 'replaced a file that did not
-# match' goes looking for damage that is not there.
+# The one line of the note that is not the same in every state: no build is
+# going to run, so the deadline the rest of it names is not coming, and a reader
+# told 'the next build removes it' would be told to fix the findings above by a
+# report that had just promised the fix reaps their file.  The tree here is
+# empty, so it holds nothing unaccounted for and an ordinary report would say
+# nothing about it: what is not coming is the build, and no walk can see that.
+# The rest is the same words as after any other build, because nothing on disk
+# says what put the tree there - an edited layer is the ordinary cause, and a
+# reader told their build 'replaced a file that did not match' goes looking for
+# damage that is not there.
 test_doctor_names_the_kept_tree_no_build_will_clear() {
   local line first
   conf 'base personal/base'
@@ -11403,14 +11820,17 @@ test_doctor_names_the_kept_tree_no_build_will_clear() {
   assert_contains "$shale_out" \
     "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
   assert_contains "$shale_out" \
-    'shale:   the last build kept it because the copies it replaced were not the ones the layers now provide' \
+    'shale:   it may hold the only copy of a file a divergence replaced, of one that was moved into the built tree rather than composed from a layer, or of one at a path no layer provides any more' \
     'stdout'
-  # Neither direction of the comparison is named: an edited layer keeps this
-  # tree and so does a file moved into the built tree, and the line under this
-  # one is only worth reading if the cause was the second.
+  # Neither direction of the comparison is named, and neither origin: an edited
+  # layer keeps this tree, a file moved into the built tree keeps it, and a kill
+  # after the swap leaves the same directory behind.
   assert_not_contains "$shale_out" 'which is what editing a layer does' 'stdout'
+  assert_not_contains "$shale_out" 'the last build kept it because' 'stdout'
   assert_contains "$shale_out" \
     'shale:   no build will run until the problems above are fixed, so it stays where it is' 'stdout'
+  # And not both: the deadline and its absence are the same line of the note.
+  assert_not_contains "$shale_out" 'shale:   the next build removes it' 'stdout'
   assert_contains "$shale_out" \
     'shale:   copy anything in it you want to keep into a layer first' 'stdout'
   assert_not_contains "$shale_out" 'did not match the layer copy' 'stdout'
@@ -11439,6 +11859,11 @@ EOF
 # The composed tree still standing at current.new is what says a build was
 # interrupted rather than that a hand removed current, and it is the only thing
 # that does; the case below is the same shape without it.
+#
+# The tree here is a current moved aside whole, so every copy in it is the
+# layers' own at the layers' own age and nothing in it is unaccounted for.  That
+# is deliberate: this shape is named whatever it holds, because $HOME is linked
+# against it and no build stands between the reader and the loss.
 test_doctor_names_the_tree_left_at_current_old_when_current_is_gone() {
   local line seen
   conf 'base personal/base'
@@ -11460,7 +11885,7 @@ test_doctor_names_the_tree_left_at_current_old_when_current_is_gone() {
     "shale:   a build was interrupted between moving it there and moving the tree it had composed into place, which is still at $HOME/.dotfiles/current.new" \
     'stdout'
   assert_contains "$shale_out" \
-    'shale:   it may hold the only copy of anything that was moved into the built tree rather than composed from a layer' \
+    'shale:   it may hold the only copy of a file a divergence replaced, of one that was moved into the built tree rather than composed from a layer, or of one at a path no layer provides any more' \
     'stdout'
   assert_contains "$shale_out" 'shale:   the next build removes it' 'stdout'
   assert_contains "$shale_out" \
@@ -11513,17 +11938,101 @@ test_doctor_names_no_interrupted_build_where_there_cannot_have_been_one() {
     "shale:   there is nothing at $HOME/.dotfiles/current" 'stdout'
   assert_not_contains "$shale_out" 'a build was interrupted' 'stdout'
   assert_contains "$shale_out" \
-    'shale:   it may hold the only copy of anything that was moved into the built tree rather than composed from a layer' \
+    'shale:   it may hold the only copy of a file a divergence replaced, of one that was moved into the built tree rather than composed from a layer, or of one at a path no layer provides any more' \
     'stdout'
   assert_contains "$shale_out" 'shale:   the next build removes it' 'stdout'
   assert_contains "$shale_out" 'shale: no problems found, but read the 2 notes above' 'stdout'
 }
 
-# Nothing has looked inside either tree, so nothing may say what is in one.  An
-# empty current.old is the state a build that composed no file at all leaves,
-# and 'copy anything in it you want to keep' is the whole of what a report that
-# did not walk it can offer.  The blocked build is what makes the note print at
-# all: with one to reap the tree there is nothing to say about it.
+# And the line that may not be reached from a healthy current: a tree standing
+# there is a rename that finished, whatever else is beside it, so a current.new
+# left by some earlier killed compose says nothing about how this current.old
+# got here.  The scratch tree is named by its own note above; claiming a build
+# was interrupted between the two renames would be doctor reading one state off
+# another.
+test_doctor_names_no_interrupted_build_beside_a_tree_that_is_there() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .zshrc
+  mklayer local .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/local"
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  sandbox_mkdir "$HOME/.dotfiles/current"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  # '>|': the apply above put this file here, and editing it is what keeps the
+  # tree below - the note has to be printed for this case to measure its lines.
+  printf 'HAND EDITED\n' >|"$sandbox_path" || fail 'could not edit the built tree'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build that keeps the tree'
+  assert_exists "$HOME/.dotfiles/current/.zshrc" 'the built tree'
+  sandbox_write "$HOME/.dotfiles/current.new" .zshrc 'half of a composed tree'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
+  assert_not_contains "$shale_out" 'a build was interrupted' 'stdout'
+  assert_not_contains "$shale_out" \
+    "shale:   there is nothing at $HOME/.dotfiles/current" 'stdout'
+  # The scratch tree is still reported, in the words that are true of it.
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.new is left over from a build that did not finish" 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the 2 notes above' 'stdout'
+}
+
+# The other half of 'no layer provides it', which is only as good as the layers
+# being all here.  While a clone is pending every path the layer being fetched
+# provides looks dropped, and the pending clone is a note rather than a finding -
+# so nothing stops doctor reaching this walk, and a walk that counted them would
+# name this tree on every run between writing the config line and fetching it.
+# What survives the wait is the age comparison, which is about the layers that
+# are here.
+test_doctor_says_nothing_about_a_dropped_path_while_a_clone_is_pending() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  # Dated, so that the touch below is newer than the kept copy by more than a
+  # filesystem's timestamp resolution, whatever that resolution is.
+  touch -t 200001010000 "$sandbox_dir/.zshrc" || fail 'could not date the layer file'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  # The built tree copied aside, so every path in it is accounted for, and one
+  # path added that no layer provides.
+  cp -RPp "$HOME/.dotfiles/current" "$HOME/.dotfiles/current.old" ||
+    fail 'could not copy the tree aside'
+  sandbox_write "$HOME/.dotfiles/current.old" .vimrc 'the only copy'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor with every layer here'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
+  # The same tree, with a layer still to be fetched.
+  conf 'base personal/base' 'work work git@example.invalid:me/work.git'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor with a clone pending'
+  assert_contains "$shale_out" \
+    "shale: layer 'work' has no directory at $HOME/.dotfiles/work yet" 'stdout'
+  assert_not_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+  # And what the wait does not take away: a copy newer than the layer file that
+  # replaced it is about a layer that is here.
+  sandbox_mkdir "$HOME/.dotfiles/current.old"
+  sandbox_leaf "$sandbox_dir" .zshrc
+  touch "$sandbox_path" || fail 'could not date the kept copy'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the kept copy was touched'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/current.old is where a build leaves the tree it replaced" 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the 2 notes above' 'stdout'
+}
+
+# The walk answers one question and keeps no answer, so the note may not say what
+# is in the tree.  An empty current.old is the state a build that composed no
+# file at all leaves, and 'copy anything in it you want to keep' is the whole of
+# what a report holding one bit about it can offer - 'may hold' is the strongest
+# thing the note says.  The blocked build is what makes the note print at all
+# here: an empty tree holds nothing the layers cannot produce again, so with a
+# build coming to reap it there is nothing to say about it.
 test_doctor_claims_no_contents_for_a_tree_it_has_not_walked() {
   conf 'base personal/base'
   mklayer personal/base .zshrc
@@ -15894,6 +16403,9 @@ test_meta_noclobber_overrides_are_allow_listed() {
     # shale's own build put this file there, and editing it is what the case is
     # about.
     'HAND EDITED'
+    # The second of the two files the recovery walkthrough edits, which is the
+    # one nobody copies back out.
+    'ALSO EDITED'
     # The same, for the file an adopt would have put there in its place.
     'FIVE YEARS OF ZSH'
     # And for the several of them one build has to keep at once.

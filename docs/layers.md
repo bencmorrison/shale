@@ -741,7 +741,8 @@ shale:   the layer copy wins; what was there is kept at /home/you/.dotfiles/curr
 
 Read the kept copy before you act on it, because the message covers two things and shale cannot tell
 them apart. If it is your own file — an edit through the `~/.zshrc` link, or something `stow --adopt`
-moved in — copy it into a layer, and do it before the next build, which reaps `current.old`. If it is
+moved in — copy it into a layer, and do it before the next build, which reaps `current.old` and says
+so on stderr while that tree still holds anything the layers cannot produce again. If it is
 the copy the layer that used to win this path was providing, there is nothing to do: remove an
 override, drop a layer from `shale.conf`, or reorder precedence, and the copy that wins the path in
 its place is often the older file, which is the same comparison with nobody having touched
@@ -784,11 +785,16 @@ are still named; what changes is that nothing promises you a `current.old` that 
 never creates.
 
 `doctor` names the files only in the window between one arriving and the next build. Afterwards the
-built copy is the layer's again, the mismatch is gone, and `doctor` says nothing at all — the copy
-is still in `current.old` and still one build from gone, but that tree is what every rebuild leaves
-and naming it after each one would be naming it after every edit. `doctor` names `current.old`
-where a problem it found means no build is coming to clear it, and there only. So the window is the
-one before the build: if you use `stow --adopt` against `current/`, run `shale doctor` first.
+built copy is the layer's again and the mismatch is gone, so nothing names your file any more — this
+direction of the comparison, the one an adopted older file lands in, is the one where the window
+closes quietly. The other direction it does not: where `current.old` holds a file *newer* than the
+layer copy that replaced it, one whose *kind* the layers have changed since — a path that is a
+directory or a symlink in a layer now, where the kept tree has a file, or a whole kept directory at
+a path a layer now provides as a symlink — or one at a path no layer provides at all, `doctor` says so in a note giving the directory's path and saying the next build
+removes it. That is a note about a directory
+and not about your file — the walk that decides it stops at the first path it cannot account for and
+reports no path at all, so which file it was is not in the note. So the window before the build is
+still the one worth having: if you use `stow --adopt` against `current/`, run `shale doctor` first.
 
 ## The everyday loop: build, and when to apply
 
@@ -801,9 +807,11 @@ each layer. It keeps `current.old` — the built copy your edit replaced was old
 the layer copy, which is the state a file moved into the tree also leaves, and shale keeps the
 previous tree either way — but it prints no message about it, because a message there is a message
 on every edit. `shale doctor` is where a built tree its layers have moved past is reported, and
-after a build the mismatch is gone. Doctor is silent about the `current.old` that build left as
-well, for the reason the build is: the next build removes it, and a line about it after every
-rebuild is a line after every edit.
+after a build the mismatch is gone. It says nothing about the `current.old` that build left either,
+and the reason is what is in it: every copy in that tree is a layer's own file from the build before,
+older than the layer copy that replaced it, so the layers still have all of it. A tree holding
+something they do not — a file newer than its layer copy, one the layers have since made a directory
+or a symlink, or one at a path no layer provides — is the case doctor does report, below.
 
 `shale apply` is what you need when a **path** appears or disappears, since making and unmaking links
 is stow's job and nothing else does it:
@@ -837,6 +845,7 @@ shale apply
 ```
 
 The first build after anything changes a layer — a pull, or your own edit a moment ago — keeps
-`current.old` without saying so, and the build after it removes it. Every build is quiet; what a
-`shale doctor` in between the pull and the build reports is the built tree not yet matching the
-layers, which is what that pull just did. There is no `shale sync`.
+`current.old` without saying so, and the build after it removes it without saying so either: what
+goes is the layers' own files at the layers' own age. Builds are quiet through the whole of that
+loop; what a `shale doctor` in between the pull and the build reports is the built tree not yet
+matching the layers, which is what that pull just did. There is no `shale sync`.
