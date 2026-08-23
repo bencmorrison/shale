@@ -396,10 +396,15 @@ usage() {
     'A .shale-modes file there declares modes, one "700  .ssh" per line.'
 }
 
+# Every wrong invocation: an unknown command, an unknown option, and the wrong
+# number of arguments to one of the four.  What is wrong, then where the whole
+# text is - rather than the text itself, which was twenty lines of stderr
+# answering a mistyped word, with the one line naming it scrolled off the top of
+# a small terminal.  The usage text is still exactly one command away, and both
+# ways of asking for it deliberately - 'shale' bare and 'shale help' - print it
+# on stdout and exit 0.
 usage_error() {
-  emit "$@"
-  printf '\n' >&2
-  usage >&2
+  emit "$@" "run 'shale help' for usage"
   exit 2
 }
 
@@ -2109,9 +2114,12 @@ clone_missing_roots() {
     # The leading dot keeps this name out of the layer namespace: a configured
     # path component must start with a letter, digit or '_'.  git names it in
     # its own 'Cloning into' line, which is a path nobody wrote and which is
-    # gone by the time it is looked for; that stays as it is.  Redirecting git's
-    # stderr to hide it would take the network error, the bad host key and the
-    # wrong url with it, which is every reason a clone fails.
+    # gone by the time it is looked for; that line stays exactly as git writes
+    # it.  Redirecting git's stderr to hide it would take the network error, the
+    # bad host key and the wrong url with it, which is every reason a clone
+    # fails, and reading or rewriting that stream is shale interpreting another
+    # program's output.  So the path is named here instead, ahead of git saying
+    # it - which is the whole of what makes git's line legible.
     tmp=$DOTFILES/.$root.cloning
     # Named before anything touches it, reaping included: a signal delivered
     # partway through the rm would otherwise run cleanup with CLONING still
@@ -2119,7 +2127,8 @@ clone_missing_roots() {
     CLONING=$tmp
     rm -rf "$tmp" || die "could not remove $tmp"
     { [ ! -e "$tmp" ] && [ ! -L "$tmp" ]; } || die "$tmp still exists"
-    report "cloning '$root' from $url into $dir"
+    report "cloning '$root' from $url into $dir" \
+      "git clones into $tmp and shale renames it, so git's own output names that path"
     # Into the temporary name and renamed after: an interrupted or failed clone
     # must not leave a half-populated directory that looks like a layer.
     git clone -- "$url" "$tmp" || die "could not clone $url into $dir"
