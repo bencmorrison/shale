@@ -52,12 +52,34 @@ mkdir -p ~/.dotfiles && chmod 0700 ~/.dotfiles
 cp examples/wsl-work.conf ~/.dotfiles/shale.conf
 $EDITOR ~/.dotfiles/shale.conf     # list this machine's layers
 mkdir -p ~/.dotfiles/local         # a layer with no url is yours to create
+```
+
+Declare any mode that matters before that first apply. Git records no permission bits for a
+directory and only the executable bit for a file, so an `.ssh`, a credentials file or anything else
+private is composed and linked at the cloning machine's umask — typically `755` and `644` — with
+every command exiting 0, `doctor` included: a mode nobody declared is not a fault shale can see.
+Declarations go in a `.shale-modes` at the top of the clone root, which for a url-less layer is the
+layer directory itself, and which a layer from a repository carries committed with it:
+
+```
+# ~/.dotfiles/local/.shale-modes
+700  .ssh
+600  .ssh/config
+```
+
+```sh
 shale apply                        # clones what is missing, builds, links
 ```
 
+[Declaring the mode of a path](#declaring-the-mode-of-a-path) is the whole of the format.
+
 Shale clones a layer that has a url and creates no layer that has not, so every url-less layer has
 to exist before the first apply — `local`, in both shipped examples. `examples/minimal.conf` is the
-smaller starting point: one repository layer and that same local directory.
+smaller starting point: one repository layer and that same local directory. A repository layer's
+clone root does not exist until that apply creates it, so a mode not already committed with the
+layer cannot be declared ahead of it: apply once, put the `.shale-modes` in the clone now on disk,
+commit it, and apply again. The second apply narrows what you declared and widens nothing, so the
+first apply's open mode does not stay open.
 
 Dotfiles already in `$HOME`? Whether they are ordinary files or stow packages you stow by hand, they
 have to stop being files at those paths before the first apply, and anything of yours worth keeping
