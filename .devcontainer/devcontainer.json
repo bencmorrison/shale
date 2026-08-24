@@ -4,6 +4,14 @@
 		"dockerfile": "Dockerfile"
 	},
 
+	// The host's Docker Desktop daemon, over its mounted socket, so trials and
+	// version tests can run pristine images from inside this container.  The
+	// daemon is the host's: containers started here outlive this container's
+	// rebuilds and share the host's image cache.
+	"features": {
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+	},
+
 	// tests/run skips five cases under root, because root ignores the mode bits
 	// they depend on, and the CI gate fails on any skip.  A root container
 	// cannot pass the suite's own acceptance criterion.
