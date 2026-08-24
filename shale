@@ -2528,18 +2528,29 @@ UNCHECKED_LINKS=0
 # saying what an apply is for states a mechanism, and stays true whether or not
 # one can run today.
 #
-# Three inputs, each sufficient on its own.  An apply builds before it stows, so
+# Four inputs, each sufficient on its own.  An apply builds before it stows, so
 # everything that stops a build stops it.  stow will not write over what it did
 # not create, so a path in $HOME that a layer provides stops the stow half; that
 # is APPLY_CONFLICTS, which blocks no build and so is not counted in
-# BUILD_BLOCKED.  And stow is the one tool an apply needs that a build does not,
-# so a machine without it composes every layer and links none of them.
+# BUILD_BLOCKED.  stow will not link an absolutely spelled symlink either, and
+# on 2.4.1 abandons the whole apply over one anywhere in the tree; that is
+# ABS_LINK_COUNT, which blocks no build for the same reason.  And stow is the
+# one tool an apply needs that a build does not, so a machine without it
+# composes every layer and links none of them.
 #
-# Read where the line is printed rather than answered once: BUILD_BLOCKED and
-# APPLY_CONFLICTS go on rising until the last check has run.
+# ABS_LINK_COUNT is the one input whose answer is version-dependent: 2.3.1
+# applies a link below the top of the tree that 2.4.1 refuses, so on 2.3.1 this
+# can withhold an apply that would have run.  Withheld is the right direction of
+# error - the remedy is to respell the link, which is wanted on both versions -
+# where offering it puts 'shale apply' in a report whose own finding says that
+# apply aborts.
+#
+# Read where the line is printed rather than answered once: BUILD_BLOCKED,
+# APPLY_CONFLICTS and ABS_LINK_COUNT go on rising until the last check has run.
 apply_offerable() {
   [ "$BUILD_BLOCKED" -eq 0 ] &&
     [ "$APPLY_CONFLICTS" -eq 0 ] &&
+    [ "$ABS_LINK_COUNT" -eq 0 ] &&
     [ "$APPLY_TOOL_MISSING" -eq 0 ]
 }
 
@@ -2701,6 +2712,48 @@ APPLY_CONFLICT_PATHS=()
 # The subtree below a path already answered for, empty when there is none.
 HOME_CONFLICT_SKIP=
 
+# Non-zero unless stow never looks at the composed path $1, which is the one
+# question two checks below share: a path stow passes over is a path no apply
+# can be refused at, whatever the layers put there and whatever is in $HOME.
+#
+# One function rather than an arm in each of them, for the reason the ignore
+# table above is derived rather than written out twice: the copy in home_conflict
+# had never been given the newline rules until #108, and doctor passed a setup
+# apply then refused.
+stow_skips_path() {
+  local srel=$1
+  # The one entry stow adds to whatever the file holds rather than reading out
+  # of it, which is why STOW_IGNORE_LIST has no row for it and why this arm
+  # stands on its own.  Anchored at the top of the tree, and a literal, so the
+  # trailing-newline trim stow's '$' allows is the whole of the reading.
+  #
+  # Both spellings, and the second is the reachable one: no build accepts a
+  # layer providing '.stow-local-ignore', and every build composes one called
+  # '.stow-local-ignore\n' without a word.  Stow covers it and links nothing
+  # there, so a finding at that path would be about a file no apply can reach.
+  case "${srel%%/*}" in
+    .stow-local-ignore | ".stow-local-ignore$NL") return 0 ;;
+  esac
+  # The rest of the list cmd_build writes, read as stow reads it, and it has to
+  # stay that list in both directions: a name missing is a finding on a working
+  # setup for ever - a ~/.gitignore of the reader's own beside a layer that has
+  # one - and a name that is not in the list is a refusal doctor goes quiet
+  # about.
+  #
+  # Given the whole path rather than the last component: an ancestor on the list
+  # is a directory stow goes nowhere below, and the newline rules are about the
+  # ancestors a path passed through without matching.
+  ! stow_default_covers "$srel" || return 0
+  # The ignore files' patterns, which cmd_build appends to that same file:
+  # stow never looks at a path they match either.  Guarded on the count rather
+  # than left to the loop inside, because this runs once per composed path and
+  # the ordinary config has no ignore line at all.
+  if [ "${#IGNORE_PATTERNS[@]}" -gt 0 ] && path_is_ignored "$srel"; then
+    return 0
+  fi
+  return 1
+}
+
 # Records $HOME/$1 when what stands there is not the built tree's own copy of
 # the path and a build would provide that path as a $2 - 'file' or 'directory'.
 # stow refuses every one of them, verified against 2.3.1 and 2.4.1, which word
@@ -2740,43 +2793,9 @@ home_conflict() {
       "$HOME_CONFLICT_SKIP"/*) return 0 ;;
     esac
   fi
-  # The one entry stow adds to whatever the file holds rather than reading out
-  # of it, which is why STOW_IGNORE_LIST has no row for it and why this arm
-  # stands on its own.  Anchored at the top of the tree, and a literal, so the
-  # trailing-newline trim stow's '$' allows is the whole of the reading.
-  #
-  # Both spellings, and the second is the reachable one: no build accepts a
-  # layer providing '.stow-local-ignore', and every build composes one called
-  # '.stow-local-ignore\n' without a word.  Stow covers it and links nothing
-  # there, so a finding at that path would be about a file no apply can reach.
-  case "${srel%%/*}" in
-    .stow-local-ignore | ".stow-local-ignore$NL")
-      [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
-      return 0
-      ;;
-  esac
-  # The rest of the list cmd_build writes, read as stow reads it, and it has to
-  # stay that list in both directions: a name missing is a finding on a working
-  # setup for ever - a ~/.gitignore of the reader's own beside a layer that has
-  # one - and a name that is not in the list is a refusal doctor goes quiet
-  # about.  This stood as a hand-written 'case' until #108 and had never been
-  # given the three newline rules, so doctor passed a setup apply then refused.
-  # There is one matcher now, and it reads the one list.
-  #
-  # stow_default_covers is given the whole path rather than the last component:
-  # the skip above means an ancestor on the list has already returned, but the
-  # newline rules are about ancestors this walk passed through without matching,
-  # and only the path carries them.
-  if stow_default_covers "$srel"; then
-    [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
-    return 0
-  fi
-  # The ignore files' patterns, which cmd_build appends to that same file:
-  # stow never looks at a path they match, so nothing standing in $HOME there is
-  # a refusal any apply can meet.  Guarded on the count rather than left to the
-  # loop inside, because this runs once per composed path and the ordinary
-  # config has no ignore line at all.
-  if [ "${#IGNORE_PATTERNS[@]}" -gt 0 ] && path_is_ignored "$srel"; then
+  # A path stow passes over is a path nothing standing in $HOME there is a
+  # refusal at, so the whole subtree below a directory it skips goes with it.
+  if stow_skips_path "$srel"; then
     [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
     return 0
   fi
@@ -2878,6 +2897,125 @@ report_home_conflicts() {
   finding ${lines[@]+"${lines[@]}"}
 }
 
+# The symlinks a layer spells with an absolute target, collected by the same
+# walk.  Capped like every other list doctor keeps: the cap changes what is
+# printed and never what is counted.
+#
+# Two lists, because the report and the deduplication ask different questions:
+# the line names the layer and what the link points at, and one file is one
+# thing to edit however many composed paths it lands at.
+ABS_LINK_CAP=10
+ABS_LINK_COUNT=0
+ABS_LINK_PATHS=()
+ABS_LINK_LINES=()
+
+# Records the entry $2, from layer $1 and landing at composed path $3, when it is
+# a symlink whose target text starts with '/'.  Measured on both versions, and
+# the two do not agree: 2.4.1 refuses one wherever it is in the tree and
+# abandons the whole apply, and 2.3.1 refuses one at the top of the tree and
+# stows a deeper one without a word.
+#
+# 2.3.1 is the accident rather than the design.  Both versions run the same test
+# in stow_node - readlink the source, refuse a target starting '/' - but 2.3.1
+# runs it against the link text it is about to write, which resolves from the
+# target directory rather than from the directory the link goes in, so below the
+# top of the tree the -l finds nothing and the test is skipped.  2.4.1 runs it
+# against the path of the package node itself.  So the deeper link is not
+# supported on 2.3.1; it is unexamined, and the first stow upgrade refuses the
+# whole apply over a layer that has been applying for months.
+#
+# Called for the layer that wins the path and no other, and not at all where two
+# layers disagree about the kind there - which together are what make this an
+# answer about the tree the next build composes: a link a higher layer shadows
+# with a file never lands in it, and a path that stops every build lands nothing
+# at all.  Both call sites carry the reasoning for their own half.
+#
+# $3 rather than $2 for the skip test, and the composed path is the only one
+# that can answer it: what stow reads is current/, and a layer's own directory
+# name is nowhere in the paths its list is matched against.
+#
+# Deduplicated on the layer entry, which is the file somebody has to edit: with
+# 'local' and 'local/sub' both configured, one link inside 'sub' is met by that
+# layer's own listing and again by the walk down from 'local', landing at two
+# composed paths - and reporting it twice would inflate the count as well as the
+# report, for one respelling that fixes both.  The names differ between the two
+# sightings, so the whole line is not the thing to compare.  Above the cap the
+# dedup stops working, which is why the line that replaces the names says only
+# 'and more' - the same bargain the stray list makes.
+#
+# The skip test is asked before it, and per sighting: the two land at different
+# composed paths, and an ignore pattern covering one of them says nothing about
+# the other.
+#
+# 'Cannot say' answers the same as 'not absolute', which is the answer that
+# reports nothing: a missing readlink is a note doctor has already printed, and
+# a finding raised on a guess is worse than the silence it replaces.  The
+# readlink is the one fork here and it is spent only on a symlink stow would
+# look at, once per file however many layers reach it - a tree with no links in
+# it pays one lstat per entry and nothing else.
+layer_absolute_link() {
+  local name=$1 path=$2 srel=$3 dest k
+  [ -L "$path" ] || return 0
+  ! stow_skips_path "$srel" || return 0
+  k=0
+  while [ "$k" -lt "${#ABS_LINK_PATHS[@]}" ]; do
+    [ "${ABS_LINK_PATHS[$k]}" != "$path" ] || return 0
+    k=$((k + 1))
+  done
+  command -v readlink >/dev/null 2>&1 || return 0
+  dest=$(readlink "$path") || return 0
+  case "$dest" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  ABS_LINK_COUNT=$((ABS_LINK_COUNT + 1))
+  if [ "$ABS_LINK_COUNT" -le "$ABS_LINK_CAP" ]; then
+    ABS_LINK_PATHS+=("$path")
+    ABS_LINK_LINES+=("layer '$name': $path -> $dest")
+  fi
+  return 0
+}
+
+# One finding however many links, on report_home_conflicts' reasoning: what they
+# add up to on 2.4.1 is one apply that will not run, and one line of remedy
+# covers every one of them.
+#
+# A finding rather than a note, and the wording has to be true on both versions
+# because shale never asks which one is installed - so it says what each does.
+# The reading that decides it is 2.4.1's, the version Homebrew ships and the one
+# the macOS half of CI runs: there, one such link anywhere aborts the apply
+# outright, which is the doctor-green/apply-fails state this exists to close.
+# Where 2.3.1 links the deeper one instead, the finding is still about a defect -
+# a layer that stops applying at the next stow upgrade - rather than about
+# today's exit status.
+#
+# It stops no build, so BUILD_BLOCKED is left alone: the composer copies a link
+# without reading it, and the built tree is correct either way.
+report_absolute_links() {
+  local n=$ABS_LINK_COUNT i lines links respell rest
+  [ "$n" -gt 0 ] || return 0
+  links="$n symlinks in the layers have absolute targets"
+  respell='respell each target relative to the directory its link is in'
+  if [ "$n" -eq 1 ]; then
+    links='1 symlink in the layers has an absolute target'
+    respell='respell the target relative to the directory the link is in'
+  fi
+  lines=("$links"
+    "apply gives the composed tree to stow, and stow will not link a symlink whose target starts with a '/': stow 2.4.1 refuses one wherever it is in the tree, and abandons the whole apply"
+    'stow 2.3.1 refuses one at the top of the tree and links a deeper one instead, so a layer that applies here today can stop applying the day stow is upgraded'
+    "$respell")
+  i=0
+  while [ "$i" -lt "${#ABS_LINK_LINES[@]}" ]; do
+    lines[${#lines[@]}]=${ABS_LINK_LINES[$i]}
+    i=$((i + 1))
+  done
+  if [ "$n" -gt "$ABS_LINK_CAP" ]; then
+    rest=$((n - ABS_LINK_CAP))
+    lines[${#lines[@]}]="and $rest more, not named here"
+  fi
+  finding ${lines[@]+"${lines[@]}"}
+}
+
 # Every path two layers disagree about the kind of, and every layer path this
 # walk cannot read: the states build refuses that nothing else in doctor sees.
 # The walk is build's own minus the copying - one listing per layer directory
@@ -2904,6 +3042,7 @@ report_home_conflicts() {
 scan_layer_trees() {
   local rel=$1 layers=$2 i k here e base srel path alone lines
   local kind first first_kind last other other_kind other_prev providers children
+  local win
   # One layer cannot disagree with anything, so below such a directory the whole
   # of the comparison is skipped and the walk is only looking for a directory it
   # cannot enter.  Worth its own arm because it is the ordinary shape: most of a
@@ -2995,6 +3134,7 @@ scan_layer_trees() {
         # One layer holds this subtree, so this listing is the only one that
         # reaches this path and the kind here is the kind that lands.
         home_conflict "$srel" "$kind"
+        layer_absolute_link "${LAYER_NAMES[$i]}" "$e" "$srel"
         [ "$kind" = directory ] || continue
         scan_layer_trees "$srel" "$i"
         continue
@@ -3027,6 +3167,7 @@ scan_layer_trees() {
       other_prev=-1
       providers=0
       children=
+      win=$i
       # shellcheck disable=SC2086
       for k in $layers; do
         if [ "$first" -lt 0 ]; then
@@ -3052,8 +3193,15 @@ scan_layer_trees() {
         fi
         if [ "$kind" = "$first_kind" ]; then
           # Two directories merge, and a file over a file is the ordinary
-          # shadowing this whole tool is for.
-          [ "$kind" != directory ] || children="$children $k"
+          # shadowing this whole tool is for.  A file's content comes from the
+          # highest layer that provides it and a directory's from all of them,
+          # so the two arms keep different things: the last agreeing layer, and
+          # every agreeing layer.
+          if [ "$kind" = directory ]; then
+            children="$children $k"
+          else
+            win=$k
+          fi
         elif [ "$other" -lt 0 ]; then
           other=$k
           other_kind=$kind
@@ -3086,6 +3234,23 @@ scan_layer_trees() {
         [ "$providers" -le 2 ] ||
           lines[${#lines[@]}]="$providers layers provide $srel, so removing one of the two named here may leave another pair that disagrees"
         blocking_finding ${lines[@]+"${lines[@]}"}
+      else
+        # Only where the layers agree about the kind here, which is where a
+        # build composes something.  A path they disagree at stops every build,
+        # so nothing lands there and no stow ever reads what is spelled there -
+        # and reporting it anyway would make the answer turn on layer order,
+        # since the collision is found from the first provider and the spelling
+        # from the layer whose bytes would have won.  The blocking finding above
+        # is the one thing to act on; if the link survives the fix, the doctor
+        # run after it names the spelling.
+        #
+        # $win rather than $i: the kind at a path is the first provider's, but
+        # the bytes are the last agreeing provider's - build copies each layer
+        # over the one before it - so a lower layer's link that a higher layer's
+        # file shadows is a link no build composes and no stow ever sees.
+        [ "$first_kind" = directory ] ||
+          layer_absolute_link "${LAYER_NAMES[$win]}" \
+            "$DOTFILES/${LAYER_PATHS[$win]}/$srel" "$srel"
       fi
       [ "$first_kind" = directory ] || continue
       scan_layer_trees "$srel" "$children"
@@ -5838,7 +6003,7 @@ cmd_doctor() {
     command -v "$tool" >/dev/null 2>&1 && continue
     # stow is wanted only by apply, so it stops no build on its own; every other
     # name here does, and no line below may then offer one.  What it does stop is
-    # every apply, which is apply_offerable's third input.
+    # every apply, which is apply_offerable's fourth input.
     if [ "$tool" = stow ]; then
       APPLY_TOOL_MISSING=$((APPLY_TOOL_MISSING + 1))
     else
@@ -6007,6 +6172,9 @@ cmd_doctor() {
   LAYER_DENIED=0
   APPLY_CONFLICTS=0
   APPLY_CONFLICT_PATHS=()
+  ABS_LINK_COUNT=0
+  ABS_LINK_PATHS=()
+  ABS_LINK_LINES=()
   HOME_CONFLICT_SKIP=
   STRAY_COUNT=0
   STRAY_PATHS=()
@@ -6016,6 +6184,14 @@ cmd_doctor() {
     i=$((LAYER_DENIED - LAYER_DENIED_CAP))
     note "and $i more layer paths shale cannot read, not named here"
   fi
+  # What the layers hold on its own terms, before the comparison below it: an
+  # absolutely spelled link is a defect in the layer whatever is in $HOME, and a
+  # link to a directory can be both - it is refused for its spelling here and
+  # collides with a real directory of yours there.  Two findings at one path,
+  # and both are wanted: respelling the link does not move your directory, and
+  # moving your directory does not respell the link.
+  report_absolute_links
+
   # The other half of that walk: what the layers hold, against what is in $HOME
   # at the same paths.
   report_home_conflicts

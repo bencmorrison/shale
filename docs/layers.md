@@ -323,10 +323,15 @@ WARNING! stowing current would cause conflicts:
 All operations aborted.
 ```
 
-`shale doctor` does not report this one, and deliberately: the two stow versions disagree about
-which absolute links they refuse and where, so any finding shale wrote would be right on one of them
-and wrong on the other. Nothing but the apply itself can tell you, which is the reason for the rule
-rather than an exception to it.
+Only the spelling decides it. Whether the target exists, whether it is a directory, and whether it
+points inside `current/` or somewhere else entirely make no difference on either version — stow
+reads the text and never follows it.
+
+`shale doctor` reports every one of them before the apply does, naming the layer, the link and its
+target, and telling you to respell it relative to the directory the link sits in. It reports the
+link that lands in the composed tree: one a higher layer shadows with a file of its own never
+reaches `current/`, so nothing says anything about it. A link at a path the ignore list covers is
+not reported either, because stow never looks there.
 
 ## A layer, or a guard inside a file
 
