@@ -6024,10 +6024,22 @@ cmd_doctor() {
     note "chkstow is not installed, so this report cannot audit ${HOME-} for broken links" \
       'it stops no build and no apply: what it costs is that one check' \
       "it ships with GNU stow, so the package to install is 'stow', the same one that provides stow itself"
+  # The same shape #170 gave chkstow, with two differences facts force rather
+  # than style: readlink is read by two checks here, not one - the broken-link
+  # audit and the layer scan's absolute-target check - so the first line names
+  # both rather than the one chkstow has.  And it is not confined to doctor the
+  # way chkstow is: which_describe dies rather than degrade when 'shale which'
+  # is asked about a path that is a symlink, a wrong answer there being the
+  # failure that command exists to avoid, so the second line says that plainly
+  # instead of reusing chkstow's 'what it costs is that one check', which would
+  # be false of this tool.  The package is coreutils, checked with dpkg -S
+  # against the binary on PATH; it is also what already provides every other
+  # tool the loop above requires bar stow, so a reader who has those has this
+  # too, or is about to install it for the same reason.
   command -v readlink >/dev/null 2>&1 ||
-    note 'readlink is not installed, and shale reads what a link points at with it' \
-      "without it shale cannot audit ${HOME-} for broken links" \
-      "and 'shale which' refuses a path that a layer provides as a symlink"
+    note "readlink is not installed, so this report cannot audit ${HOME-} for broken links or check the layers for a symlink with an absolute target" \
+      "it stops no build and no apply, but 'shale which' refuses a path that a layer provides as a symlink" \
+      "it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm"
 
   if [ ! -d "$DOTFILES" ]; then
     if [ -e "$DOTFILES" ] || [ -L "$DOTFILES" ]; then
