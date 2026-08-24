@@ -66,6 +66,9 @@ unstow phase and once for the stow phase:
 
 ```
 $ shale apply
+shale: cloning 'personal' from git@github.com:you/dotfiles.git into /home/you/.dotfiles/personal
+shale:   git clones into /home/you/.dotfiles/.personal.cloning and shale renames it, so git's own output names that path
+Cloning into '/home/you/.dotfiles/.personal.cloning'...
 shale: composed layer 'base' from /home/you/.dotfiles/personal/base
 shale: composed layer 'local' from /home/you/.dotfiles/local
 WARNING! unstowing current would cause conflicts:

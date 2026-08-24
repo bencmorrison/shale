@@ -11732,6 +11732,11 @@ test_doctor_says_nothing_about_an_absolute_symlink_stow_never_looks_at() {
 # tell an absolute target from a relative one.  Silence is the answer, and the
 # note the prerequisite block has already printed is what says why: a finding
 # raised on a guess is worse than the check not running.
+#
+# Anchored on the finding's own wording, 'in the layers has/have an absolute
+# target', rather than the bare phrase 'absolute target': the note now names
+# the very check it skipped in those words, so the bare phrase is true of a
+# clean report too and would pass this assertion for the wrong reason.
 # shellcheck disable=SC2123
 test_doctor_without_readlink_says_nothing_about_an_absolute_symlink() {
   local saved
@@ -11746,7 +11751,8 @@ test_doctor_without_readlink_says_nothing_about_an_absolute_symlink() {
   run_shale doctor
   PATH=$saved
   assert_status 0 "$shale_status"
-  assert_not_contains "$shale_out" 'absolute target' 'stdout'
+  assert_not_contains "$shale_out" 'in the layers has an absolute target' 'stdout'
+  assert_not_contains "$shale_out" 'in the layers have absolute targets' 'stdout'
   assert_contains "$shale_out" 'shale: readlink is not installed' 'stdout'
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
 }
@@ -11816,11 +11822,12 @@ test_doctor_a_broken_link_that_misses_the_built_tree_is_not_a_finding() {
 # Everything the audit needs is here but the tool itself, so this is where the
 # note from the prerequisite block and the verdict have to agree that it did not
 # run: the link planted below is an orphan nothing names, and a bare 'no
-# problems found' is a clean bill for the home directory holding it.  The note
-# is counted, not just found: one telling.
+# problems found' is a clean bill for the home directory holding it.  The whole
+# report is pinned rather than the note's first line alone, which is what says
+# it is told once and nothing else is printed either side of it.
 # shellcheck disable=SC2123
 test_doctor_a_missing_readlink_warns_without_failing() {
-  local saved line notes
+  local saved
   conf 'base personal/base'
   mklayer personal/base .zshrc
   run_shale apply
@@ -11834,19 +11841,11 @@ test_doctor_a_missing_readlink_warns_without_failing() {
   run_shale doctor
   PATH=$saved
   assert_status 0 "$shale_status"
-  assert_contains "$shale_out" \
-    'shale: readlink is not installed, and shale reads what a link points at with it' 'stdout'
-  assert_contains "$shale_out" \
-    "shale: no problems found, but $HOME was not audited for broken links: read the note above" 'stdout'
-  notes=0
-  while IFS= read -r line; do
-    case "$line" in
-      'shale: readlink is not installed'*) notes=$((notes + 1)) ;;
-    esac
-  done <<EOF
-$shale_out
-EOF
-  assert_eq 1 "$notes" 'the number of readlink notes'
+  assert_eq "shale: readlink is not installed, so this report cannot audit $HOME for broken links or check the layers for a symlink with an absolute target
+shale:   it stops no build and no apply, but 'shale which' refuses a path that a layer provides as a symlink
+shale:   it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm
+shale: no problems found, but $HOME was not audited for broken links: read the note above" \
+    "$shale_out" 'the whole report'
 }
 
 # The same missing tool where a layer provides a symlink to a directory, which
@@ -11877,7 +11876,7 @@ test_doctor_a_missing_readlink_says_nothing_of_its_own_on_stderr() {
   assert_status 1 "$shale_status" 'the doctor'
   assert_empty "$shale_err" 'the doctor stderr'
   assert_contains "$shale_out" \
-    'shale: readlink is not installed, and shale reads what a link points at with it' 'stdout'
+    "shale: readlink is not installed, so this report cannot audit $HOME for broken links or check the layers for a symlink with an absolute target" 'stdout'
   assert_contains "$shale_out" "shale:   $HOME/.config/nvim" 'stdout'
 }
 
@@ -11898,17 +11897,18 @@ test_doctor_a_missing_readlink_is_reported_before_the_first_build() {
   PATH=$saved
   # Nothing built, and the audit therefore never reached.
   assert_missing "$HOME/.dotfiles/current"
-  assert_contains "$shale_out" \
-    'shale: readlink is not installed, and shale reads what a link points at with it' 'stdout'
-  assert_contains "$shale_out" \
-    "shale:   and 'shale which' refuses a path that a layer provides as a symlink" 'stdout'
   # A note, so the machine is reported as sound: severity is what keeps this
   # uncounted, and being reported at all is what the case is for.  Sound is not
   # audited, though - two reasons the walk did not run, this note and the
   # unbuilt tree above it, and one verdict that says so once.
   assert_status 0 "$shale_status"
-  assert_contains "$shale_out" \
-    "shale: no problems found, but $HOME was not audited for broken links: read the 2 notes above" 'stdout'
+  assert_eq "shale: readlink is not installed, so this report cannot audit $HOME for broken links or check the layers for a symlink with an absolute target
+shale:   it stops no build and no apply, but 'shale which' refuses a path that a layer provides as a symlink
+shale:   it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm
+shale: there is no built tree at $HOME/.dotfiles/current, so shale cannot tell a link into it from any other broken link
+shale:   build one with: shale build
+shale: no problems found, but $HOME was not audited for broken links: read the 2 notes above" \
+    "$shale_out" 'the whole report'
 }
 
 # The other early return, and the same claim: with no chkstow there is no audit
@@ -11926,13 +11926,15 @@ test_doctor_reports_readlink_with_no_chkstow_to_audit_with() {
   run_shale doctor
   PATH=$saved
   assert_status 0 "$shale_status"
-  assert_contains "$shale_out" \
-    "shale: chkstow is not installed, so this report cannot audit $HOME for broken links" 'stdout'
-  assert_contains "$shale_out" \
-    'shale: readlink is not installed, and shale reads what a link points at with it' 'stdout'
   # Two reasons the audit did not run and one verdict, which says so once.
-  assert_contains "$shale_out" \
-    "shale: no problems found, but $HOME was not audited for broken links: read the 2 notes above" 'stdout'
+  assert_eq "shale: chkstow is not installed, so this report cannot audit $HOME for broken links
+shale:   it stops no build and no apply: what it costs is that one check
+shale:   it ships with GNU stow, so the package to install is 'stow', the same one that provides stow itself
+shale: readlink is not installed, so this report cannot audit $HOME for broken links or check the layers for a symlink with an absolute target
+shale:   it stops no build and no apply, but 'shale which' refuses a path that a layer provides as a symlink
+shale:   it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm
+shale: no problems found, but $HOME was not audited for broken links: read the 2 notes above" \
+    "$shale_out" 'the whole report'
 }
 
 # The mechanical form of the trap: a chkstow that reports an orphan and exits
