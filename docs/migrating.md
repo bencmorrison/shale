@@ -289,6 +289,22 @@ All operations aborted.
 Unstow that package. Every path both packages provide collides this way, and stow has no notion of
 one package outranking another.
 
+That transcript assumes the old package sits inside `~/.dotfiles`. Where it doesn't —
+`~/dotfiles/common`, the shape a checkout already has before anyone moves it under the dotfiles root
+— the link resolves nowhere stow understands as its own, and both versions call it what the
+folded-directory shape below is called rather than naming a package:
+
+```
+WARNING! unstowing current would cause conflicts:
+  * existing target is not owned by stow: .profile => dotfiles/common/.profile
+WARNING! stowing current would cause conflicts:
+  * existing target is not owned by stow: .profile
+All operations aborted.
+```
+
+Unstow it the same way, giving `-d` the directory it actually lives in: `stow -D -d ~/dotfiles -t ~
+common`.
+
 A folded directory owned by a package outside `~/.dotfiles` — the old setup's `~/.config` being a
 single link into it:
 
