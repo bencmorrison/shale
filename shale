@@ -2528,14 +2528,16 @@ UNCHECKED_LINKS=0
 # saying what an apply is for states a mechanism, and stays true whether or not
 # one can run today.
 #
-# Four inputs, each sufficient on its own.  An apply builds before it stows, so
+# Five inputs, each sufficient on its own.  An apply builds before it stows, so
 # everything that stops a build stops it.  stow will not write over what it did
 # not create, so a path in $HOME that a layer provides stops the stow half; that
 # is APPLY_CONFLICTS, which blocks no build and so is not counted in
 # BUILD_BLOCKED.  stow will not link an absolutely spelled symlink either, and
 # on 2.4.1 abandons the whole apply over one anywhere in the tree; that is
-# ABS_LINK_COUNT, which blocks no build for the same reason.  And stow is the
-# one tool an apply needs that a build does not, so a machine without it
+# ABS_LINK_COUNT, which blocks no build for the same reason.  Nor will it accept
+# one in $HOME at a path it is being asked to link, however the link resolves;
+# that is HOME_ABS_COUNT, and both versions abandon the apply over it.  And stow
+# is the one tool an apply needs that a build does not, so a machine without it
 # composes every layer and links none of them.
 #
 # ABS_LINK_COUNT is the one input whose answer is version-dependent: 2.3.1
@@ -2546,11 +2548,13 @@ UNCHECKED_LINKS=0
 # apply aborts.
 #
 # Read where the line is printed rather than answered once: BUILD_BLOCKED,
-# APPLY_CONFLICTS and ABS_LINK_COUNT go on rising until the last check has run.
+# APPLY_CONFLICTS, ABS_LINK_COUNT and HOME_ABS_COUNT go on rising until the last
+# check has run.
 apply_offerable() {
   [ "$BUILD_BLOCKED" -eq 0 ] &&
     [ "$APPLY_CONFLICTS" -eq 0 ] &&
     [ "$ABS_LINK_COUNT" -eq 0 ] &&
+    [ "$HOME_ABS_COUNT" -eq 0 ] &&
     [ "$APPLY_TOOL_MISSING" -eq 0 ]
 }
 
@@ -2712,6 +2716,15 @@ APPLY_CONFLICT_PATHS=()
 # The subtree below a path already answered for, empty when there is none.
 HOME_CONFLICT_SKIP=
 
+# The links in $HOME that resolve to the built tree's copy of their own path and
+# are spelled from the root, collected by that same walk.  Capped like every
+# other list doctor keeps: the cap changes what is printed and never what is
+# counted.  One list, holding the line as it is printed - the path and what it
+# points at - because nothing else asks a question of these.
+HOME_ABS_CAP=10
+HOME_ABS_COUNT=0
+HOME_ABS_LINES=()
+
 # Non-zero unless stow never looks at the composed path $1, which is the one
 # question two checks below share: a path stow passes over is a path no apply
 # can be refused at, whatever the layers put there and whatever is in $HOME.
@@ -2774,13 +2787,17 @@ stow_skips_path() {
 # copy of that same path.  A link to another path in the tree is 'stowed to a
 # different package', one to anywhere else is 'not owned by stow', and both are
 # refusals on both versions.  -ef is what answers that in two stats and no fork,
-# because an apply's link resolves to the very file it is compared against -
-# where readlink would be a process per path in $HOME, on the walk that has to
-# stay cheap.  It is read only where it cannot mislead: -ef is true of an
-# absolute link to the right file as well, and stow refuses that one, so this
-# check is silent about a link nobody but a hand makes.  A dangling link is the
-# one shape -ef cannot speak for at all, and the only one readlink is spent on:
-# there is at most a handful in any $HOME, and every one of them costs a fork.
+# because an apply's link resolves to the very file it is compared against.  A
+# dangling link is the one shape -ef cannot speak for at all: what it points at
+# is what decides, and readlink is spent on it.
+#
+# -ef is true of an absolute link to the right file as well, and stow refuses
+# that one, so where -ef says applied the spelling is still an open question -
+# home_absolute_link below closes the absolute half of it, and is the second
+# finding this walk can raise at one path.  Only that half: a relative target
+# that resolves to the tree's copy without passing through the stow directory
+# textually - '../you/.dotfiles/current/.zshrc' from $HOME - is refused by both
+# versions too, and nothing here reports it.
 home_conflict() {
   local srel=$1 kind=$2 path
   # Everything below a path this has already answered for.  Two shapes need it:
@@ -2803,8 +2820,22 @@ home_conflict() {
   [ -n "${HOME-}" ] || return 0
   path=$HOME_PREFIX/$srel
   if [ -L "$path" ]; then
-    # The applied state, and the whole of it: one lstat and one pair of stats.
-    [ ! "$path" -ef "$CUR/$srel" ] || return 0
+    # The applied state, in one lstat and one pair of stats - and the spelling
+    # is the rest of it, which costs the fork this walk used to refuse.
+    if [ "$path" -ef "$CUR/$srel" ]; then
+      # A directory reached through a link into the built tree is a directory
+      # whose every path below resolves inside that tree, so a finding there
+      # would name current/'s own file and tell the reader to move it aside.
+      # Set before the call rather than after it, so that a 'return' added to
+      # home_absolute_link cannot quietly put the descent back.  Both spellings,
+      # because both leave the same subtree: stow refuses the absolute one and
+      # the finding below names it, and it takes the relative one back by itself
+      # and puts a real directory in its place - measured on 2.3.1 and 2.4.1 -
+      # so neither leaves anything under it for a reader to act on.
+      [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
+      home_absolute_link "$path"
+      return 0
+    fi
     [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
     if [ ! -e "$path" ]; then
       # Dangling, and -ef cannot answer for one at all: what it points at is
@@ -2820,6 +2851,56 @@ home_conflict() {
   APPLY_CONFLICTS=$((APPLY_CONFLICTS + 1))
   [ "$APPLY_CONFLICTS" -gt "$APPLY_CONFLICT_CAP" ] ||
     APPLY_CONFLICT_PATHS+=("$path")
+  return 0
+}
+
+# Records the link $1, which resolves to the built tree's copy of its own path,
+# when its target is spelled from the root.  That link reads as applied to every
+# test shale can make cheaply and stow will not have it: stow compares the text
+# of the link it finds against the text it would write, never the file at the
+# end of it, so an absolute spelling of the very path it wants is a target it
+# does not own - and it abandons the whole apply over one.
+#
+# Measured on both versions, and here they agree, where for the layer-side link
+# report_absolute_links answers for they do not: a link in $HOME at the top of
+# the tree and one below it are refused alike by 2.3.1 and by 2.4.1, and both
+# abandon the whole operation over it.  The difference between them is noise -
+# 2.3.1 prints a pair of 'BUG in find_stowed_path?' lines about a link at the
+# top of the tree and none about a deeper one - so this finding needs no version
+# split.  The two read the two ends of the same operation, which is why they
+# differ: the layer-side test is on the source scan, this one on the target.
+#
+# A directory path reaches this as well - --no-folding leaves a real directory
+# in $HOME and never a link, so one here is a hand's too - and both remedies
+# hold for it: the apply after the removal makes the directory back, and stow
+# takes a relative link there back by itself and puts the directory in its
+# place.  Measured on both, and it is why the remedy names neither a link nor a
+# directory.
+#
+# The fork is the cost this walk had refused, and what changed is the answer it
+# was buying: -ef alone reports a machine clean whose every apply aborts, which
+# is the reading of doctor that costs a reader the most.  It is spent on the
+# paths in $HOME an apply has already linked and nowhere else - not on a plain
+# file, not on a link pointing anywhere but at the tree's copy of its own path,
+# and not at all on a $HOME nothing has been applied to.
+#
+# 'Cannot say' answers the same as 'not absolute', which is the answer that
+# reports nothing: a missing readlink is a note doctor has already printed, and
+# a finding raised on a guess is worse than the silence it replaces.
+#
+# Not deduplicated, unlike the layer-side list: the caller reaches each composed
+# path once, so two sightings are two links in $HOME and two things to remove.
+home_absolute_link() {
+  local path=$1 dest
+  command -v readlink >/dev/null 2>&1 || return 0
+  dest=$(readlink "$path") || return 0
+  case "$dest" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  HOME_ABS_COUNT=$((HOME_ABS_COUNT + 1))
+  [ "$HOME_ABS_COUNT" -gt "$HOME_ABS_CAP" ] ||
+    HOME_ABS_LINES+=("$path -> $dest")
   return 0
 }
 
@@ -2892,6 +2973,44 @@ report_home_conflicts() {
   done
   if [ "$n" -gt "$APPLY_CONFLICT_CAP" ]; then
     rest=$((n - APPLY_CONFLICT_CAP))
+    lines[${#lines[@]}]="and $rest more, not named here"
+  fi
+  finding ${lines[@]+"${lines[@]}"}
+}
+
+# One finding however many links, on report_home_conflicts' reasoning: what they
+# add up to is one apply that will not run, and one line of remedy covers every
+# one of them.
+#
+# A finding rather than a note, and the state it names is the one doctor was
+# most wrong about: the link resolves to the right file, so every other check
+# here reads it as applied, doctor closed 'no problems found', and every apply
+# from the day the link was made aborted having written nothing.
+#
+# It stops no build, so BUILD_BLOCKED is left alone: nothing in $HOME is read by
+# a build at all.
+report_home_absolute_links() {
+  local n=$HOME_ABS_COUNT i lines links looks remedy rest
+  [ "$n" -gt 0 ] || return 0
+  links="$n symlinks in $HOME have absolute targets at paths the layers provide"
+  looks="each of them points at the built tree's own copy of its path, so they look applied and are not"
+  remedy='remove them and apply again, which puts back what stow writes there, or respell each target relative to the directory its link is in'
+  if [ "$n" -eq 1 ]; then
+    links="1 symlink in $HOME has an absolute target at a path a layer provides"
+    looks="it points at the built tree's own copy of its path, so it looks applied and is not"
+    remedy='remove it and apply again, which puts back what stow writes there, or respell the target relative to the directory the link is in'
+  fi
+  lines=("$links"
+    "$looks: stow compares the text of a link it finds against the text it would write, never the file at the end of it, so a target spelled from the root is one it does not own"
+    'one such link abandons the whole apply, wherever it is in the tree, on stow 2.3.1 and 2.4.1'
+    "$remedy")
+  i=0
+  while [ "$i" -lt "${#HOME_ABS_LINES[@]}" ]; do
+    lines[${#lines[@]}]=${HOME_ABS_LINES[$i]}
+    i=$((i + 1))
+  done
+  if [ "$n" -gt "$HOME_ABS_CAP" ]; then
+    rest=$((n - HOME_ABS_CAP))
     lines[${#lines[@]}]="and $rest more, not named here"
   fi
   finding ${lines[@]+"${lines[@]}"}
@@ -6003,7 +6122,7 @@ cmd_doctor() {
     command -v "$tool" >/dev/null 2>&1 && continue
     # stow is wanted only by apply, so it stops no build on its own; every other
     # name here does, and no line below may then offer one.  What it does stop is
-    # every apply, which is apply_offerable's fourth input.
+    # every apply, which is apply_offerable's fifth input.
     if [ "$tool" = stow ]; then
       APPLY_TOOL_MISSING=$((APPLY_TOOL_MISSING + 1))
     else
@@ -6025,19 +6144,22 @@ cmd_doctor() {
       'it stops no build and no apply: what it costs is that one check' \
       "it ships with GNU stow, so the package to install is 'stow', the same one that provides stow itself"
   # The same shape #170 gave chkstow, with two differences facts force rather
-  # than style: readlink is read by two checks here, not one - the broken-link
-  # audit and the layer scan's absolute-target check - so the first line names
-  # both rather than the one chkstow has.  And it is not confined to doctor the
-  # way chkstow is: which_describe dies rather than degrade when 'shale which'
-  # is asked about a path that is a symlink, a wrong answer there being the
-  # failure that command exists to avoid, so the second line says that plainly
-  # instead of reusing chkstow's 'what it costs is that one check', which would
-  # be false of this tool.  The package is coreutils, checked with dpkg -S
-  # against the binary on PATH; it is also what already provides every other
-  # tool the loop above requires bar stow, so a reader who has those has this
-  # too, or is about to install it for the same reason.
+  # than style: readlink is read by three checks here, not one - the broken-link
+  # audit, the layer scan's absolute-target check, and the same question asked
+  # of $HOME - so the first line names all three rather than the one chkstow
+  # has.  The third is the one whose silence costs most: without it doctor says
+  # nothing about a link that aborts every apply, and a note that did not name
+  # it would leave the reader exactly where the check found them.  And it is not
+  # confined to doctor the way chkstow is: which_describe dies rather than
+  # degrade when 'shale which' is asked about a path that is a symlink, a wrong
+  # answer there being the failure that command exists to avoid, so the second
+  # line says that plainly instead of reusing chkstow's 'what it costs is that
+  # one check', which would be false of this tool.  The package is coreutils,
+  # checked with dpkg -S against the binary on PATH; it is also what already
+  # provides every other tool the loop above requires bar stow, so a reader who
+  # has those has this too, or is about to install it for the same reason.
   command -v readlink >/dev/null 2>&1 ||
-    note "readlink is not installed, so this report cannot audit ${HOME-} for broken links or check the layers for a symlink with an absolute target" \
+    note "readlink is not installed, so this report cannot audit ${HOME-} for broken links, check the layers for a symlink with an absolute target, or find a symlink in ${HOME-} with an absolute target at a path a layer provides" \
       "it stops no build and no apply, but 'shale which' refuses a path that a layer provides as a symlink" \
       "it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm"
 
@@ -6187,6 +6309,8 @@ cmd_doctor() {
   ABS_LINK_COUNT=0
   ABS_LINK_PATHS=()
   ABS_LINK_LINES=()
+  HOME_ABS_COUNT=0
+  HOME_ABS_LINES=()
   HOME_CONFLICT_SKIP=
   STRAY_COUNT=0
   STRAY_PATHS=()
@@ -6205,8 +6329,11 @@ cmd_doctor() {
   report_absolute_links
 
   # The other half of that walk: what the layers hold, against what is in $HOME
-  # at the same paths.
+  # at the same paths.  The refusal first, then the state that reads as no
+  # refusal at all: a reader meeting both has the paths stow will not write over
+  # before the ones it will not take back.
   report_home_conflicts
+  report_home_absolute_links
 
   # build's own refusal, in build's own words.  It is checked against the layers
   # rather than against the composed tree because that is where the file has to

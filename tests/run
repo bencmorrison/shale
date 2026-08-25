@@ -9389,6 +9389,16 @@ test_doctor_reports_its_checks_in_order() {
   sandbox_mkdir "$HOME/.dotfiles/personal/base"
   sandbox_leaf "$sandbox_dir" .vimrc new
   ln -s "$HOME/elsewhere/vimrc" "$sandbox_path" || fail 'could not plant the layer link'
+  # The link in $HOME that reads as applied, reported off the back of the same
+  # comparison and after it: the paths stow will not write over come before the
+  # one it will not take back.  It needs a built copy to resolve to, and the
+  # config above has an error in it, so the tree is planted rather than built.
+  mklayer personal/base .gitconfig
+  sandbox_write "$HOME/.dotfiles/current" .gitconfig 'built'
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .gitconfig new
+  ln -s "$HOME/.dotfiles/current/.gitconfig" "$sandbox_path" ||
+    fail 'could not plant the home link'
   sandbox_write "$HOME" .stowrc '--ignore=secret'
   stub_path_without stow
   saved=$PATH
@@ -9404,14 +9414,15 @@ test_doctor_reports_its_checks_in_order() {
       "shale: layer 'work'"*) seen="$seen layer" ;;
       'shale: 1 symlink in the layers has an absolute target') seen="$seen spelling" ;;
       *' holds something no apply put there, and a layer provides it') seen="$seen home" ;;
+      *' has an absolute target at a path a layer provides') seen="$seen home-spelling" ;;
       *' is not a layer, and no build reads it') seen="$seen stray" ;;
       'shale: a stow resource file'*) seen="$seen stowrc" ;;
-      'shale: 5 problems found') seen="$seen summary" ;;
+      'shale: 6 problems found') seen="$seen summary" ;;
     esac
   done <<EOF
 $shale_out
 EOF
-  assert_eq ' prerequisite config layer spelling home stray stowrc summary' "$seen" \
+  assert_eq ' prerequisite config layer spelling home home-spelling stray stowrc summary' "$seen" \
     'the order of the report'
 }
 
@@ -11757,6 +11768,51 @@ test_doctor_without_readlink_says_nothing_about_an_absolute_symlink() {
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
 }
 
+
+# The same for the $HOME side, and the state that makes the note's third clause
+# worth its width: the link is one every apply aborts over, readlink is what
+# reads its spelling, and without it doctor has nothing to say about it.  The
+# silence is right - a finding raised on a guess is worse - but a reader left
+# with 'no problems found' and no word about which check did not run is back
+# where #181 found them, so the note has to name this check by what it looks
+# for.  The apply below is what the note is warning about, run with readlink
+# back on PATH because it is stow's answer rather than shale's.
+#
+# Anchored on the clause rather than on 'readlink is not installed', which the
+# case above already pins and which says nothing about this check.
+# shellcheck disable=SC2123
+test_doctor_without_readlink_says_nothing_about_an_absolute_link_in_home() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the link'
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.zshrc" || fail 'could not clear the applied link'
+  sandbox_leaf "$sandbox_dir" .zshrc new
+  ln -s "$HOME/.dotfiles/current/.zshrc" "$sandbox_path" ||
+    fail 'could not plant the absolute link'
+  stub_path_without readlink
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  assert_status 0 "$shale_status" 'the doctor without readlink'
+  assert_not_contains "$shale_out" 'has an absolute target at a path a layer provides' 'stdout'
+  assert_contains "$shale_out" \
+    "shale: readlink is not installed, so this report cannot audit $HOME for broken links, check the layers for a symlink with an absolute target, or find a symlink in $HOME with an absolute target at a path a layer provides" \
+    'stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply the report could not predict'
+  assert_contains "$shale_err" 'existing target is not owned by stow' 'stow stderr'
+  assert_contains "$shale_err" 'All operations aborted' 'stow stderr'
+  # And with readlink back, the check that was skipped names it.
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor with readlink'
+  assert_contains "$shale_out" \
+    "shale: 1 symlink in $HOME has an absolute target at a path a layer provides" 'stdout'
+}
+
 # The fourth gate, and the one whose answer is version-dependent: on 2.4.1 the
 # apply that would be offered aborts over the link, so offering it would put a
 # command in the report that a finding above it says will not finish.  The link
@@ -11787,6 +11843,347 @@ test_doctor_offers_no_apply_for_an_orphan_beside_an_absolute_layer_symlink() {
   run_shale doctor
   assert_status 1 "$shale_status" 'the setup with the link'
   assert_contains "$shale_out" 'shale: 1 symlink in the layers has an absolute target' 'stdout'
+  assert_contains "$shale_out" \
+    'shale: no apply will finish until the problems above are fixed, so this link stays' \
+    'the blocked stdout'
+  assert_not_contains "$shale_out" 'clear it with' 'the blocked stdout'
+  assert_not_contains "$shale_out" 'shale apply' 'the blocked stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply no line offered'
+}
+
+
+# The state this check exists for, and the one doctor was most wrong about: a
+# link made by hand at a path a layer still provides, pointing at the built
+# tree's own copy of that same path.  It resolves to the very file stow wants
+# there, so every cheap test in doctor read it as applied and the report closed
+# 'no problems found' - while stow compares the text of the link instead,
+# refuses it, and abandons the whole apply.
+#
+# The whole finding is asserted once, here, so its wording is pinned somewhere.
+# What stow prints is taken as fragments: both phrases ship with stow in both
+# versions - 'existing target is not owned by stow' in Stow.pm and 'All
+# operations aborted.' in the stow script itself - and the rest of the refusal
+# does not: 2.3.1 adds a pair of 'BUG in find_stowed_path?' lines at this depth
+# that 2.4.1 does not print at all.
+#
+# '.vimrc' joins the layer after the first apply and is what proves the abort:
+# stow plans the whole operation and writes nothing, so the file that had never
+# been linked is still not linked when the apply that met the hand-made link
+# exits.
+test_doctor_an_absolute_link_in_home_at_a_layer_path_is_a_finding() {
+  local target
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the link'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc" 'the applied link'
+  mklayer personal/base .vimrc
+  # Removed through the resolved directory rather than through sandbox_leaf,
+  # whose weak mode refuses a name that holds a symlink - which is what this
+  # name holds and what is being respelled.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.zshrc" || fail 'could not clear the applied link'
+  sandbox_leaf "$sandbox_dir" .zshrc new
+  ln -s "$HOME/.dotfiles/current/.zshrc" "$sandbox_path" ||
+    fail 'could not plant the absolute link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_eq "shale: 1 symlink in $HOME has an absolute target at a path a layer provides
+shale:   it points at the built tree's own copy of its path, so it looks applied and is not: stow compares the text of a link it finds against the text it would write, never the file at the end of it, so a target spelled from the root is one it does not own
+shale:   one such link abandons the whole apply, wherever it is in the tree, on stow 2.3.1 and 2.4.1
+shale:   remove it and apply again, which puts back what stow writes there, or respell the target relative to the directory the link is in
+shale:   $HOME/.zshrc -> $HOME/.dotfiles/current/.zshrc
+shale: 1 problem found" "$shale_out" 'the whole report'
+  # The apply the finding predicted, on either version.
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply the finding predicted'
+  assert_contains "$shale_err" 'existing target is not owned by stow' 'stow stderr'
+  assert_contains "$shale_err" 'All operations aborted' 'stow stderr'
+  # Nothing was linked, which is what 'the whole apply' means: the file added to
+  # the layer above has never had a link and still has none.
+  assert_missing "$HOME/.vimrc" 'the link the aborted apply never made'
+  # The remedy, carried out the first way the finding offers: the link goes, and
+  # the apply writes the relative one back.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.zshrc" || fail 'could not remove the absolute link'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply after the remedy'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc" 'the relinked path'
+  assert_symlink_to "$HOME/.vimrc" "$HOME/.dotfiles/current/.vimrc" 'the path the abort had left'
+  # The spelling rather than the resolution, which -ef cannot tell apart: what
+  # stow writes is the text this finding wanted.  The text itself is stow's to
+  # choose, so only its first character is pinned.
+  target=$(readlink "$HOME/.zshrc") || fail 'could not read the relinked path'
+  case "$target" in
+    /*) fail "the relinked path is still absolute: $target" ;;
+  esac
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the remedy'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# The same link one directory down, which is where #176's layer-side finding has
+# to split the two stow versions and this one does not: measured on 2.3.1 and
+# 2.4.1, a link in $HOME is refused at every depth by both, because the test
+# that reads it is the target scan rather than the source scan the layer-side
+# link meets.
+#
+# The second remedy the finding offers is the one carried out here - the target
+# respelled relative, by hand, with no apply in between - so that both halves of
+# that line are covered by a case.
+test_doctor_an_absolute_link_in_home_below_the_top_is_a_finding() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the link'
+  sandbox_mkdir "$HOME/.config/nvim"
+  rm -f "$sandbox_dir/init.lua" || fail 'could not clear the applied link'
+  sandbox_leaf "$sandbox_dir" init.lua new
+  ln -s "$HOME/.dotfiles/current/.config/nvim/init.lua" "$sandbox_path" ||
+    fail 'could not plant the absolute link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: 1 symlink in $HOME has an absolute target at a path a layer provides" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   $HOME/.config/nvim/init.lua -> $HOME/.dotfiles/current/.config/nvim/init.lua" \
+    'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply the finding predicted'
+  assert_contains "$shale_err" 'existing target is not owned by stow' 'stow stderr'
+  assert_contains "$shale_err" 'All operations aborted' 'stow stderr'
+  # The other remedy: the same link, respelled relative to the directory it sits
+  # in, and no apply needed to make it good.
+  sandbox_mkdir "$HOME/.config/nvim"
+  rm -f "$sandbox_dir/init.lua" || fail 'could not remove the absolute link'
+  sandbox_leaf "$sandbox_dir" init.lua new
+  ln -s ../../.dotfiles/current/.config/nvim/init.lua "$sandbox_path" ||
+    fail 'could not respell the link'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the remedy'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply after the remedy'
+}
+
+
+# The shape at a directory rather than a file, which reaches the same check by
+# the same route: --no-folding means a directory in $HOME is a directory of its
+# own after an apply, so a link there is one somebody made, and stow refuses it
+# on both versions for the spelling alone - measured.  Both remedies hold: the
+# apply that follows the removal makes the real directory back, and stow takes
+# a relative link there back by itself and makes the directory in its place.
+#
+# One finding and no other, which is what the subtree skip on this arm buys:
+# the walk that descended through the link went on to call current/'s own file
+# something no apply put in $HOME, and prescribed moving it aside - a reader
+# following that line deletes out of the built tree.  Both the count and the
+# path are asserted, because the count alone would pass on a report that named
+# the wrong path twice.
+test_doctor_an_absolute_link_in_home_at_a_layer_directory_is_a_finding() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the directory'
+  assert_real_dir "$HOME/.config" 'the directory the apply made'
+  sandbox_mkdir "$HOME/.config"
+  rm -rf "$sandbox_dir" || fail 'could not clear the applied directory'
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .config new
+  ln -s "$HOME/.dotfiles/current/.config" "$sandbox_path" ||
+    fail 'could not plant the absolute link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: 1 symlink in $HOME has an absolute target at a path a layer provides" 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   $HOME/.config -> $HOME/.dotfiles/current/.config" 'stdout'
+  assert_not_contains "$shale_out" 'holds something no apply put there' 'stdout'
+  assert_not_contains "$shale_out" "$HOME/.config/nvim/init.lua" 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply the finding predicted'
+  assert_contains "$shale_err" 'existing target is not owned by stow' 'stow stderr'
+  assert_contains "$shale_err" 'All operations aborted' 'stow stderr'
+  # Respelled relative: stow takes the link back and leaves the directory it
+  # wanted there, on both versions.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.config" || fail 'could not remove the absolute link'
+  sandbox_leaf "$sandbox_dir" .config new
+  ln -s .dotfiles/current/.config "$sandbox_path" || fail 'could not respell the link'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply after the remedy'
+  assert_real_dir "$HOME/.config" 'the directory the apply put back'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the remedy'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+
+# The other spelling at the same shape, and the reason the subtree below one is
+# skipped whichever it is: stow takes a relative link at a directory path back
+# by itself and puts the real directory in its place, exit 0 on 2.3.1 and 2.4.1
+# both, so there was never anything under it to report either.  Doctor says
+# nothing at all - not about the link, which is a spelling stow accepts, and not
+# about the paths below it, which resolve into the built tree.
+test_doctor_a_relative_link_in_home_at_a_layer_directory_is_silent() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the directory'
+  sandbox_mkdir "$HOME/.config"
+  rm -rf "$sandbox_dir" || fail 'could not clear the applied directory'
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .config new
+  ln -s .dotfiles/current/.config "$sandbox_path" || fail 'could not plant the link'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_not_contains "$shale_out" 'has an absolute target at a path a layer provides' 'stdout'
+  assert_not_contains "$shale_out" 'holds something no apply put there' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  assert_real_dir "$HOME/.config" 'the directory stow put back'
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua" 'the link inside it'
+}
+
+# The supported spelling, at both depths, which is what every apply writes and
+# what this check has to stay silent about: the finding costs a fork per applied
+# path in $HOME, and a report that named them would name every managed file on
+# the machine.
+#
+# Anchored on the finding's own wording in both numbers rather than on 'absolute
+# target', which the layer-side finding says too.
+test_doctor_a_relative_applied_link_is_not_an_absolute_one() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_not_contains "$shale_out" 'has an absolute target at a path a layer provides' 'stdout'
+  assert_not_contains "$shale_out" 'have absolute targets at paths the layers provide' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+}
+
+# A path no layer provides is a path stow never looks at, so the spelling of a
+# link there is nobody's business: measured on 2.3.1 and 2.4.1, the apply below
+# walks past it and exits 0.  It is one directory down deliberately - at the top
+# of the tree 2.3.1 prints a 'BUG in find_stowed_path?' line about it and still
+# exits 0, which shale would pass through as its own 'stow exited 0 and wrote
+# output' warning on that version only.
+test_doctor_says_nothing_about_an_absolute_link_at_a_path_no_layer_provides() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_write "$HOME/elsewhere" notes 'mine'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  sandbox_mkdir "$HOME/.config/nvim"
+  sandbox_leaf "$sandbox_dir" notes.md new
+  ln -s "$HOME/elsewhere/notes" "$sandbox_path" || fail 'could not plant the link'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_not_contains "$shale_out" 'has an absolute target at a path a layer provides' 'stdout'
+  assert_contains "$shale_out" 'shale: no problems found' 'stdout'
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that walks past it'
+  assert_symlink_to "$HOME/.config/nvim/notes.md" "$HOME/elsewhere/notes" 'the link left alone'
+}
+
+# The two absolute-link findings are about different links and both are wanted:
+# one names a file in a layer to respell, the other a link in $HOME to remove,
+# and neither remedy does the other's work.  The counts are each finding's own.
+test_doctor_an_absolute_link_in_home_and_one_in_a_layer_are_both_findings() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the link'
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.zshrc" || fail 'could not clear the applied link'
+  sandbox_leaf "$sandbox_dir" .zshrc new
+  ln -s "$HOME/.dotfiles/current/.zshrc" "$sandbox_path" ||
+    fail 'could not plant the absolute link'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base"
+  sandbox_leaf "$sandbox_dir" .secrets new
+  ln -s "$HOME/elsewhere/secrets" "$sandbox_path" || fail 'could not plant the layer link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" 'shale: 1 symlink in the layers has an absolute target' 'stdout'
+  assert_contains "$shale_out" \
+    "shale:   layer 'base': $HOME/.dotfiles/personal/base/.secrets -> $HOME/elsewhere/secrets" \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale: 1 symlink in $HOME has an absolute target at a path a layer provides" 'stdout'
+  assert_contains "$shale_out" "shale:   $HOME/.zshrc -> $HOME/.dotfiles/current/.zshrc" 'stdout'
+  assert_contains "$shale_out" 'shale: 2 problems found' 'stdout'
+}
+
+# The cap, and the count above it: the list is bounded and the total is not.
+test_doctor_bounds_the_absolute_home_link_findings_at_ten() {
+  local i
+  conf 'base personal/base'
+  i=1
+  while [ "$i" -le 12 ]; do
+    mklayer personal/base "link$i"
+    i=$((i + 1))
+  done
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply that made the links'
+  sandbox_mkdir "$HOME"
+  i=1
+  while [ "$i" -le 12 ]; do
+    rm -f "$sandbox_dir/link$i" || fail "could not clear link$i"
+    sandbox_leaf "$sandbox_dir" "link$i" new
+    ln -s "$HOME/.dotfiles/current/link$i" "$sandbox_path" ||
+      fail "could not plant link$i"
+    i=$((i + 1))
+  done
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: 12 symlinks in $HOME have absolute targets at paths the layers provide" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   remove them and apply again, which puts back what stow writes there, or respell each target relative to the directory its link is in' \
+    'stdout'
+  assert_contains "$shale_out" 'shale:   and 2 more, not named here' 'stdout'
+  assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
+}
+
+# The gate this check adds to the offer of an apply, and the plainest of them:
+# the apply doctor would otherwise name aborts over this link on both versions,
+# so no line in the report may name that command.
+#
+# The orphan is a file that left a layer whose directory the tree still holds,
+# which is the shape doctor offers an apply for at all.
+test_doctor_offers_no_apply_for_an_orphan_beside_an_absolute_home_link() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/nvim/init.lua
+  mklayer personal/base .config/nvim/extra.lua
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  sandbox_mkdir "$HOME/.dotfiles/personal/base/.config/nvim"
+  sandbox_leaf "$sandbox_dir" extra.lua
+  rm -f "$sandbox_path" || fail 'could not remove the layer file'
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the sound setup'
+  assert_contains "$shale_out" 'shale: clear it with: shale apply' 'the sound stdout'
+  # The same links with one of them respelled by hand: the offer goes.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.zshrc" || fail 'could not clear the applied link'
+  sandbox_leaf "$sandbox_dir" .zshrc new
+  ln -s "$HOME/.dotfiles/current/.zshrc" "$sandbox_path" ||
+    fail 'could not plant the absolute link'
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the setup with the link'
+  assert_contains "$shale_out" \
+    "shale: 1 symlink in $HOME has an absolute target at a path a layer provides" 'stdout'
   assert_contains "$shale_out" \
     'shale: no apply will finish until the problems above are fixed, so this link stays' \
     'the blocked stdout'
@@ -11841,7 +12238,7 @@ test_doctor_a_missing_readlink_warns_without_failing() {
   run_shale doctor
   PATH=$saved
   assert_status 0 "$shale_status"
-  assert_eq "shale: readlink is not installed, so this report cannot audit $HOME for broken links or check the layers for a symlink with an absolute target
+  assert_eq "shale: readlink is not installed, so this report cannot audit $HOME for broken links, check the layers for a symlink with an absolute target, or find a symlink in $HOME with an absolute target at a path a layer provides
 shale:   it stops no build and no apply, but 'shale which' refuses a path that a layer provides as a symlink
 shale:   it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm
 shale: no problems found, but $HOME was not audited for broken links: read the note above" \
@@ -11876,7 +12273,7 @@ test_doctor_a_missing_readlink_says_nothing_of_its_own_on_stderr() {
   assert_status 1 "$shale_status" 'the doctor'
   assert_empty "$shale_err" 'the doctor stderr'
   assert_contains "$shale_out" \
-    "shale: readlink is not installed, so this report cannot audit $HOME for broken links or check the layers for a symlink with an absolute target" 'stdout'
+    "shale: readlink is not installed, so this report cannot audit $HOME for broken links, check the layers for a symlink with an absolute target, or find a symlink in $HOME with an absolute target at a path a layer provides" 'stdout'
   assert_contains "$shale_out" "shale:   $HOME/.config/nvim" 'stdout'
 }
 
@@ -11902,7 +12299,7 @@ test_doctor_a_missing_readlink_is_reported_before_the_first_build() {
   # audited, though - two reasons the walk did not run, this note and the
   # unbuilt tree above it, and one verdict that says so once.
   assert_status 0 "$shale_status"
-  assert_eq "shale: readlink is not installed, so this report cannot audit $HOME for broken links or check the layers for a symlink with an absolute target
+  assert_eq "shale: readlink is not installed, so this report cannot audit $HOME for broken links, check the layers for a symlink with an absolute target, or find a symlink in $HOME with an absolute target at a path a layer provides
 shale:   it stops no build and no apply, but 'shale which' refuses a path that a layer provides as a symlink
 shale:   it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm
 shale: there is no built tree at $HOME/.dotfiles/current, so shale cannot tell a link into it from any other broken link
@@ -11930,7 +12327,7 @@ test_doctor_reports_readlink_with_no_chkstow_to_audit_with() {
   assert_eq "shale: chkstow is not installed, so this report cannot audit $HOME for broken links
 shale:   it stops no build and no apply: what it costs is that one check
 shale:   it ships with GNU stow, so the package to install is 'stow', the same one that provides stow itself
-shale: readlink is not installed, so this report cannot audit $HOME for broken links or check the layers for a symlink with an absolute target
+shale: readlink is not installed, so this report cannot audit $HOME for broken links, check the layers for a symlink with an absolute target, or find a symlink in $HOME with an absolute target at a path a layer provides
 shale:   it stops no build and no apply, but 'shale which' refuses a path that a layer provides as a symlink
 shale:   it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm
 shale: no problems found, but $HOME was not audited for broken links: read the 2 notes above" \

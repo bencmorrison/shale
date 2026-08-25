@@ -389,15 +389,16 @@ configured layer directory is there and that nothing in one is a directory it ca
 file it cannot open, that no two layers disagree about whether a path is a file or a directory, that
 no layer ships a symlink whose target is spelled from the root, which stow will not link, that
 nothing in `$HOME` at a path the layers provide is something no apply put there — a file, a
-directory, or a link of your own, none of which stow will write over — that no layer ships
-`.stow-local-ignore`, which shale writes itself, or shale itself, that `~/.dotfiles/current` is a
-directory rather than a file or a link to one, that a build could create the tree it composes into,
-that nothing in `~/.dotfiles` whose name does not begin with a dot is a stray, that no `current.new`
-has been left beside `current` and no `current.old` holding anything the layers cannot produce
-again, and that no link in `$HOME` points into the built tree at a path it no longer provides. Where
-a `.stowrc` exists it says so, because stow appends its `--ignore` patterns to the ones shale passes
-and one of them can drop a file from an apply without a word. It reads nothing out of that file, and
-changes nothing itself.
+directory, or a link of your own, none of which stow will write over — that no link in `$HOME` at
+such a path is spelled from the root, which reads as applied and which stow refuses, that no layer
+ships `.stow-local-ignore`, which shale writes itself, or shale itself, that `~/.dotfiles/current`
+is a directory rather than a file or a link to one, that a build could create the tree it composes
+into, that nothing in `~/.dotfiles` whose name does not begin with a dot is a stray, that no
+`current.new` has been left beside `current` and no `current.old` holding anything the layers cannot
+produce again, and that no link in `$HOME` points into the built tree at a path it no longer
+provides. Where a `.stowrc` exists it says so, because stow appends its `--ignore` patterns to the
+ones shale passes and one of them can drop a file from an apply without a word. It reads nothing out
+of that file, and changes nothing itself.
 
 ```
 $ shale doctor
@@ -409,8 +410,7 @@ and makes doctor exit 1. Everything else is a note about something worth knowing
 nor changes the exit code. Every state doctor can see that stops a build or an apply outright is a
 problem, so `no problems found` is a strong signal that both will run rather than a guarantee that
 they must. What it does not see: whether `$HOME` is writable, which fails an apply rather than a
-build, nor whether a leftover `current.old` can be removed, nor an absolute link in `$HOME` pointing
-at the built tree's own copy of that same path, which stow refuses and which only a hand ever makes.
+build, nor whether a leftover `current.old` can be removed.
 
 That verdict is about the checks that ran. The audit of `$HOME` for broken links is the only one that
 looks outside `~/.dotfiles`, and it needs a built tree, `chkstow`, `readlink` and a `$HOME` to walk.
