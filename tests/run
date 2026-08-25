@@ -1014,7 +1014,7 @@ inherit_shell_option() {
 # redirects to a file, and reads that file with PATH restored.
 stub_path_without() {
   local all omit tool found
-  all=' env bash cat sed chkstow chmod cp git ls mkdir mv readlink rm stow '
+  all=' env bash cat date sed chkstow chmod cp git ls mkdir mv readlink rm rmdir stow '
   omit=" ${*-} "
   # First, and fatal: a name that is in no list matches nothing, leaves a
   # complete PATH, and passes the case having removed nothing at all - the one
@@ -1039,6 +1039,52 @@ stub_path_without() {
     sandbox_leaf "$stub_path" "$tool" new
     ln -s "$found" "$sandbox_path" || fail "could not link $tool"
   done
+}
+
+# stub_path_with_date STAMP - the same PATH, with a date of the harness's own
+# that answers STAMP whatever it is asked.  In stub_path, assigned by the caller
+# exactly as stub_path_without's is.
+#
+# The one thing in shale that runs date names a directory after the second it
+# ran in, so nothing a case can assert about two runs landing in one directory
+# is reachable with the real one: it would have to be raced, and a case that
+# lost the race would pass having tested the other branch.
+stub_path_with_date() {
+  local stamp=${1-}
+  [ -n "$stamp" ] || guard_trip 'stub_path_with_date was given no stamp'
+  stub_path_without date
+  # The stamp is written into the stub rather than read from the environment:
+  # shale is started by run_shale, which passes nothing on, and an exported
+  # variable would be a second thing for this to depend on.
+  sandbox_write "$stub_path" date \
+    '#!/usr/bin/env bash' \
+    "printf '%s\\n' '$stamp'"
+  chmod 0755 "$sandbox_path" || fail 'could not make the date stub executable'
+}
+
+# The one timestamped directory an 'apply --replace' left under
+# ~/.dotfiles/replaced, in replaced_dir, with its name held to the
+# YYYYMMDD-HHMMSS that flag promises.
+#
+# Every case that looks inside goes through this.  No case can spell the name -
+# it is the second the run happened in - and a case that globbed for it would be
+# satisfied by two directories as readily as by one, which is the shape a flag
+# that made a fresh directory per moved path would leave.
+find_replaced_dir() {
+  local root=$HOME/.dotfiles/replaced entries leaf
+  entries=("$root"/*)
+  # nullglob is off in this harness, so an unmatched pattern arrives as itself
+  # and the -d below is what tells that from a directory of that name.
+  [ "${#entries[@]}" -eq 1 ] ||
+    fail "expected exactly one directory under $root" "found: ${entries[*]}"
+  [ -d "${entries[0]}" ] && [ ! -L "${entries[0]}" ] ||
+    fail "not a directory of its own: ${entries[0]}"
+  leaf=${entries[0]##*/}
+  case "$leaf" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) fail "the moved-aside directory is not named YYYYMMDD-HHMMSS: $leaf" ;;
+  esac
+  replaced_dir=${entries[0]}
 }
 
 # The name of a UTF-8 locale this machine has, in utf8_locale.  $1 is the line
@@ -1412,9 +1458,14 @@ test_usage_unknown_option_exits_2() {
   run_shale -n
   assert_status 2 "$shale_status"
   assert_contains "$shale_err" 'shale: unknown option -n' 'stderr'
-  assert_contains "$shale_err" 'shale has no options' 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   shale's options come after the command, and 'apply --replace' is the only one" 'stderr'
   assert_contains "$shale_err" "shale:   run 'shale help' for usage" 'stderr'
   assert_empty "$shale_out" 'stdout'
+  # The line used to say shale had no options at all.  Nothing may bring that
+  # back now that one of them exists: a reader who is told there are none does
+  # not go looking for the spelling this same message points at.
+  assert_not_contains "$shale_err" 'shale has no options' 'stderr'
 }
 
 test_usage_extra_argument_exits_2() {
@@ -1423,6 +1474,54 @@ test_usage_extra_argument_exits_2() {
   assert_contains "$shale_err" 'shale: build takes no arguments' 'stderr'
   assert_contains "$shale_err" "shale:   run 'shale help' for usage" 'stderr'
   assert_empty "$shale_out" 'stdout'
+}
+
+# shale's one option, and the whole of where it may be written: after 'apply'
+# and nowhere else.  Every other placement is the usage error the word in that
+# position has always given, so the matrix is asserted rather than reasoned
+# about - the flag is new and each of these arms reaches a different line.
+#
+# 'shale --replace apply' is the pre-command arm, reached before any command has
+# been read; build and doctor give their own arity error, which is theirs and
+# not the flag's; and apply refuses a second argument whichever side of it the
+# flag is on.
+test_usage_the_replace_flag_belongs_after_apply_and_nowhere_else() {
+  local invocation
+  run_shale --replace apply
+  assert_status 2 "$shale_status" 'the flag before the command'
+  assert_contains "$shale_err" 'shale: unknown option --replace' 'stderr'
+  assert_empty "$shale_out" 'stdout'
+  run_shale build --replace
+  assert_status 2 "$shale_status" 'build'
+  assert_contains "$shale_err" 'shale: build takes no arguments' 'build stderr'
+  run_shale doctor --replace
+  assert_status 2 "$shale_status" 'doctor'
+  assert_contains "$shale_err" 'shale: doctor takes no arguments' 'doctor stderr'
+  for invocation in 'apply extra' 'apply --replace extra' 'apply extra --replace' \
+    'apply --replace --replace'; do
+    # Deliberately unquoted: each entry is the whole argument list.
+    # shellcheck disable=SC2086
+    run_shale $invocation
+    assert_status 2 "$shale_status" "'shale $invocation' exit status"
+    assert_contains "$shale_err" \
+      'shale: apply takes no arguments other than --replace' "'shale $invocation' stderr"
+    assert_empty "$shale_out" "'shale $invocation' stdout"
+  done
+}
+
+# 'shale which -odd-name' works without a '--' separator, so nothing past the
+# subcommand may read a leading '-' as an option - and that holds for the one
+# spelling shale does have an option at.  A which that special-cased it would
+# refuse to answer for a file of that name, which is the failure the rule exists
+# to prevent.
+test_usage_which_reads_the_replace_flag_as_a_path() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale which --replace
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: no layer provides '--replace'" 'stderr'
+  assert_not_contains "$shale_err" 'unknown option' 'stderr'
+  assert_not_contains "$shale_err" 'takes exactly one PATH' 'stderr'
 }
 
 test_usage_which_without_a_path_exits_2() {
@@ -1588,11 +1687,32 @@ test_config_invalid_paths_are_rejected() {
   # shellcheck disable=SC2088,SC1003
   for path in \
     . ./current .. /etc/skel '~/x' personal//base personal/base/ personal/../base \
-    current current.new current.old current/x '"my' 'my\'; do
+    current current.new current.old current/x replaced replaced/x '"my' 'my\'; do
     conf "base $path"
     run_shale build
     assert_status 1 "$shale_status" "path '$path' exit status"
     assert_contains "$shale_err" "shale: $HOME/.dotfiles/shale.conf:1:" "path '$path' stderr"
+    assert_missing "$HOME/.dotfiles/current" "path '$path' build output"
+  done
+}
+
+# The fourth reserved name, refused in its own words: the other three are
+# refused because shale builds into them, and this one because an apply moves
+# the reader's files into it.  A layer there would be composed from the files
+# an 'apply --replace' had just taken out of $HOME, which puts every one of them
+# straight back at the path it was moved away from.
+test_config_a_layer_under_the_replaced_directory_is_refused() {
+  local path
+  for path in replaced replaced/mine; do
+    conf "base $path"
+    run_shale build
+    assert_status 1 "$shale_status" "path '$path' exit status"
+    assert_contains "$shale_err" \
+      "shale: $HOME/.dotfiles/shale.conf:1: layer path '$path' starts with the reserved directory 'replaced'" \
+      "path '$path' stderr"
+    assert_contains "$shale_err" \
+      "shale:   'apply --replace' moves files aside into $HOME/.dotfiles/replaced" \
+      "path '$path' stderr"
     assert_missing "$HOME/.dotfiles/current" "path '$path' build output"
   done
 }
@@ -7825,6 +7945,669 @@ test_apply_refuses_when_stow_is_not_installed() {
   assert_missing "$HOME/.dotfiles/current"
 }
 
+# ---------------------------------------------------- apply --replace cases
+#
+# shale's one option, and the whole of what it adds: before stow runs, the paths
+# doctor's apply-conflict report names are moved - never copied, never read,
+# never deleted - into one timestamped directory under ~/.dotfiles/replaced, and
+# the apply then goes on exactly as it did without it.  So every case here that
+# says a path moved also says $HOME ended up linked, and the everyday apply is
+# unchanged: no case below runs without the flag and sees anything new.
+#
+# The set is doctor's own and is not restated here.  What decides whether a path
+# is a conflict lives under doctor's apply-conflict banner above; what these
+# cases add is that the flag moves exactly that set, keeps what it moves, and
+# leaves everything else where it is.
+
+# The state a brand-new account is in, which is the whole reason for the option:
+# useradd copies .bashrc, .profile and .bash_logout out of /etc/skel and one
+# 'git config --global' writes .gitconfig, so the first apply of any layer
+# providing them is refused on a machine nobody has touched.  The refusal
+# without the flag is asserted first and in the same case, because it is what
+# makes the option necessary rather than convenient - and because a change that
+# quietly moved files without being asked would pass a case that only ran the
+# flag.
+test_apply_replace_clears_the_files_a_fresh_account_starts_with() {
+  local moved
+  conf 'base personal/base'
+  mklayer personal/base .bashrc
+  mklayer personal/base .profile
+  mklayer personal/base .gitconfig
+  sandbox_write "$HOME" .bashrc 'skel bashrc'
+  sandbox_write "$HOME" .profile 'skel profile'
+  sandbox_write "$HOME" .gitconfig 'my git config'
+  chmod 0640 "$HOME/.gitconfig" || fail 'could not set the mode on the fixture'
+  run_shale apply
+  assert_status 1 "$shale_status" 'the apply without the flag'
+  assert_missing "$HOME/.dotfiles/replaced" 'the directory without the flag'
+  assert_eq 'skel bashrc' "$(cat "$HOME/.bashrc")" 'the file without the flag'
+
+  run_shale apply --replace
+  assert_status 0 "$shale_status" 'the apply with the flag'
+  assert_empty "$shale_err" 'stderr'
+  find_replaced_dir
+  # One line per path, on stdout with the command's other results, and no line
+  # for anything else: the count is asserted as well as the three lines, so a
+  # flag that moved a fourth path could not pass.
+  for moved in .bashrc .gitconfig .profile; do
+    assert_contains "$shale_out" \
+      "shale: moved $HOME/$moved to $replaced_dir/$moved" 'stdout'
+  done
+  moved=$(printf '%s\n' "$shale_out" | grep -c '^shale: moved ')
+  assert_eq 3 "$moved" 'the number of moved lines'
+
+  # What was moved: the file itself, byte for byte and mode for mode.  A rename
+  # keeps the inode, so this is the strongest claim the flag makes.
+  assert_eq 'skel bashrc' "$(cat "$replaced_dir/.bashrc")" 'the moved .bashrc'
+  assert_eq 'skel profile' "$(cat "$replaced_dir/.profile")" 'the moved .profile'
+  assert_eq 'my git config' "$(cat "$replaced_dir/.gitconfig")" 'the moved .gitconfig'
+  assert_mode "$replaced_dir/.gitconfig" '-rw-r-----' 'the moved mode'
+  # And the apply it was in the way of, finished.
+  assert_symlink_to "$HOME/.bashrc" "$HOME/.dotfiles/current/.bashrc"
+  assert_symlink_to "$HOME/.profile" "$HOME/.dotfiles/current/.profile"
+  assert_symlink_to "$HOME/.gitconfig" "$HOME/.dotfiles/current/.gitconfig"
+  assert_eq 'personal/base/.bashrc' "$(cat "$HOME/.bashrc")" 'the linked file'
+}
+
+# The relative tree, kept: a conflict three components down lands three
+# components down, and the directories made on the way are shale's own and take
+# shale's own mode.  Without this the flag would be a flat pile of basenames,
+# and two paths of the same name would collide in it.
+test_apply_replace_keeps_the_tree_a_moved_path_had() {
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_write "$HOME/.config/nvim" init.lua 'mine'
+  run_shale apply --replace
+  assert_status 0 "$shale_status"
+  find_replaced_dir
+  assert_eq 'mine' "$(cat "$replaced_dir/.config/nvim/init.lua")" 'the moved file'
+  assert_real_dir "$replaced_dir/.config" 'the directory on the way'
+  assert_mode "$HOME/.dotfiles/replaced" 'drwx------' 'the mode of replaced'
+  assert_mode "$replaced_dir" 'drwx------' 'the mode of the stamp directory'
+  assert_mode "$replaced_dir/.config/nvim" 'drwx------' 'the mode of a made directory'
+  # The directories in $HOME stay: stow links into them, and neither of them was
+  # the conflict.
+  assert_real_dir "$HOME/.config/nvim" 'the home directory'
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua"
+}
+
+# A symlink of the reader's moves as a link and not as what it points at: the
+# target text is the whole of what a link is, and a flag that resolved one would
+# take a copy of a file somewhere else and leave the original behind.  The
+# target here is outside $HOME and does not exist, so nothing could have been
+# followed even by accident.
+test_apply_replace_moves_a_symlink_as_a_link() {
+  conf 'base personal/base'
+  mklayer personal/base .vimrc
+  sandbox_leaf "$HOME" .vimrc new
+  ln -s /nowhere/vimrc "$sandbox_path" || fail 'could not plant the link'
+  run_shale apply --replace
+  assert_status 0 "$shale_status"
+  find_replaced_dir
+  assert_dangling_symlink "$replaced_dir/.vimrc" 'the moved link'
+  assert_eq '/nowhere/vimrc' "$(readlink "$replaced_dir/.vimrc")" 'the target text'
+  assert_symlink_to "$HOME/.vimrc" "$HOME/.dotfiles/current/.vimrc"
+}
+
+# A directory where a layer provides a file moves whole, with what is inside it:
+# stow refuses at the directory, so the directory is what has to stop being
+# there, and anything under it is the reader's and goes with it.
+test_apply_replace_moves_a_directory_whole() {
+  conf 'base personal/base'
+  mklayer personal/base .vimrc
+  sandbox_write "$HOME/.vimrc" notes 'inside the directory'
+  sandbox_write "$HOME/.vimrc/deeper" more 'further inside'
+  run_shale apply --replace
+  assert_status 0 "$shale_status"
+  find_replaced_dir
+  assert_real_dir "$replaced_dir/.vimrc" 'the moved directory'
+  assert_eq 'inside the directory' "$(cat "$replaced_dir/.vimrc/notes")" 'what was in it'
+  assert_eq 'further inside' "$(cat "$replaced_dir/.vimrc/deeper/more")" 'what was under that'
+  assert_symlink_to "$HOME/.vimrc" "$HOME/.dotfiles/current/.vimrc"
+}
+
+# The other half of the set, which is the half a flag that moves things must get
+# right: an apply's own link, a directory two directories merge into, a path the
+# ignore list covers, and a file of the reader's at a path no layer provides are
+# none of them conflicts, and none of them may move.  All four in one case,
+# because what is being asserted is that ~/.dotfiles/replaced holds exactly one
+# name and it is the one path that was a conflict.
+test_apply_replace_leaves_alone_everything_that_is_not_a_conflict() {
+  conf 'base personal/base'
+  mkignore personal '*.swp'
+  mklayer personal/base .zshrc
+  mklayer personal/base .config/git/config
+  mklayer personal/base .cache/notes.swp
+  run_shale apply
+  assert_status 0 "$shale_status" 'the first apply'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  # The reader's own, at three paths the flag must not touch: one where the
+  # layer's file is already linked, one inside a directory both trees hold, and
+  # one the ignore list covers - stow never looks at that last path, so nothing
+  # in $HOME there can refuse an apply.
+  sandbox_write "$HOME/.config/git" ignore 'mine, and no layer provides it'
+  sandbox_write "$HOME/.cache" notes.swp 'covered by the ignore list'
+  sandbox_write "$HOME" .netrc 'no layer provides this either'
+  # And one that is a conflict, so the case cannot pass by the flag doing
+  # nothing at all.
+  mklayer personal/base .bashrc
+  sandbox_write "$HOME" .bashrc 'mine'
+  run_shale apply --replace
+  assert_status 0 "$shale_status" 'the apply with the flag'
+  find_replaced_dir
+  assert_exists "$replaced_dir/.bashrc" 'the one path that was a conflict'
+  assert_missing "$replaced_dir/.zshrc" 'the applied link'
+  assert_missing "$replaced_dir/.config" 'the merged directory'
+  assert_missing "$replaced_dir/.cache" 'the ignored path'
+  assert_missing "$replaced_dir/.netrc" 'the path no layer provides'
+  assert_eq 'mine, and no layer provides it' \
+    "$(cat "$HOME/.config/git/ignore")" 'the file in the merged directory'
+  assert_eq 'covered by the ignore list' \
+    "$(cat "$HOME/.cache/notes.swp")" 'the file at the ignored path'
+  assert_eq 'no layer provides this either' "$(cat "$HOME/.netrc")" 'the unrelated file'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+}
+
+# Nothing to move is the state every apply after the first is in, and the flag
+# has to be invisible there: no directory, no line, and an apply that reads
+# exactly as one without it.  A ~/.dotfiles/replaced created empty on every run
+# would put doctor's note under every report for ever, which is #133's rule.
+test_apply_replace_with_nothing_to_move_leaves_no_trace() {
+  local with_flag
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply --replace
+  assert_status 0 "$shale_status"
+  assert_missing "$HOME/.dotfiles/replaced" 'the directory'
+  assert_not_contains "$shale_out" 'shale: moved ' 'stdout'
+  with_flag=$shale_out
+  assert_empty "$shale_err" 'stderr'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  # And the same run without it, word for word: the flag adds lines where it
+  # moves something and adds nothing where it does not.
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply without the flag'
+  assert_eq "$with_flag" "$shale_out" 'the stdout of the two runs'
+}
+
+# The order inside the command: build, then move, then stow.  A build that fails
+# has to leave $HOME exactly as it found it, because the moves are for a stow
+# that is not going to run - and a file moved aside for an apply that never
+# happens is a file the reader has to put back by hand.
+test_apply_replace_moves_nothing_when_the_build_fails() {
+  conf 'base personal/base' 'local local'
+  mklayer personal/base .config/git/config
+  mklayer local .config/git 'a file where the lower layer has a directory'
+  sandbox_write "$HOME" .bashrc 'mine'
+  mklayer personal/base .bashrc
+  run_shale apply --replace
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" 'shale: conflict at .config/git' 'stderr'
+  assert_not_contains "$shale_out" 'shale: moved ' 'stdout'
+  assert_missing "$HOME/.dotfiles/replaced" 'the directory'
+  assert_eq 'mine' "$(cat "$HOME/.bashrc")" 'the file the build left alone'
+}
+
+# doctor prints ten of these paths and says how many more there are; the flag
+# moves all of them.  Twelve here, so the eleventh and twelfth are past the cap
+# the report uses - and each is a path stow would refuse at, so a run that left
+# either behind would exit 1 on stow rather than pass this quietly.
+test_apply_replace_moves_every_path_however_many_doctor_prints() {
+  local i name
+  conf 'base personal/base'
+  i=1
+  while [ "$i" -le 12 ]; do
+    name=.file$i
+    mklayer personal/base "$name"
+    sandbox_write "$HOME" "$name" "mine $i"
+    i=$((i + 1))
+  done
+  run_shale doctor
+  assert_status 1 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: 12 paths in $HOME hold something no apply put there, and a layer provides each of them" 'stdout'
+  assert_contains "$shale_out" 'shale:   and 2 more, not named here' 'stdout'
+  run_shale apply --replace
+  assert_status 0 "$shale_status" 'the apply'
+  find_replaced_dir
+  i=1
+  while [ "$i" -le 12 ]; do
+    name=.file$i
+    assert_eq "mine $i" "$(cat "$replaced_dir/$name")" "the moved $name"
+    assert_symlink_to "$HOME/$name" "$HOME/.dotfiles/current/$name"
+    i=$((i + 1))
+  done
+}
+
+# Two runs inside one second, which is the only way two of these directories can
+# want the same name.  The second reuses the first's rather than inventing a
+# name beside it - the tree inside is keyed by the path in $HOME, so two runs
+# cannot want the same file unless the path came back between them - and a
+# destination that is already there stops the run naming it rather than being
+# written over, because what is at that path is the only copy of the reader's
+# file.  Both halves are asserted here because they are one decision.
+#
+# A date of the harness's own is what makes the second happen: the real one
+# would have to be raced.
+test_apply_replace_reuses_one_stamp_and_refuses_an_occupied_path() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .bashrc
+  sandbox_write "$HOME" .bashrc 'the first one'
+  stub_path_with_date 20200101-000000
+  saved=$PATH
+  PATH=$stub_path
+  run_shale apply --replace
+  PATH=$saved
+  assert_status 0 "$shale_status" 'the first apply'
+  assert_eq 'the first one' \
+    "$(cat "$HOME/.dotfiles/replaced/20200101-000000/.bashrc")" 'the first move'
+  # The link that apply made, replaced by a file of the reader's - which is what
+  # an editor writing a new file rather than through the link does - so the
+  # second run finds a conflict at the same path at the same second.  The link
+  # goes through the resolved directory: sandbox_write refuses to write at a
+  # name a symlink holds, which is the guard doing its job rather than something
+  # to work around.
+  sandbox_mkdir "$HOME"
+  rm -f "$sandbox_dir/.bashrc" || fail 'could not remove the applied link'
+  sandbox_write "$HOME" .bashrc 'the second one'
+  # And a second conflict after it in byte order, so the case can say the run
+  # stopped rather than finished with one of the two done.
+  mklayer personal/base .gitconfig
+  sandbox_write "$HOME" .gitconfig 'never moved'
+  PATH=$stub_path
+  run_shale apply --replace
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the second apply'
+  assert_contains "$shale_err" \
+    "shale: there is already something at $HOME/.dotfiles/replaced/20200101-000000/.bashrc" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   shale moves $HOME/.bashrc there and will not write over what is at that path" 'stderr'
+  assert_contains "$shale_err" 'shale:   nothing has been moved' 'stderr'
+  assert_contains "$shale_err" "shale:   nothing in $HOME has been relinked" 'stderr'
+  # Reused, not multiplied: one directory under replaced, and it is the first
+  # run's.
+  find_replaced_dir
+  assert_eq "$HOME/.dotfiles/replaced/20200101-000000" "$replaced_dir" 'the one stamp'
+  assert_eq 'the first one' "$(cat "$replaced_dir/.bashrc")" 'the file already there'
+  assert_eq 'the second one' "$(cat "$HOME/.bashrc")" 'the file left in place'
+  assert_eq 'never moved' "$(cat "$HOME/.gitconfig")" 'the path after the one that failed'
+  assert_missing "$replaced_dir/.gitconfig" 'the path the run never reached'
+}
+
+# date is the one tool only this option runs, so its absence is a note in doctor
+# rather than a finding and refuses nothing until there is something to move.
+# Both halves here: an apply with nothing to move finishes without it, and one
+# with something to move refuses before it has touched $HOME.
+# shellcheck disable=SC2123  # PATH is replaced on purpose and restored below
+test_apply_replace_refuses_without_date_and_only_when_it_matters() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  stub_path_without date
+  saved=$PATH
+  PATH=$stub_path
+  run_shale apply --replace
+  PATH=$saved
+  assert_status 0 "$shale_status" 'the apply with nothing to move'
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+
+  mklayer personal/base .bashrc
+  sandbox_write "$HOME" .bashrc 'mine'
+  PATH=$stub_path
+  run_shale apply --replace
+  PATH=$saved
+  assert_status 1 "$shale_status" 'the apply with something to move'
+  assert_contains "$shale_err" \
+    "shale: date is not installed, and '--replace' names the directory it moves files aside to after the time" \
+    'stderr'
+  assert_contains "$shale_err" \
+    "shale:   $HOME/.dotfiles/current is built and correct; nothing in $HOME has been moved or relinked" \
+    'stderr'
+  assert_eq 'mine' "$(cat "$HOME/.bashrc")" 'the file that stayed'
+  assert_missing "$HOME/.dotfiles/replaced" 'the directory'
+}
+
+# A date on PATH that answers something other than what it was asked: what comes
+# back is a directory name and shale joins it to a path, so a '/' in it would put
+# the tree somewhere nobody named and an empty answer would put it at
+# ~/.dotfiles/replaced itself, where the next run's would land on top of it.  The
+# answer is held to the shape shale asked for and the run stops rather than
+# guessing - which is the same choice the occupied destination above is.
+# shellcheck disable=SC2123  # PATH is replaced on purpose and restored below
+test_apply_replace_refuses_a_date_that_answers_something_else() {
+  local saved stamp
+  conf 'base personal/base'
+  mklayer personal/base .bashrc
+  sandbox_write "$HOME" .bashrc 'mine'
+  for stamp in '../elsewhere' 'not a stamp'; do
+    stub_path_with_date "$stamp"
+    saved=$PATH
+    PATH=$stub_path
+    run_shale apply --replace
+    PATH=$saved
+    assert_status 1 "$shale_status" "'$stamp' exit status"
+    assert_contains "$shale_err" \
+      "shale: date answered '$stamp', and '--replace' names the directory it moves files aside to after the time" \
+      "'$stamp' stderr"
+    assert_contains "$shale_err" \
+      "shale:   shale asked it for '+%Y%m%d-%H%M%S', which is digits and one '-'" \
+      "'$stamp' stderr"
+    assert_eq 'mine' "$(cat "$HOME/.bashrc")" "'$stamp' the file that stayed"
+    assert_missing "$HOME/.dotfiles/replaced" "'$stamp' the directory"
+    # Where the first of the two stamps would have put the tree: the join is
+    # $DOTFILES/replaced/../elsewhere, so the directory it escapes into is one
+    # up from replaced and not one up from ~/.dotfiles.
+    assert_missing "$HOME/.dotfiles/elsewhere" "'$stamp' the path a '/' would reach"
+  done
+}
+
+# Something already at the name shale writes: it is not a directory shale made,
+# so nothing is composed into it and the run stops naming it.  doctor's note
+# about the same shape is what points at the same path from the other side.
+test_apply_replace_refuses_when_replaced_is_not_a_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .bashrc
+  sandbox_write "$HOME" .bashrc 'mine'
+  sandbox_write "$HOME/.dotfiles" replaced 'not a directory'
+  run_shale apply --replace
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" \
+    "shale: could not create $HOME/.dotfiles/replaced" 'stderr'
+  assert_eq 'mine' "$(cat "$HOME/.bashrc")" 'the file that stayed'
+  assert_eq 'not a directory' "$(cat "$HOME/.dotfiles/replaced")" 'what was at the name'
+}
+
+# Nothing under ~/.dotfiles, whatever a layer provides there.  stow will not
+# stow into the stow directory it was given - 'WARNING: skipping target which
+# was current stow directory', on 2.3.1 and 2.4.1, both then linking the rest
+# and exiting 0 - so no path below it is one an apply writes at, and nothing
+# standing there is a refusal to clear.
+#
+# Two shapes, and the second is why this is a case rather than a comment: a
+# layer providing '.dotfiles/shale.conf' made the flag move the reader's own
+# config out of ~/.dotfiles and exit 0, leaving the next run of shale with no
+# config at all, and one providing '.dotfiles/personal' as a file would have
+# taken the whole clone root the config points at.  The exclusion is
+# home_conflict's, so doctor is silent about these paths too and the report and
+# the moved set say the same thing - asserted here, both empty.
+test_apply_replace_moves_nothing_under_the_dotfiles_directory() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  mklayer personal/base .dotfiles/shale.conf
+  mklayer personal/base .dotfiles/personal
+  run_shale apply --replace
+  assert_status 0 "$shale_status" 'the apply'
+  assert_not_contains "$shale_out" 'shale: moved ' 'stdout'
+  assert_missing "$HOME/.dotfiles/replaced" 'the directory'
+  # The reader's own config and clone root, untouched.
+  assert_eq 'base personal/base' "$(cat "$HOME/.dotfiles/shale.conf")" 'the config'
+  assert_real_dir "$HOME/.dotfiles/personal" 'the clone root'
+  assert_eq 'personal/base/.zshrc' \
+    "$(cat "$HOME/.dotfiles/personal/base/.zshrc")" 'the layer file'
+  # The apply the flag was asked for still happened.
+  assert_symlink_to "$HOME/.zshrc" "$HOME/.dotfiles/current/.zshrc"
+  # And doctor names none of it either, which is the half that keeps a reader
+  # from doing by hand what the flag was stopped from doing.
+  run_shale doctor
+  assert_not_contains "$shale_out" "$HOME/.dotfiles/shale.conf" 'doctor stdout'
+  assert_not_contains "$shale_out" 'holds something no apply put there' 'doctor stdout'
+}
+
+# A home reached through a symlinked parent, which is an ordinary machine: an
+# /export/home mount, a macOS /home, a container bind.  The directories this
+# flag makes are made from ~/.dotfiles downwards and never from '/', so a link
+# anywhere above the dotfiles directory is nothing to do with it.  Walking from
+# the root instead refused with 'could not create /tmp/.../link' on a setup
+# where build, apply and doctor all work.
+test_apply_replace_works_under_a_home_reached_through_a_symlink() {
+  local home_link
+  sandbox_mkdir "$CASE_DIR/real/home"
+  sandbox_leaf "$sandbox_dir" .shale-test-sandbox new
+  : >"$sandbox_path" || fail 'could not mark the sandbox home'
+  sandbox_leaf "$CASE_DIR" link new
+  ln -s "$CASE_DIR/real" "$sandbox_path" || fail 'could not create the symlink'
+  home_link=$CASE_DIR/link/home
+  HOME=$home_link
+  conf 'base personal/base'
+  mklayer personal/base .bashrc
+  sandbox_write "$HOME" .bashrc 'mine'
+  run_shale apply --replace
+  assert_status 0 "$shale_status"
+  find_replaced_dir
+  assert_eq 'mine' "$(cat "$replaced_dir/.bashrc")" 'the moved file'
+  assert_symlink_to "$HOME/.bashrc" "$HOME/.dotfiles/current/.bashrc"
+}
+
+# A stow that refuses after the moves, which is reachable because the moved set
+# is narrower than everything stow refuses: an absolutely spelled link of the
+# reader's own at a path a layer provides looks applied, is doctor's separate
+# finding, and is not one of these.  So the flag clears the file, stow aborts
+# over the link, and the run exits 1 with the reader's file no longer in $HOME.
+#
+# The lines naming each move are on stdout and the failure is on stderr, so a
+# run read through a '2>log' had nothing on the failing stream saying where the
+# files had gone.  That line is what this pins.
+test_apply_replace_says_where_the_files_went_when_stow_then_refuses() {
+  conf 'base personal/base'
+  mklayer personal/base .bashrc
+  mklayer personal/base .zshrc
+  run_shale build
+  assert_status 0 "$shale_status" 'the build'
+  sandbox_write "$HOME" .bashrc 'mine'
+  # The link the finding is about, planted rather than applied: it has to be
+  # spelled from the root, and an apply writes a relative one.
+  sandbox_mkdir "$HOME"
+  sandbox_leaf "$sandbox_dir" .zshrc new
+  ln -s "$HOME/.dotfiles/current/.zshrc" "$sandbox_path" ||
+    fail 'could not plant the absolute link'
+  run_shale apply --replace
+  assert_status 1 "$shale_status" 'the apply'
+  find_replaced_dir
+  assert_contains "$shale_out" \
+    "shale: moved $HOME/.bashrc to $replaced_dir/.bashrc" 'stdout'
+  assert_contains "$shale_err" \
+    "shale: stow failed; nothing in $HOME was relinked" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   1 path was moved aside before this, and it is under $replaced_dir" 'stderr'
+  assert_eq 'mine' "$(cat "$replaced_dir/.bashrc")" 'the moved file'
+  # The link the flag left alone, which is what makes this state reachable.
+  assert_exists "$HOME/.zshrc" 'the absolute link'
+  assert_missing "$replaced_dir/.zshrc" 'the link the flag does not move'
+}
+
+# The directory exists exactly when it holds something, which is what makes
+# doctor's note about it true.  A move that fails on the first path used to
+# leave an empty stamp directory behind, and the doctor after it said that
+# directory held files an apply had moved aside.
+#
+# A conflict inside a directory in $HOME the reader cannot write to is what
+# makes mv fail after everything before it has succeeded: the path is a
+# conflict, the destination is clear, and the rename is refused by the source's
+# own directory.  The mode goes back before any assertion runs, so a failing
+# assertion cannot leave the sandbox unremovable.
+test_apply_replace_leaves_no_empty_directory_when_the_first_move_fails() {
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base locked/notes
+  sandbox_write "$HOME/locked" notes 'mine'
+  chmod 0500 "$HOME/locked" || fail 'could not take the write bit off'
+  run_shale apply --replace
+  chmod 0700 "$HOME/locked" || fail 'could not put the write bit back'
+  assert_status 1 "$shale_status" 'the apply'
+  assert_contains "$shale_err" "shale: could not move $HOME/locked/notes to " 'stderr'
+  assert_contains "$shale_err" 'shale:   nothing has been moved' 'stderr'
+  assert_missing "$HOME/.dotfiles/replaced" 'the directory nothing was put in'
+  assert_eq 'mine' "$(cat "$HOME/locked/notes")" 'the file that stayed'
+  # And the report that would have described it, which now has nothing to say.
+  run_shale doctor
+  assert_not_contains "$shale_out" "$HOME/.dotfiles/replaced" 'doctor stdout'
+}
+
+# The property the whole safety argument rests on: a symlink at a provided path
+# is a leaf, so a link standing where a layer has a directory moves as the link
+# it is and the walk never looks at what is on the other end of it.  Descending
+# would ask about paths that resolve outside $HOME and move files nobody named -
+# the reader's real ~/.config lives at the end of this link.
+#
+# The file planted inside the target is what tells the two apart: it sits at a
+# path the layer also provides, so a walk that descended would have called it a
+# conflict, printed a second line, and moved it out of a directory the reader
+# keeps somewhere else entirely.
+test_apply_replace_moves_a_symlinked_directory_without_descending_into_it() {
+  local outside moved
+  conf 'base personal/base'
+  mklayer personal/base .config/nvim/init.lua
+  sandbox_mkdir "$CASE_DIR/elsewhere/nvim"
+  sandbox_write "$sandbox_dir" init.lua 'kept by the reader'
+  sandbox_mkdir "$CASE_DIR/elsewhere"
+  outside=$sandbox_dir
+  sandbox_leaf "$HOME" .config new
+  ln -s "$outside" "$sandbox_path" || fail 'could not plant the directory link'
+  run_shale apply --replace
+  assert_status 0 "$shale_status"
+  find_replaced_dir
+  # One line, and it names the link and not a path below it.
+  moved=$(printf '%s\n' "$shale_out" | grep -c '^shale: moved ')
+  assert_eq 1 "$moved" 'the number of moved lines'
+  assert_contains "$shale_out" \
+    "shale: moved $HOME/.config to $replaced_dir/.config" 'stdout'
+  # Moved as a link: the target text, not what is at the end of it.
+  assert_eq "$outside" "$(readlink "$replaced_dir/.config")" 'the target text'
+  assert_real_dir "$outside" 'what the link points at'
+  # Nothing was taken out of the directory it points at, which is the assertion
+  # the descent would have broken.
+  assert_eq 'kept by the reader' \
+    "$(cat "$outside/nvim/init.lua")" 'the file at the far end of the link'
+  # And the apply finished, stow making a real directory where the link was.
+  assert_real_dir "$HOME/.config" 'the directory stow made'
+  assert_symlink_to "$HOME/.config/nvim/init.lua" \
+    "$HOME/.dotfiles/current/.config/nvim/init.lua"
+}
+
+
+# The one shape in which taking that directory back would destroy something.
+# mv between two filesystems is a copy and then a removal - a SHALE_DIR on
+# another mount is all it takes - so a failure in the removal leaves a complete
+# copy at the destination while what is left in $HOME is part of what it was.
+# The tidy-up must not touch that copy, and the message must not say nothing
+# has been moved: rm -rf took the copy away and said exactly that, which is the
+# one outcome this option exists to make impossible.
+#
+# A stub mv that copies to the destination and then fails is the cross-device
+# partial, made deterministic.  What is asserted is the copy surviving, the
+# directory surviving with it, and the message naming both ends.
+# shellcheck disable=SC2016  # the stub body is written for the stub's shell
+test_apply_replace_keeps_what_a_half_finished_move_left_at_the_destination() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .bashrc
+  sandbox_write "$HOME" .bashrc 'the only copy'
+  # Only the move into replaced/ is stubbed, so the build's own two renames are
+  # the real mv.
+  stub_mv '*/replaced/*' 2 'cp -RPp "$1" "$2"'
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale apply --replace
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  find_replaced_dir
+  # The copy mv had written, still there.
+  assert_eq 'the only copy' "$(cat "$replaced_dir/.bashrc")" 'the copy at the destination'
+  # And the path in $HOME, which this stub leaves whole; the message speaks for
+  # both because shale cannot tell which of them is complete.
+  assert_eq 'the only copy' "$(cat "$HOME/.bashrc")" 'the path in the home'
+  assert_contains "$shale_err" \
+    "shale: could not move $HOME/.bashrc to $replaced_dir/.bashrc" 'stderr'
+  assert_contains "$shale_err" \
+    "shale:   $replaced_dir/.bashrc holds what mv had written there when it stopped" 'stderr'
+  assert_contains "$shale_err" \
+    'shale:   shale reads neither and removes neither: compare them, keep what you want, and remove the other' \
+    'stderr'
+  # The line that used to be printed over the wreckage.
+  assert_not_contains "$shale_err" 'nothing has been moved' 'stderr'
+}
+
+# The other half of the tidy-up: what was already under ~/.dotfiles/replaced
+# before this run is an earlier run's and is never taken back, however this one
+# ends.  A stamp is a second, so the two runs here may or may not land on one
+# name - either way exactly one directory is left and it is the first run's,
+# with the file it moved still in it.
+test_apply_replace_leaves_an_earlier_stamp_alone_when_a_move_fails() {
+  skip_if_root
+  conf 'base personal/base'
+  mklayer personal/base .bashrc
+  sandbox_write "$HOME" .bashrc 'moved by the first run'
+  run_shale apply --replace
+  assert_status 0 "$shale_status" 'the first apply'
+  find_replaced_dir
+  assert_eq 'moved by the first run' \
+    "$(cat "$replaced_dir/.bashrc")" 'what the first run moved'
+  # A second run whose only conflict cannot be moved, in a directory of the
+  # reader's that has lost its write bit.  The mode goes back before any
+  # assertion, so a failing one cannot leave the sandbox unremovable.
+  mklayer personal/base locked/notes
+  sandbox_write "$HOME/locked" notes 'mine'
+  chmod 0500 "$HOME/locked" || fail 'could not take the write bit off'
+  run_shale apply --replace
+  chmod 0700 "$HOME/locked" || fail 'could not put the write bit back'
+  assert_status 1 "$shale_status" 'the second apply'
+  assert_contains "$shale_err" "shale: could not move $HOME/locked/notes to " 'stderr'
+  # Still one directory under replaced, still the first run's, still holding
+  # what that run put in it.
+  find_replaced_dir
+  assert_eq 'moved by the first run' \
+    "$(cat "$replaced_dir/.bashrc")" 'what the first run moved'
+  assert_missing "$replaced_dir/locked" 'the tree the failed move made'
+  assert_eq 'mine' "$(cat "$HOME/locked/notes")" 'the file that stayed'
+}
+
+
+# The tidy-up reaching past a component that was never created.  On the arm
+# where make_own_dirs failed, the deepest name in the path it was given is the
+# one it could not make, so an rmdir that read ENOENT as 'not empty' stopped
+# there and left the stamp this run did make - empty, with doctor then saying it
+# held files that had been moved aside.
+#
+# A mkdir that refuses below the stamp is what makes that deterministic; ENOSPC,
+# a quota and a read-only filesystem reach the same arm for real.  Two levels
+# under the stamp, so the walk has to step over one absent name and then remove
+# two it made.
+# shellcheck disable=SC2016  # the stub body is written for the stub's shell
+test_apply_replace_leaves_nothing_when_a_directory_below_the_stamp_cannot_be_made() {
+  local saved real
+  conf 'base personal/base'
+  mklayer personal/base a/b/notes
+  sandbox_write "$HOME/a/b" notes 'mine'
+  real=$(command -v mkdir) || fail 'mkdir is not on PATH'
+  sandbox_mkdir "$CASE_DIR/stub-bin"
+  stub_path=$sandbox_dir
+  sandbox_write "$stub_path" mkdir \
+    '#!/usr/bin/env bash' \
+    'for arg in "$@"; do' \
+    '  case "$arg" in' \
+    '    */replaced/*/*/*) exit 1 ;;' \
+    '  esac' \
+    'done' \
+    "exec $real \"\$@\""
+  chmod 0755 "$sandbox_path" || fail 'could not make the stub executable'
+  saved=$PATH
+  PATH=$stub_path:$PATH
+  run_shale apply --replace
+  PATH=$saved
+  assert_status 1 "$shale_status"
+  assert_contains "$shale_err" "shale: could not create $HOME/.dotfiles/replaced/" 'stderr'
+  assert_contains "$shale_err" 'shale:   nothing has been moved' 'stderr'
+  # The stamp and the directory holding it both went, and so did the one
+  # component under the stamp that was made before the refusal.
+  assert_missing "$HOME/.dotfiles/replaced" 'the directory nothing was put in'
+  assert_eq 'mine' "$(cat "$HOME/a/b/notes")" 'the file that stayed'
+  # And the report that would have described it, which now has nothing to say.
+  run_shale doctor
+  assert_not_contains "$shale_out" "$HOME/.dotfiles/replaced" 'doctor stdout'
+}
+
 # --------------------------------------------------------------- doctor cases
 #
 # doctor reports and never repairs, so every case here asserts the text as well
@@ -9407,6 +10190,12 @@ test_doctor_reports_its_checks_in_order() {
   ln -s "$HOME/.dotfiles/current/.gitconfig" "$sandbox_path" ||
     fail 'could not plant the home link'
   sandbox_write "$HOME" .stowrc '--ignore=secret'
+  # The directory an 'apply --replace' leaves, which is last of all and after
+  # the stow resource file: it is the one name in ~/.dotfiles nothing shale runs
+  # ever clears, so it is the note a reader is left with rather than one they
+  # read on the way past.  Planted rather than made by the flag, the config
+  # above having an error in it.
+  sandbox_write "$HOME/.dotfiles/replaced/20200101-000000" .bashrc 'moved aside'
   stub_path_without stow
   saved=$PATH
   PATH=$stub_path
@@ -9424,13 +10213,14 @@ test_doctor_reports_its_checks_in_order() {
       *' has an absolute target at a path a layer provides') seen="$seen home-spelling" ;;
       *' is not a layer, and no build reads it') seen="$seen stray" ;;
       'shale: a stow resource file'*) seen="$seen stowrc" ;;
+      *" holds files an 'apply --replace' moved aside") seen="$seen replaced" ;;
       'shale: 6 problems found') seen="$seen summary" ;;
     esac
   done <<EOF
 $shale_out
 EOF
-  assert_eq ' prerequisite config layer spelling home home-spelling stray stowrc summary' "$seen" \
-    'the order of the report'
+  assert_eq ' prerequisite config layer spelling home home-spelling stray stowrc replaced summary' \
+    "$seen" 'the order of the report'
 }
 
 # The stub PATH holds every other binary doctor and the harness need, so this
@@ -14472,6 +15262,132 @@ test_doctor_ignores_a_script_that_is_not_under_home() {
   assert_contains "$shale_out" 'shale: no problems found' 'stdout'
 }
 
+# ------------------------------------------ doctor's moved-aside cases
+#
+# ~/.dotfiles/replaced is shale's fourth name in that directory, and the one no
+# command of shale's ever removes: a build reaps current.new and current.old,
+# and nothing reaps this.  So doctor does two things about it and no more - it
+# does not call it a stray, and it says it is there until the reader deletes it.
+
+test_doctor_notes_the_moved_aside_directory_and_goes_quiet_once_it_is_gone() {
+  conf 'base personal/base'
+  mklayer personal/base .bashrc
+  sandbox_write "$HOME" .bashrc 'mine'
+  run_shale apply --replace
+  assert_status 0 "$shale_status" 'the apply'
+  run_shale doctor
+  # A note and not a finding: the flag did what it said, and nothing about the
+  # state it left stops a build or an apply.
+  assert_status 0 "$shale_status" 'the doctor'
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/replaced holds files an 'apply --replace' moved aside" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   each of them is where it was moved to and nowhere else: nothing was copied and nothing was read' \
+    'stdout'
+  assert_contains "$shale_out" \
+    'shale:   no build and no apply removes any of it, so delete it once you have what you need from it' \
+    'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+  # Not a stray, which is the other half: the scan of ~/.dotfiles skips the name
+  # the way it skips build's three, so nothing calls it a leftover clone.
+  assert_not_contains "$shale_out" 'is not a configured layer' 'stdout'
+  assert_not_contains "$shale_out" 'is not a layer, and no build reads it' 'stdout'
+
+  # And gone once the reader has done what the note asks.  The directory is
+  # removed through the resolved ~/.dotfiles rather than by its own path, which
+  # is how every other case in this suite removes something under $HOME.
+  sandbox_mkdir "$HOME/.dotfiles"
+  rm -rf "$sandbox_dir/replaced" || fail 'could not remove the moved-aside directory'
+  run_shale doctor
+  assert_status 0 "$shale_status" 'the doctor after the removal'
+  assert_not_contains "$shale_out" 'moved aside' 'stdout'
+  assert_eq 'shale: no problems found' "$shale_out" 'the whole report'
+}
+
+# Something else at the name: not a directory shale made, so nothing is claimed
+# about what is in it - and the note says what the name is for, because the
+# apply that meets it refuses there.
+test_doctor_notes_something_that_is_not_a_directory_at_that_name() {
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  sandbox_write "$HOME/.dotfiles" replaced 'not a directory'
+  run_shale doctor
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: $HOME/.dotfiles/replaced is at the path 'apply --replace' moves files aside to" 'stdout'
+  assert_contains "$shale_out" \
+    'shale:   shale creates a directory there and moves into it, so an apply with that option will refuse at this' \
+    'stdout'
+  assert_contains "$shale_out" 'shale:   remove it, or move it aside' 'stdout'
+  assert_not_contains "$shale_out" 'is not a layer, and no build reads it' 'stdout'
+}
+
+# date is read by one thing in shale and one only, so its absence degrades that
+# option and nothing else: a note, the run still exiting 0, and the line saying
+# in its own words what it costs and which package carries it.
+# shellcheck disable=SC2123  # PATH is replaced on purpose and restored below
+test_doctor_a_missing_date_is_a_note_about_the_one_option_that_needs_it() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  stub_path_without date
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: date is not installed, so 'shale apply --replace' cannot name the directory it moves files aside to" \
+    'stdout'
+  assert_contains "$shale_out" \
+    'shale:   it stops no build and no apply: what it costs is that one option, which refuses rather than guessing at a name' \
+    'stdout'
+  assert_contains "$shale_out" \
+    "shale:   it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm" \
+    'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+}
+
+
+# The fourth tool note, and the narrowest: rmdir is what takes back a directory
+# 'apply --replace' made when the move into it then failed, so its absence costs
+# only that the note further up this report would describe an empty directory as
+# holding files.  Named because a report that promises its own note is true has
+# to say when it is not.
+# shellcheck disable=SC2123  # PATH is replaced on purpose and restored below
+test_doctor_a_missing_rmdir_is_a_note_about_what_it_tidies_up() {
+  local saved
+  conf 'base personal/base'
+  mklayer personal/base .zshrc
+  run_shale apply
+  assert_status 0 "$shale_status" 'the apply'
+  stub_path_without rmdir
+  saved=$PATH
+  PATH=$stub_path
+  run_shale doctor
+  PATH=$saved
+  assert_status 0 "$shale_status"
+  assert_contains "$shale_out" \
+    "shale: rmdir is not installed, so a move 'shale apply --replace' could not finish leaves behind the empty directory it had made" \
+    'stdout'
+  assert_contains "$shale_out" \
+    'shale:   it stops no build, no apply and no move: what it costs is that this report then describes such a directory as holding files that were moved aside' \
+    'stdout'
+  # Word for word the line the readlink and date notes carry.  The three name
+  # the same package and the same six tools a reader is certain to have,
+  # because doctor makes a finding of each of them: a list that named date or
+  # readlink would be telling somebody who is missing two of these that they
+  # already have one of them.
+  assert_contains "$shale_out" \
+    "shale:   it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm" \
+    'stdout'
+  assert_contains "$shale_out" 'shale: no problems found, but read the note above' 'stdout'
+}
+
 # -------------------------------------------------------------- examples cases
 #
 # The shipped examples are the format's documentation, and documentation rots
@@ -14806,6 +15722,38 @@ test_which_a_root_is_named_as_the_root_it_is() {
     assert_eq "shale: '$arg' names the built tree at $HOME/.dotfiles/current, not a path in it" \
       "$shale_err" "'$arg' stderr"
   done
+}
+
+# ~/.dotfiles/replaced is not one of those roots and is deliberately not made
+# one: 'which' strips the built tree's path and each layer's because a path in
+# either is a path of the composed home spelled through a directory that mirrors
+# it, and shale answers about the layers that provide it.  A moved-aside file is
+# not that - no layer provides it, nothing composes it, and the tree under the
+# stamp is a record of what $HOME held rather than of what it will hold.  So it
+# is answered as what it is: an ordinary path under ~/.dotfiles, the same
+# answer shale.conf gets.  Pinned because it is a decision and not an oversight;
+# a later change that added the name to the strip would silently start reporting
+# a layer for a file nothing links.
+test_which_reads_a_moved_aside_path_as_the_ordinary_path_it_is() {
+  local arg
+  conf 'base personal/base'
+  mklayer personal/base .bashrc
+  sandbox_write "$HOME" .bashrc 'mine'
+  run_shale apply --replace
+  assert_status 0 "$shale_status" 'the apply'
+  find_replaced_dir
+  for arg in "$HOME/.dotfiles/replaced" "$replaced_dir" "$replaced_dir/.bashrc"; do
+    run_shale which "$arg"
+    assert_status 1 "$shale_status" "'$arg' exit status"
+    assert_empty "$shale_out" "'$arg' stdout"
+    assert_contains "$shale_err" \
+      "shale: no layer provides '${arg#"$HOME/"}'" "'$arg' stderr"
+  done
+  # And the path it was moved from still answers for the layer that provides it,
+  # which is the answer the reader is actually after.
+  run_shale which .bashrc
+  assert_status 0 "$shale_status" 'the home path'
+  assert_contains "$shale_out" "$HOME/.dotfiles/personal/base/.bashrc" 'stdout'
 }
 
 test_which_rejects_a_dot_dot_component() {

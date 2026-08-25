@@ -172,6 +172,25 @@ work queue. Take it in this order.
    $ mv ~/.config/nvim/init.lua ~/pre-shale/.config/nvim/
    ```
 
+   `shale apply --replace` is the one-command form of this step and the next one together. It moves
+   exactly the paths `shale doctor` lists as *holding something no apply put there* — run that first
+   if you want the list before anything moves — into `~/.dotfiles/replaced/<timestamp>/`, keeping
+   the tree each path had, and then applies:
+
+   ```
+   $ shale apply --replace
+   shale: composed layer 'base' from /home/you/.dotfiles/personal/base
+   shale: composed layer 'local' from /home/you/.dotfiles/local
+   shale: moved /home/you/.zshrc to /home/you/.dotfiles/replaced/20260825-104233/.zshrc
+   shale: moved /home/you/.profile to /home/you/.dotfiles/replaced/20260825-104233/.profile
+   shale: moved /home/you/.gitconfig to /home/you/.dotfiles/replaced/20260825-104233/.gitconfig
+   ```
+
+   It moves and never deletes, exactly as the `mv` above does; what differs is where the files land
+   and who mentions them afterwards. `~/pre-shale` is a directory shale neither reads nor reports,
+   and `~/.dotfiles/replaced` is one `doctor` notes on every run until you delete it. Neither is
+   read by a build, so the choice is only whether you want the reminder.
+
 5. **Apply.**
 
    ```
@@ -322,7 +341,10 @@ and it cannot when the link points anywhere else. Unstow the old package and the
 An ordinary file, not a link, already sitting at the path — `existing target is neither a link nor a
 directory`, quoted in full under *Coming from plain files*. That file is not in any layer and shale
 will not overwrite it. Move it aside, or copy what you want from it into the layer that should own it
-and then move it aside anyway.
+and then move it aside anyway. `shale apply --replace` is the one-command form of that moving aside —
+step 4 of *Coming from plain files* written as a flag — and it puts the file under
+`~/.dotfiles/replaced/<timestamp>/`. It treats a link the old setup still owns exactly as readily as
+an ordinary file, so unstow the old packages first, as above, rather than reaching for it here.
 
 Do not reach for `stow --adopt` to clear any of these, for the reason given at the top. It moves the
 file from `$HOME` into the package — which here means into `~/.dotfiles/current`, generated output —

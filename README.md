@@ -88,6 +88,27 @@ have to stop being files at those paths before the first apply, and anything of 
 has to be copied into a layer by hand — shale merges nothing.
 [docs/migrating.md](docs/migrating.md) takes both starting points step by step.
 
+An account nobody has touched has some already: `useradd` copies `.bashrc`, `.profile` and
+`.bash_logout` into it from `/etc/skel`, and one `git config --global user.email you@example.com`
+writes `.gitconfig`. A layer providing any of those is refused on the very first apply, and
+`apply --replace` is the one command that clears it — it moves the paths `doctor` reports as
+*holding something no apply put there* into `~/.dotfiles/replaced/<timestamp>/`, keeping the tree
+each one had, and then applies:
+
+```
+$ shale apply --replace
+shale: moved /home/you/.bashrc to /home/you/.dotfiles/replaced/20260825-104233/.bashrc
+```
+
+That report is the flag's exact scope, and it is narrower than "everything stow can refuse": a
+symlink of your own whose target is spelled from the root looks applied, aborts the apply just the
+same, and is a separate `doctor` finding with its own remedy. `--replace` leaves that one for you.
+
+It moves and never deletes or reads: a file keeps its content and its mode, a symlink moves as a
+link, and a directory moves whole. Nothing removes that directory afterwards — `doctor` notes it on
+every run until you delete it, which is the point at which you have decided you no longer need what
+is in it.
+
 ## Configuration
 
 `~/.dotfiles/shale.conf` lists one layer per line, lowest precedence first:
@@ -215,6 +236,7 @@ shale - layered dotfiles builder
 usage:
   shale build          compose the configured layers into ~/.dotfiles/current
   shale apply          build, then stow current into your home directory
+    --replace          move aside what 'doctor' says no apply put there
   shale doctor         check prerequisites, config, and broken links
   shale which PATH     show which layer provides PATH, and what it shadows
 
@@ -232,7 +254,8 @@ A .shale-modes file there declares modes, one "700  .ssh" per line.
 ```
 
 `shale help`, `shale -h` and `shale --help` print that same text, as does `shale` with no arguments
-above. The four commands in it are the whole surface: there are no others, and no options.
+above. The four commands in it are the whole surface: there are no others, and `apply --replace` is
+the only option.
 
 | Command | What it does |
 |---|---|
