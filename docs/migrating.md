@@ -347,11 +347,17 @@ every layer, the links inside it are left dangling and the apply still exits 0: 
 only visits directories the package still has.
 
 Spelling is the other reason a link is kept. Stow takes back only the relative links an apply wrote,
-so a link at a managed path that you re-spelled as an absolute one stays where it is even though the
-built tree still holds the directory around it — and on stow 2.3.1, an absolute link directly in
-`$HOME` makes every apply print `BUG in find_stowed_path? Absolute/relative mismatch ...` on stderr,
-which shale passes through unchanged under its own `stow exited 0 and wrote output` warning. Either
-way the link is left behind, and the apply counts it.
+so a link at a path the layers have moved past that you re-spelled as an absolute one stays where it
+is even though the built tree still holds the directory around it — and on stow 2.3.1, an absolute
+link directly in `$HOME` makes every apply print `BUG in find_stowed_path? Absolute/relative mismatch
+...` on stderr, which shale passes through unchanged under its own `stow exited 0 and wrote output`
+warning. Either way the link is left behind, and the apply counts it.
+
+Re-spell one at a path a layer still provides and nothing is left behind, because nothing runs: stow
+compares the text of the link it finds against the text it would write, never the file at the end of
+it, so an absolute spelling of the very path it wants is a target it does not own — and it abandons
+the whole apply, on 2.3.1 and 2.4.1 alike. `doctor` names such a link, and the way out is to remove
+it and apply again.
 
 The apply says so, in one line and no more:
 
