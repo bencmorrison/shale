@@ -4875,7 +4875,7 @@ test_build_refuses_a_layer_shipping_a_stow_local_ignore() {
   assert_missing "$HOME/.dotfiles/current.new"
 }
 
-# A nine-line shale header and then GNU Stow 2.4.1's default-ignore-list
+# A shale-written header and then GNU Stow 2.4.1's default-ignore-list
 # verbatim, asserted whole because a package-local list replaces stow's built-in
 # one wholesale rather than adding to it: a line dropped from here is a file
 # plain stow skips that an apply then links, with everything exiting 0.  The
@@ -4884,9 +4884,11 @@ test_build_refuses_a_layer_shipping_a_stow_local_ignore() {
 # versions land the same tree.
 #
 # The header replaces upstream's own first line, which says comments and blank
-# lines are allowed and so invites editing a file every build overwrites.  Keep
-# it nine lines and 'diff <(tail -n +10 file) <(tail -n +2 default-ignore-list)'
-# stays clean against upstream, which is how the body below is checked.
+# lines are allowed and so invites editing a file every build overwrites.  The
+# header's own length is not the invariant - diff <(sed -n '/^RCS$/,$p' file)
+# <(sed -n '/^RCS$/,$p' default-ignore-list) stays clean against upstream from
+# the first pattern line onward, whatever the header above it grows to, which
+# is how the body below is checked.
 #
 # The inline comments further down are upstream's.  They are kept rather than
 # stripped because both versions of stow strip a '#' that has whitespace before
@@ -4906,6 +4908,11 @@ test_build_writes_the_stow_local_ignore_list() {
 # links what plain stow skips.  Writing 2.4.1'"'"'s list rather than the
 # installed stow'"'"'s is also what makes stow 2.3.1 apply the same tree:
 # 2.3.1 built in the same list without \.gitmodules.
+#
+# Not a line below: ^/\.stow-local-ignore$ is not part of that list
+# either.  Stow adds its own name to every list it reads - the
+# built-in one and any file a package provides - so this file does
+# not have to say it.
 
 RCS
 .+,v
@@ -10808,6 +10815,9 @@ test_doctor_a_link_into_the_built_tree_it_no_longer_provides_is_a_finding() {
   assert_contains "$shale_out" \
     'shale:   earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory' \
     'stdout'
+  assert_contains "$shale_out" \
+    'shale:   that sweep also prints a "WARNING: skipping target" line naming its own stow directory — expected, and not a second problem, on either version' \
+    'stdout'
   # The remedy is the remedy for the finding, not a second one.
   assert_contains "$shale_out" 'shale: 1 problem found' 'stdout'
   assert_empty "$shale_err" 'stderr'
@@ -15847,8 +15857,11 @@ shale:   stow adds that entry itself, so there is no line for it in $HOME/.dotfi
   run_shale build
   assert_status 0 "$shale_status" 'the build'
   assert_exists "$HOME/.dotfiles/current/$trailing" 'the composed copy'
-  # The line the third note says is not there, in the file it names.
-  assert_not_contains "$(cat "$HOME/.dotfiles/current/.stow-local-ignore")" \
+  # The line the third note says is not there, in the file it names - checked
+  # from the pattern list itself, past the header's own prose about the entry
+  # being absent, or that prose would make this assertion false about the very
+  # thing it says is true.
+  assert_not_contains "$(sed -n '/^RCS$/,$p' "$HOME/.dotfiles/current/.stow-local-ignore")" \
     'stow-local-ignore' 'the built list'
   run_shale apply
   assert_status 0 "$shale_status" 'the apply'
