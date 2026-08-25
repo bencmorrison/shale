@@ -331,6 +331,19 @@ CONF=$DOTFILES/shale.conf
 CUR=$DOTFILES/current
 NEW=$DOTFILES/current.new
 OLD=$DOTFILES/current.old
+# Where 'apply --replace' puts what it takes out of $HOME, one timestamped
+# directory per run of it.  A reserved name beside build's three, and the one of
+# the four nothing here ever removes: every path under it is the only copy of
+# what stood in $HOME, so the reader is who deletes it and doctor is what says
+# so while it is there.
+REPLACED=$DOTFILES/replaced
+# The directory one run of that option made, and how many paths it put in it.
+# Empty and 0 until the first path is moved, and read by the stow failures in
+# cmd_apply: the line naming each moved path is on stdout and those failures are
+# on stderr, so a run whose streams are read apart otherwise ends with the files
+# somewhere the reader was never told.
+REPLACED_DIR=
+REPLACED_MOVED=0
 
 # $DOTFILES spelled relative to $HOME, and empty where the root is not under the
 # home at all - which is a layout SHALE_DIR makes reachable and the default never
@@ -380,6 +393,7 @@ usage() {
     'usage:' \
     "  shale build          compose the configured layers into $DOTFILES_SHOWN/current" \
     '  shale apply          build, then stow current into your home directory' \
+    "    --replace          move aside what 'doctor' says no apply put there" \
     '  shale doctor         check prerequisites, config, and broken links' \
     '  shale which PATH     show which layer provides PATH, and what it shadows' \
     '' \
@@ -644,6 +658,16 @@ EOF
       current | current.new | current.old)
         config_error "$CONF:$lineno: layer path '$path' starts with the reserved directory '$root'" \
           "shale builds into $DOTFILES/current"
+        continue
+        ;;
+      # The fourth name shale writes in this directory, refused on the same
+      # terms as build's three and with its own second line: a layer here would
+      # be composed from a tree that an apply fills with the files it took out
+      # of $HOME, which is the one shape that puts a path back where the flag
+      # had just removed it from.
+      replaced)
+        config_error "$CONF:$lineno: layer path '$path' starts with the reserved directory '$root'" \
+          "'apply --replace' moves files aside into $REPLACED"
         continue
         ;;
     esac
@@ -2076,6 +2100,61 @@ make_dir_at() {
   return "$status"
 }
 
+# The path $2 below the existing directory $1, made one component at a time so
+# that every directory it creates goes through make_own_dir and takes
+# $OWN_DIR_MODE rather than the umask 'mkdir -p' would leave on the ones in the
+# middle.  Non-zero where a component could not be made or is not a directory
+# shale may write below, with that component in MADE_DIR_FAILED so the caller
+# names the path rather than the whole of it.
+#
+# The split into a base and a remainder is not decoration.  Given one absolute
+# path this walked from '/', and every directory above the base is somebody
+# else's: a home reached through a symlinked parent - '/tmp/x/link/home', a
+# mount, an /export/home layout, a macOS /home - failed at the link with 'could
+# not create /tmp/x/link', on a machine where every other shale command works.
+# Reproduced, and it is why the base is taken on trust: the caller has already
+# built on it, and what this may create is only what is below it.
+#
+# A component that is there already is left as it is, whatever its mode: the
+# only caller builds under $DOTFILES, whose own mode is the reader's and is
+# doctor's to report.  One that is there as a symlink stops the walk, tested
+# before -d because -d follows one: shale creating directories through a link
+# would write below whatever it points at, which is the failure the mode on
+# these directories exists to prevent.  That test is on the components this
+# makes and never on the base, which is the whole of the difference.
+make_own_dirs() {
+  local base=$1 rest=${2-} here component
+  MADE_DIR_FAILED=$base
+  # Taken on trust as a path and not as a directory that is there: a base that
+  # has gone is the first make_own_dir's error, named by mkdir in its own words.
+  [ -n "$base" ] || return 1
+  here=$base
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      */*)
+        component=${rest%%/*}
+        rest=${rest#*/}
+        ;;
+      *)
+        component=$rest
+        rest=
+        ;;
+    esac
+    # A '//' or a trailing '/' leaves an empty component, naming the directory
+    # already reached.
+    [ -n "$component" ] || continue
+    here=$here/$component
+    MADE_DIR_FAILED=$here
+    if [ -L "$here" ]; then
+      return 1
+    elif [ ! -d "$here" ]; then
+      make_own_dir "$here" || return 1
+    fi
+  done
+  MADE_DIR_FAILED=
+  return 0
+}
+
 # ------------------------------------------------------------------ the clones
 
 # Non-zero unless this build is going to fetch clone root $1: it has a url, and
@@ -2708,8 +2787,12 @@ STRAY_COUNT=0
 STRAY_PATHS=()
 
 # The paths in $HOME that stow will refuse to write over, collected by the layer
-# walk below.  Capped like every other list doctor keeps: the cap changes what is
-# printed and never what is counted.
+# walk below and by the walk of the built tree 'apply --replace' makes.  Capped
+# like every other list doctor keeps, and the one of them capped where it is
+# printed rather than where it is collected: apply moves every path on this list
+# and a capped one would leave the eleventh where it was, print nothing about
+# it, and hand stow a target it still refuses.  The cap changes what is printed
+# and never what is counted or acted on.
 APPLY_CONFLICT_CAP=10
 APPLY_CONFLICTS=0
 APPLY_CONFLICT_PATHS=()
@@ -2816,6 +2899,30 @@ home_conflict() {
     [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
     return 0
   fi
+  # The dotfiles directory itself, where it is under the home at all, and the
+  # whole of what is below it: stow will not stow into the stow directory it was
+  # given and says so - 'WARNING: skipping target which was current stow
+  # directory .dotfiles', measured on 2.3.1 and 2.4.1, both of which then link
+  # the rest of the tree and exit 0.  So no path under it is one an apply writes
+  # at, and nothing standing there is a refusal, whatever a layer provides.
+  #
+  # Which makes it the same exclusion count_dangling_links makes, for the same
+  # reason and spelled the same way, and it is here rather than in either walk
+  # so that the report and the paths 'apply --replace' moves cannot part company
+  # over it.  Without it that flag moved the reader's own shale.conf out of
+  # ~/.dotfiles and exited 0, leaving the next run of shale with no config.
+  #
+  # Empty where the root is not under the home, which is a SHALE_DIR layout: no
+  # composed path can reach outside the home at all, so there is nothing to
+  # exclude and the arm is skipped rather than matching everything.
+  if [ -n "$DOTFILES_REL" ]; then
+    case "$srel" in
+      "$DOTFILES_REL" | "$DOTFILES_REL"/*)
+        [ "$kind" != directory ] || HOME_CONFLICT_SKIP=$srel
+        return 0
+        ;;
+    esac
+  fi
   # An empty HOME would make every path below the root directory's.
   [ -n "${HOME-}" ] || return 0
   path=$HOME_PREFIX/$srel
@@ -2849,8 +2956,7 @@ home_conflict() {
     fi
   fi
   APPLY_CONFLICTS=$((APPLY_CONFLICTS + 1))
-  [ "$APPLY_CONFLICTS" -gt "$APPLY_CONFLICT_CAP" ] ||
-    APPLY_CONFLICT_PATHS+=("$path")
+  APPLY_CONFLICT_PATHS+=("$path")
   return 0
 }
 
@@ -2966,8 +3072,13 @@ report_home_conflicts() {
   lines=("$n $paths in $HOME $hold"
     'apply gives the composed tree to stow, and stow will not write over what it did not create: it refuses the whole operation, or stops part-way through one'
     "no apply finishes until $each moved aside, or copied into a layer and removed from $HOME")
+  # The cap is applied here rather than at the collection, which is where every
+  # other list in this report caps itself: the list this one reads is also the
+  # list 'apply --replace' moves, so it is kept whole and shortened on the way
+  # to the screen.
   i=0
-  while [ "$i" -lt "${#APPLY_CONFLICT_PATHS[@]}" ]; do
+  while [ "$i" -lt "${#APPLY_CONFLICT_PATHS[@]}" ] &&
+    [ "$i" -lt "$APPLY_CONFLICT_CAP" ]; do
     lines[${#lines[@]}]=${APPLY_CONFLICT_PATHS[$i]}
     i=$((i + 1))
   done
@@ -5813,8 +5924,300 @@ orphan_line() {
   fi
 }
 
+# Every path below $CUR/$1, against what stands at the same path in $HOME,
+# through home_conflict - which is doctor's own predicate, unchanged and not
+# copied: the set 'apply --replace' moves is the set the report names, or the
+# flag clears a refusal doctor never mentioned and leaves one it did.
+#
+# The built tree rather than the layers, where doctor reads the layers, and the
+# two answer the same because of when this runs: cmd_build has already composed
+# every layer into $CUR, so the tree is what the layers say, and it is also
+# exactly what stow is about to be handed.  Doctor cannot read it that way -
+# it runs where the tree may be older than the layers or absent altogether -
+# and this cannot read the layers as cheaply, the composer having already
+# settled which of them wins each path.
+#
+# Pre-order, parent before child, because that is what home_conflict's own skip
+# rule needs: a directory it has answered for takes the whole subtree below it,
+# and the answer has to be in before the descent.  Nothing here prunes that
+# descent for the same reason doctor's walk does not - the skip is a string
+# compare in the callee, and a walk that pruned would have to reproduce the rule
+# to know when.
+#
+# No recorded path is ever below another: the shapes that record a directory -
+# a symlink in $HOME, and a layer providing a file where $HOME has a directory -
+# are the shapes that stop the descent, by the skip rule and by the tree holding
+# a file there.  So the moves below are independent of each other and their
+# order is nobody's business.
+#
+# dotglob and nullglob are both set by the time this runs - cmd_build sets them
+# and never puts them back - so '*' is the whole listing and a '.*' beside it
+# would be a second copy of half of it.  '.' and '..' are dropped by name all
+# the same, whatever the glob options say about them.
+scan_apply_conflicts() {
+  local rel=$1 here e base srel kind
+  here=$CUR${rel:+/$rel}
+  # A directory shale composed and cannot now read says nothing here.  Nothing
+  # is silently skipped by it that stow will not meet itself: stow walks the
+  # same tree, and what it cannot read it reports in its own words.
+  { [ -r "$here" ] && [ -x "$here" ]; } || return 0
+  list_dir "$here" 0
+  for e in ${DIR_ENTRIES[@]+"${DIR_ENTRIES[@]}"}; do
+    base=${e##*/}
+    case "$base" in
+      . | ..) continue ;;
+      '*' | '.*')
+        { [ -e "$e" ] || [ -L "$e" ]; } || continue
+        ;;
+    esac
+    srel=${rel:+$rel/}$base
+    # A symlink is a leaf whatever it points at, exactly as the composer and
+    # doctor's layer walk treat one: calling a link to a directory a directory
+    # here would promise stow a merge.
+    kind='file'
+    if [ -d "$e" ] && [ ! -L "$e" ]; then
+      kind='directory'
+    fi
+    home_conflict "$srel" "$kind"
+    [ "$kind" = directory ] || continue
+    scan_apply_conflicts "$srel"
+  done
+}
+
+# Takes back the directories this run made under $REPLACED and put nothing in.
+# $1 is how many paths have been moved, $2 and $3 whether $REPLACED and the
+# stamp directory were there before this run started, and $4 the path below
+# $DOTFILES that make_own_dirs was asked for.  Nothing happens unless all of
+# that says the tree is this run's own.
+#
+# It exists so that the directory is there exactly when it holds something,
+# which is what makes doctor's note about it true: without this, a move that
+# failed on the first path left an empty stamp directory behind and the next
+# doctor said it held files that had been moved aside.
+#
+# rmdir, one component at a time from the deepest up, and never rm -rf.  The
+# refusal on a directory that is not empty is not an obstacle to work around -
+# it is the whole guarantee, and it is why this is safe to call after a move has
+# failed.  mv between two filesystems is a copy and then a removal, so a failure
+# in the removal leaves a complete copy at the destination while the source is
+# part of what it was; rm -rf took that copy away and left a message saying
+# nothing had been moved, which is the one outcome this option exists to make
+# impossible.  rmdir cannot: what mv wrote makes the directory non-empty, the
+# removal stops there, and every ancestor is non-empty too.
+#
+# The first refusal ends the walk for that reason - an ancestor of a directory
+# that would not go is one that will not go either - and the two names shale
+# owns go only where this run made them: a reused stamp holds an earlier run's
+# paths, and a $REPLACED that was already there may hold earlier stamps.
+#
+# rmdir's own stderr is dropped, where make_dir_at lets mkdir's through: a
+# refusal here is the ordinary course rather than a fault, and it runs on a path
+# that is about to die with a diagnostic of its own.  A missing rmdir answers
+# the same as a refusal and leaves the directories; doctor notes the tool.
+drop_unused_stamp() {
+  local moved=$1 had_root=$2 had_stamp=$3 sub=$4
+  [ "$moved" -eq 0 ] || return 0
+  command -v rmdir >/dev/null 2>&1 || return 0
+  while [ -n "$sub" ]; do
+    if [ "$sub" = replaced ]; then
+      [ "$had_root" -eq 0 ] || return 0
+    else
+      case "$sub" in
+        # A directory below the stamp is this run's whatever the stamp is: the
+        # tree under it was made for the path this run was moving.
+        replaced/*/*) ;;
+        replaced/*) [ "$had_stamp" -eq 0 ] || return 0 ;;
+        # Nothing else is this function's to remove.
+        *) return 0 ;;
+      esac
+    fi
+    # A component that is not there is stepped over rather than read as a
+    # refusal: on the arm where make_own_dirs failed, the deepest name is the
+    # one it could not create, and rmdir answering ENOENT for it used to end the
+    # walk before it reached the stamp this run did make - three empty
+    # directories left behind and doctor saying they held files that had been
+    # moved aside.  Reproduced with mkdir refusing a component below the stamp;
+    # ENOSPC, EDQUOT and a read-only filesystem reach it for real.
+    #
+    # Emptiness is still nobody's decision but rmdir's.  This tests only that
+    # there is a directory to ask about, which is why it is '-d' and not a test
+    # of what is in one.
+    [ ! -d "$DOTFILES/$sub" ] || rmdir "$DOTFILES/$sub" 2>/dev/null || return 0
+    case "$sub" in
+      */*) sub=${sub%/*} ;;
+      *) sub= ;;
+    esac
+  done
+  return 0
+}
+
+# The paths that walk recorded, moved out of $HOME into one timestamped
+# directory under $REPLACED, keeping the tree they had.  Nothing is read and
+# nothing is deleted: a symlink moves as a link, a directory moves whole with
+# everything in it, and every mode, time and inode is the rename's to keep.
+#
+# The directory is made only where there is something to put in it, so a
+# --replace over a home with no refusal in it leaves no trace of having been
+# asked.
+#
+# Every step is checked and each failure stops the run naming the path, on the
+# swap's reasoning: what has already been moved is on the screen a line at a
+# time, so a run that stops part-way has said which paths went and where, and
+# the one it stopped on.  Nothing in $HOME has been relinked at that point -
+# stow has not run - so the state to describe is the two directories.
+#
+# No signal is deferred over any of it, where the build's swap defers over its
+# two renames, and the difference is what an interrupt can leave.  The swap has
+# an interval in which no name holds the tree $HOME points at; this has none,
+# and a path is under $REPLACED or in $HOME and never in neither.
+#
+# Which is a weaker claim than 'each move is atomic', and deliberately: it is
+# atomic only while both ends are on one filesystem, where mv is a rename.  A
+# SHALE_DIR on another mount makes it a copy followed by a removal - POSIX has
+# mv duplicate the file hierarchy and remove the source afterwards - so an
+# interrupt there can leave a partial copy under $REPLACED with the path still
+# whole in $HOME.  Nothing is lost by it, the source being the one that outlives
+# the window; what it costs is a truncated file at the destination, which is the
+# one thing under that directory a reader has to know not to keep.
+#
+# The other thing an interrupt can cost is the line saying where a path went,
+# the report coming after the move that earns it.  What answers for that is the
+# directory itself: the tree under it is the tree the path had, and doctor names
+# the directory on every run until it is deleted.
+#
+# A destination that is already there is one of those failures rather than
+# something to overwrite or to number around: it means either that this second
+# is the second of two --replace runs and the path came back in between, or
+# that something else is under $REPLACED at that name, and a mv over either
+# destroys the only copy of a file the reader asked shale to keep.  Which also
+# settles the stamp collision: a second run inside one second reuses the
+# directory rather than inventing a name, because the paths inside it cannot
+# collide unless a path came back, and that is refused here by name.
+move_home_conflicts() {
+  local dir stamp n i path rel dest sub moved so_far had_root had_stamp partial
+  n=${#APPLY_CONFLICT_PATHS[@]}
+  [ "$n" -gt 0 ] || return 0
+
+  # Checked here rather than in the tool list at the top of an apply: this is
+  # the only thing in shale that runs date, and it is wanted only where the flag
+  # is given and there is something to move.  doctor notes the same absence.
+  command -v date >/dev/null 2>&1 ||
+    die "date is not installed, and '--replace' names the directory it moves files aside to after the time" \
+      "$CUR is built and correct; nothing in $HOME has been moved or relinked" \
+      "install it with your system package manager, or move those paths aside yourself: shale installs nothing"
+  stamp=$(date '+%Y%m%d-%H%M%S') || stamp=
+  # What came back is a directory name, so it is held to the shape shale asked
+  # for rather than joined to a path unlooked-at: a '/' in it would put the tree
+  # somewhere nobody named, and an empty answer would put it at $REPLACED
+  # itself, where the next run's would land on top of it.  Quoted, because the
+  # answer this refuses can hold anything at all.
+  case "$stamp" in
+    '' | *[!0-9-]*)
+      shell_quote "$stamp"
+      die "date answered $QUOTED, and '--replace' names the directory it moves files aside to after the time" \
+        "shale asked it for '+%Y%m%d-%H%M%S', which is digits and one '-'" \
+        "$CUR is built and correct; nothing in $HOME has been moved or relinked"
+      ;;
+  esac
+  dir=$REPLACED/$stamp
+
+  # Whether either directory was here before this run, read before anything is
+  # created and used only on the failure paths below: what this run made and put
+  # nothing in is what it takes away again, and what was already here is not
+  # this run's to touch.  A reused stamp is the second of those.
+  had_root=0
+  { [ ! -e "$REPLACED" ] && [ ! -L "$REPLACED" ]; } || had_root=1
+  had_stamp=0
+  { [ ! -e "$dir" ] && [ ! -L "$dir" ]; } || had_stamp=1
+
+  moved=0
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    path=${APPLY_CONFLICT_PATHS[$i]}
+    i=$((i + 1))
+    # Back to the path relative to the home, which is how home_conflict built
+    # it: every entry on that list is "$HOME_PREFIX/" and one of the composed
+    # tree's own relative paths.
+    rel=${path#"$HOME_PREFIX"/}
+    dest=$dir/$rel
+    # The same path below $DOTFILES, which is what make_own_dirs takes: the
+    # directories to make are the stamp and whatever tree this path had.
+    sub=replaced/$stamp
+    case "$rel" in
+      */*) sub=$sub/${rel%/*} ;;
+    esac
+    # Where the run has got to, said in the message that stops it.  It names the
+    # directory rather than pointing at the lines above: those are on stdout and
+    # this is on stderr, so 'above' is only true of a terminal holding both.
+    if [ "$moved" -eq 0 ]; then
+      so_far='nothing has been moved'
+    elif [ "$moved" -eq 1 ]; then
+      so_far="1 path has already been moved into $dir"
+    else
+      so_far="$moved paths have already been moved into $dir"
+    fi
+    # Before anything is created, which is the order that keeps the directory
+    # honest: a destination that is already there has a parent that is already
+    # there too, so this arm makes nothing and leaves nothing behind for doctor
+    # to describe as holding files.
+    { [ ! -e "$dest" ] && [ ! -L "$dest" ]; } || {
+      drop_unused_stamp "$moved" "$had_root" "$had_stamp" "$sub"
+      die "there is already something at $dest" \
+        "shale moves $path there and will not write over what is at that path" \
+        "$so_far" \
+        "nothing in $HOME has been relinked"
+    }
+    make_own_dirs "$DOTFILES" "$sub" || {
+      drop_unused_stamp "$moved" "$had_root" "$had_stamp" "$sub"
+      die "could not create $MADE_DIR_FAILED" \
+        "'--replace' moves aside into $dir" \
+        "$so_far" \
+        "nothing in $HOME has been relinked"
+    }
+    mv "$path" "$dest"
+    # Judged by the filesystem rather than by mv's exit status, as the swap's
+    # two renames are: a path still standing in $HOME is a move that did not
+    # happen, whatever mv returned, and stow would then refuse at it anyway.
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      # Whether mv had begun writing before it stopped, which is the whole of
+      # what separates the two messages below.  Within one filesystem mv is a
+      # rename and there is nothing at the destination; between two it copies
+      # and then removes, so a failure in the removal leaves a copy that may be
+      # the complete path while what is left in $HOME is part of it.  Nothing
+      # here reads either of them to say which, and nothing removes either:
+      # both are the reader's, and shale's business is saying that there are
+      # two.  drop_unused_stamp is not called on this arm at all - what mv
+      # wrote is under the very directories it would walk.
+      if [ -e "$dest" ] || [ -L "$dest" ]; then
+        partial=()
+        [ "$moved" -eq 0 ] || partial=("$so_far")
+        die "could not move $path to $dest" \
+          "$dest holds what mv had written there when it stopped: a move between two filesystems copies before it removes, so that may be a complete copy while $path is missing part of what was in it" \
+          'shale reads neither and removes neither: compare them, keep what you want, and remove the other' \
+          ${partial[@]+"${partial[@]}"} \
+          "nothing in $HOME has been relinked"
+      fi
+      drop_unused_stamp "$moved" "$had_root" "$had_stamp" "$sub"
+      die "could not move $path to $dest" \
+        "$so_far" \
+        "nothing in $HOME has been relinked"
+    fi
+    report "moved $path to $dest"
+    moved=$((moved + 1))
+    # Read by the stow failures in cmd_apply, which are the messages a reader
+    # meets when the apply these moves were for does not finish: without them
+    # the only record of where the files went is on the other stream.
+    REPLACED_MOVED=$moved
+    REPLACED_DIR=$dir
+  done
+
+  return 0
+}
+
+# $1 is 1 where the invocation carried --replace and 0 otherwise.
 cmd_apply() {
-  local status err had_xtrace i n idx rel bits pre have target failed kept lines
+  local replace=${1-0} status err had_xtrace i n idx rel bits pre have target
+  local failed kept lines
 
   parse_config || exit 1
 
@@ -5829,6 +6232,19 @@ cmd_apply() {
   # and would name links that are gone by the time the line is read.
   BUILD_REPORTS_ORPHANS=0
   cmd_build || exit 1
+
+  # After the build and before everything else this command does, which is the
+  # only window the moves can happen in.  After, because the set is read off the
+  # composed tree and a build that failed has exited above rather than moved a
+  # file for a stow that was never going to run; before, because what stands in
+  # $HOME is what the mode snapshot below reads and what stow refuses - a
+  # directory moved aside here was never one that "was already there".
+  #
+  # Only where the flag was given.  Without it every line below is what it was.
+  if [ "$replace" -eq 1 ]; then
+    scan_apply_conflicts ''
+    move_home_conflicts
+  fi
 
   # -t "$HOME" is mandatory even though stow's default target - the parent of
   # the stow directory - is that same path.  man stow, RESOURCE FILES: stow
@@ -5926,7 +6342,23 @@ cmd_apply() {
   count_dangling_links all
   orphan_line
   lines=()
-  [ -z "$ORPHAN_LINE" ] || lines=("$ORPHAN_LINE")
+  # Where '--replace' put the reader's files, on the three stow failures below
+  # and on none of the successes.  The two mode failures further down are not
+  # among them and want no such line: stow has run there and $HOME is linked, so
+  # the apply did the thing the flag was asked for, and doctor's note names the
+  # directory from then on.  The line naming each path as it moved is on stdout and
+  # these messages are on stderr, so a run read through a '2>log' - or one whose
+  # stdout scrolled past - otherwise ends with the apply refused, the files out
+  # of $HOME, and nothing on the stream carrying the failure saying where they
+  # went.  First of the continuation lines, ahead of the orphan count: what has
+  # been moved out of the home is a more urgent thing to know than what is left
+  # pointing at nothing.
+  if [ "$REPLACED_MOVED" -eq 1 ]; then
+    lines+=("1 path was moved aside before this, and it is under $REPLACED_DIR")
+  elif [ "$REPLACED_MOVED" -gt 0 ]; then
+    lines+=("$REPLACED_MOVED paths were moved aside before this, and they are under $REPLACED_DIR")
+  fi
+  [ -z "$ORPHAN_LINE" ] || lines+=("$ORPHAN_LINE")
 
   if [ "$status" -eq 125 ]; then
     die "could not enter $DOTFILES to run stow" \
@@ -6173,6 +6605,27 @@ cmd_doctor() {
     note "readlink is not installed, so this report cannot audit ${HOME-} for broken links, check the layers for a symlink with an absolute target, or find a symlink in ${HOME-} with an absolute target at a path a layer provides" \
       "it stops no build and no apply, but 'shale which' refuses a path that a layer provides as a symlink" \
       "it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm"
+  # The third of these, and the narrowest: date is read by one thing in shale,
+  # which is the directory 'apply --replace' names after the moment it moved
+  # files aside at.  A note rather than a finding on the tool loop's terms - it
+  # stops no build, no apply and no other flag, there being no other flag - and
+  # it is here rather than at the point of use because a reader learns what is
+  # missing before they meet the apply that refuses, which is the whole of what
+  # this report is for.  cmd_apply checks it again where it needs it.
+  command -v date >/dev/null 2>&1 ||
+    note "date is not installed, so 'shale apply --replace' cannot name the directory it moves files aside to" \
+      'it stops no build and no apply: what it costs is that one option, which refuses rather than guessing at a name' \
+      "it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm"
+  # The narrowest of the four, and the only one whose absence costs nothing on a
+  # run that works: rmdir is what takes back the directory 'apply --replace'
+  # made when the move into it then failed, so without it that directory is left
+  # behind empty and the note below about it says it holds files that were moved
+  # aside.  Named for that reason and no other - a report that promises the note
+  # is true has to say when it is not.
+  command -v rmdir >/dev/null 2>&1 ||
+    note "rmdir is not installed, so a move 'shale apply --replace' could not finish leaves behind the empty directory it had made" \
+      'it stops no build, no apply and no move: what it costs is that this report then describes such a directory as holding files that were moved aside' \
+      "it ships with GNU coreutils, so the package to install is 'coreutils', the same one that already provides chmod, cp, ls, mkdir, mv and rm"
 
   if [ ! -d "$DOTFILES" ]; then
     if [ -e "$DOTFILES" ] || [ -L "$DOTFILES" ]; then
@@ -6386,8 +6839,11 @@ cmd_doctor() {
       case "$leaf" in
         . | ..) continue ;;
       esac
+      # 'replaced' beside build's three: shale writes it, so it is not a stray -
+      # and the note further down is what says it is there, in words that say
+      # what is in it.
       case "$leaf" in
-        current | current.new | current.old | "${CONF##*/}") continue ;;
+        current | current.new | current.old | replaced | "${CONF##*/}") continue ;;
       esac
       known=0
       i=0
@@ -6666,6 +7122,29 @@ cmd_doctor() {
         lines[${#lines[@]}]='copy anything in it you want to keep into a layer first'
         note ${lines[@]+"${lines[@]}"}
       fi
+    fi
+  fi
+
+  # The fourth name shale writes in $DOTFILES, under build's two and last of the
+  # three notes about them, because it is the one nothing here will ever clear:
+  # a build reaps current.new and current.old, and no command removes this.  The
+  # note therefore says what is in it and who deletes it, and says it on every
+  # run until they do - which is not the everyday noise #133 took out, an
+  # 'apply --replace' being a thing a reader did once on purpose and a directory
+  # holding the only copy of their files being the state it left.
+  #
+  # A note and not a finding: nothing about it stops a build or an apply, and
+  # the files in it are exactly where the flag promised to put them.
+  if [ -e "$REPLACED" ] || [ -L "$REPLACED" ]; then
+    if [ -d "$REPLACED" ] && [ ! -L "$REPLACED" ]; then
+      note "$REPLACED holds files an 'apply --replace' moved aside" \
+        'each of them is where it was moved to and nowhere else: nothing was copied and nothing was read' \
+        'no build and no apply removes any of it, so delete it once you have what you need from it'
+    else
+      # Not a directory shale made, so nothing is claimed about what it holds.
+      note "$REPLACED is at the path 'apply --replace' moves files aside to" \
+        'shale creates a directory there and moves into it, so an apply with that option will refuse at this' \
+        'remove it, or move it aside'
     fi
   fi
 
@@ -7021,8 +7500,18 @@ case "$cmd" in
     cmd_build
     ;;
   apply)
-    [ $# -eq 0 ] || usage_error "apply takes no arguments"
-    cmd_apply
+    # The one option shale has, and it is read here rather than in a loop: one
+    # spelling, one position, and anything else is the arity error apply has
+    # always given.  'shale apply --replace extra' and 'shale apply extra
+    # --replace' are both that error, the first because a second argument is
+    # left over and the second because the first one is not the flag.
+    REPLACE=0
+    if [ $# -eq 1 ] && [ "${1-}" = --replace ]; then
+      REPLACE=1
+      shift
+    fi
+    [ $# -eq 0 ] || usage_error "apply takes no arguments other than --replace"
+    cmd_apply "$REPLACE"
     ;;
   doctor)
     [ $# -eq 0 ] || usage_error "doctor takes no arguments"
@@ -7033,7 +7522,13 @@ case "$cmd" in
     cmd_which "$1"
     ;;
   -*)
-    usage_error "unknown option $cmd; shale has no options"
+    # An option in the command's place, which no spelling of shale's one option
+    # is: it belongs after 'apply', and this arm is reached before any command
+    # has been read.  The line used to say shale had no options at all, which
+    # stopped being true and would have sent a reader looking for a spelling
+    # that does not exist.
+    usage_error "unknown option $cmd" \
+      "shale's options come after the command, and 'apply --replace' is the only one"
     ;;
   *)
     usage_error "unknown command '$cmd'"
