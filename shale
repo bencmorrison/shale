@@ -155,6 +155,10 @@ shopt -u dotglob extglob failglob nocaseglob nocasematch nullglob
 
 PROG=shale
 
+# Printed by the usage header and nowhere else: there is no --version flag, the
+# command surface being closed.
+VERSION=2.0.0
+
 # Stripped once, here: "$HOME"/* matches nothing under a home that already ends
 # in a slash, so which reports every absolute path as being outside $HOME.
 case "${HOME-}" in
@@ -388,7 +392,7 @@ denied_verb() {
 usage() {
   # shellcheck disable=SC2088  # a tilde to print, not one to expand
   printf '%s\n' \
-    'shale - layered dotfiles builder' \
+    "$PROG $VERSION - layered dotfiles builder" \
     '' \
     'usage:' \
     "  shale build          compose the configured layers into $DOTFILES_SHOWN/current" \

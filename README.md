@@ -14,10 +14,10 @@ is the machine's business, not the repos'.
 ## Requirements
 
 `bash`, `git` and GNU `stow`, installed with your system package manager, and the coreutils any
-system already has — `cp`, `mv`, `rm`, `mkdir` and `readlink`. Shale installs nothing,
-including itself. `git` is used only to clone a layer repository the machine does not have yet, so
-`doctor` reports it missing as a note where no configured layer needs cloning and as a problem where
-one does.
+system already has — `chmod`, `cp`, `date`, `ls`, `mkdir`, `mv`, `readlink`, `rm` and `rmdir`. Shale
+installs nothing, including itself. `git` is used only to clone a layer repository the machine does
+not have yet, so `doctor` reports it missing as a note where no configured layer needs cloning and
+as a problem where one does.
 `chkstow` ships with GNU stow and is what `doctor` audits `$HOME` with; without it `doctor` says so
 and skips that one check. `shale doctor` names every one of these it cannot find, so it is the
 fastest answer to a machine where something will not run.
@@ -28,11 +28,27 @@ exercised rather than assumed. WSL is Linux for shale's purposes. No other platf
 
 ## Install
 
-Clone this repository, and copy the script from the clone to any directory on your `PATH`. These
-commands and the bootstrap below run from the clone's root, which is where `shale` and the example
-configs are:
+Shale is one file, so installing it is downloading that file and putting it on your `PATH`. The
+quick way is the released script, from any directory — `-O` writes it into the working one:
 
 ```sh
+mkdir -p ~/.local/bin
+curl -fsSLO https://github.com/bencmorrison/shale/releases/latest/download/shale
+mv shale ~/.local/bin/shale
+chmod +x ~/.local/bin/shale
+command -v shale
+```
+
+`latest/download` tracks whatever release is newest; `download/v2.0.0` in its place pins the version
+that URL gives you.
+
+Cloning gets the same script plus `examples/` and `docs/`, which the bootstrap below and
+[docs/migrating.md](docs/migrating.md) both draw on. These commands, and every one in the bootstrap,
+run from the clone's root:
+
+```sh
+git clone https://github.com/bencmorrison/shale.git
+cd shale
 mkdir -p ~/.local/bin
 cp shale ~/.local/bin/shale
 command -v shale
@@ -40,12 +56,12 @@ command -v shale
 
 `~/.local/bin` is the usual choice, and it is often not on `PATH` on the machine you are
 bootstrapping, because putting it there is a thing your dotfiles do and they are not applied yet.
-That is what the third line is for: nothing printed means this shell cannot find shale, and
+That is what the `command -v` line is for: nothing printed means this shell cannot find shale, and
 `export PATH="$HOME/.local/bin:$PATH"` is enough to get through the bootstrap below. Applying your
 layers is what makes it permanent.
 
-Shale never needs to know where it lives, and there is nothing else to install. There is no version
-command: shale is one file, and the copy you have is whatever the repository held when you copied it.
+Shale never needs to know where it lives, and there is nothing else to install. There is no flag
+that prints the version: the header of the usage text names it, and that is the copy you have.
 
 ## Bootstrap on a new machine
 
@@ -231,7 +247,7 @@ transcript needed a fault to show, the text says what was broken first.
 
 ```
 $ shale
-shale - layered dotfiles builder
+shale 2.0.0 - layered dotfiles builder
 
 usage:
   shale build          compose the configured layers into ~/.dotfiles/current
@@ -543,7 +559,7 @@ overwrites, and how to carry on from a block that stopped.
   symlinks in `$HOME` point at nothing. Apply relinks immediately afterwards.
 - No build is incremental: every one composes every layer from scratch, so a one-character edit
   costs what a first build costs. Roughly two and a half milliseconds a file — 5.0 seconds for a
-  2000-file tree spread over 400 directories, 40 milliseconds for a seven-file one, on the container
+  2000-file tree spread over 400 directories, 35 milliseconds for a seven-file one, on the container
   these were measured in. A directory
   is one `mkdir` and costs less than a file: no layer's directory mode is read or copied. What costs
   instead is each line of a `.shale-modes` — one `chmod` in the build, and a read and a `chmod` in
