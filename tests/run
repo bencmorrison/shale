@@ -1301,7 +1301,7 @@ EOF
 test_usage_bare_prints_usage_on_stdout() {
   run_shale
   assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale - layered dotfiles builder' 'stdout'
+  assert_contains "$shale_out" 'shale 2.0.0 - layered dotfiles builder' 'stdout'
   assert_contains "$shale_out" 'shale which PATH' 'stdout'
   assert_empty "$shale_err" 'stderr'
 }
@@ -1400,7 +1400,7 @@ test_usage_prints_without_cat() {
   local saved out err bad_out bad_err status
   run_shale
   assert_status 0 "$shale_status"
-  assert_contains "$shale_out" 'shale - layered dotfiles builder' 'stdout'
+  assert_contains "$shale_out" 'shale 2.0.0 - layered dotfiles builder' 'stdout'
   stub_path_without cat
   # All four captures proven before either run, in the way run_shale proves its
   # own: a case that planted something at any of them must stop rather than have
@@ -1545,7 +1545,7 @@ test_usage_a_wrong_invocation_does_not_print_the_usage_text() {
     # shellcheck disable=SC2086
     run_shale $invocation
     assert_status 2 "$shale_status" "'shale $invocation' exit status"
-    assert_not_contains "$shale_err" 'shale - layered dotfiles builder' \
+    assert_not_contains "$shale_err" 'shale 2.0.0 - layered dotfiles builder' \
       "'shale $invocation' stderr"
     assert_not_contains "$shale_err" 'usage:' "'shale $invocation' stderr"
     assert_not_contains "$shale_err" '  shale which PATH     show which layer provides PATH' \

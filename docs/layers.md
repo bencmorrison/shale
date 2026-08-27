@@ -119,8 +119,8 @@ about. Rename one of them.
 
 ```
 shale: 'build' would fail at .config/profile.d — it is a directory in layer 'base' and a file in layer 'work'
-shale:   /home/you/.dotfiles/base/.config/profile.d
-shale:   /home/you/.dotfiles/work/.config/profile.d
+shale:   /home/you/.dotfiles/personal/base/.config/profile.d
+shale:   /home/you/.dotfiles/work/base/.config/profile.d
 shale:   a layer cannot replace a directory with a file, or a file with a directory
 shale:   remove or rename one of them
 ```
@@ -779,8 +779,8 @@ shale: 2 files in /home/you/.dotfiles/current do not match the layer copies that
 shale:   either something moved them into the built tree, which is what stow --adopt does, or a layer changed and there has been no build since
 shale:   the next build replaces them with the layer copies, keeping what is there now at /home/you/.dotfiles/current.old
 shale:   the build after that removes /home/you/.dotfiles/current.old, so a file moved into the built tree is recoverable for one build and no longer
-shale:   /home/you/.dotfiles/current/.zshrc
 shale:   /home/you/.dotfiles/current/.vimrc
+shale:   /home/you/.dotfiles/current/.zshrc
 ```
 
 Shale cannot tell an adopted file from a built tree its layers have moved past, and does not guess:
@@ -840,10 +840,10 @@ stow run. The one case it does not cover is a whole directory leaving every laye
 never visits — `shale doctor` finds those, and `docs/migrating.md` says what to do about them.
 
 Nothing about a build is incremental. Every one of them composes every layer from scratch, so a
-one-character edit costs what a first build costs: on this machine 4.1 seconds for a 2000-file tree,
-against 31 milliseconds for a seven-file one, and the edited build was 4.08 seconds — roughly two
-milliseconds a file, on whatever your disk does. There is nothing to tune and no cache to warm; keep
-the trees the size the dotfiles actually are.
+one-character edit costs what a first build costs: on the container these were measured in, 5.0
+seconds for a 2000-file tree, against 35 milliseconds for a seven-file one, and the edited build was
+4.9 seconds — roughly two and a half milliseconds a file, on whatever your disk does. There is
+nothing to tune and no cache to warm; keep the trees the size the dotfiles actually are.
 
 Shale clones a layer root that is missing and never touches it again; updating a checkout is git's
 job. Pull each clone root, then apply:

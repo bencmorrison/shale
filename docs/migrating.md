@@ -293,9 +293,10 @@ Stow plans the whole operation and abandons all of it if any part conflicts, so 
 changes nothing in `$HOME`. The built tree is fine; clear what stow named and apply again. Apply
 restows, so stow runs an unstow phase and then a stow phase, and a collision both phases see is
 named once for each. Every transcript below is stow 2.3.1's. Match the intent rather than the shape,
-because the shape is what moves between stow versions: on 2.4.1 two of these three arrive as one
-block rather than two, one of them loses the `=> package/path` half of the line, and the third is
-reworded into advice to use `--adopt` — see *Coming from plain files*.
+because the shape is what moves between stow versions: on 2.4.1 the second and third arrive as one
+block rather than two and each loses the `=> package/path` half of the line, the first is word for
+word what it is here, and the ordinary-file refusal below them is reworded into advice to use
+`--adopt` — see *Coming from plain files*.
 
 An old package still stowed over a path the built tree also provides:
 
@@ -428,6 +429,7 @@ shale:   stow prunes only the links an apply wrote — relative, and in a direct
 shale:   stow 2.4 or later can sweep the whole target tree instead, which unstows everything and needs the apply after it:
 shale:     stow -D -p --no-folding -d '/home/you/.dotfiles' -t '/home/you' current && shale apply
 shale:   earlier stow, 2.3.1 included, abandons that sweep at the first file in the target that is neither a link nor a directory
+shale:   that sweep also prints a "WARNING: skipping target" line naming its own stow directory — expected, and not a second problem, on either version
 ```
 
 Delete the links it names. Each one points at a path that is not there, `current` is already correct,
@@ -440,6 +442,7 @@ the target as a conflict — one `~/notes.txt` is enough — and abandons the ru
 anything:
 
 ```
+WARNING: skipping target which was current stow directory .dotfiles
 WARNING! unstowing current would cause conflicts:
   * existing target is neither a link nor a directory: notes.txt
 All operations aborted.
