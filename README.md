@@ -43,8 +43,9 @@ command -v shale
 that URL gives you.
 
 Cloning gets the same script plus `examples/` and `docs/`, which the bootstrap below and
-[docs/migrating.md](docs/migrating.md) both draw on. These commands, and every one in the bootstrap,
-run from the clone's root:
+[docs/migrating.md](docs/migrating.md) both draw on, and the agent skill in `skills/shale/`, which
+[Letting a coding agent drive it](#letting-a-coding-agent-drive-it) covers. These commands, and
+every one in the bootstrap, run from the clone's root:
 
 ```sh
 git clone https://github.com/bencmorrison/shale.git
@@ -506,6 +507,45 @@ filename, or *adds* alongside it with a new one.
 
 [docs/layers.md](docs/layers.md) writes the convention out in full, alongside the rest of what goes
 into authoring a layer.
+
+## Letting a coding agent drive it
+
+Ask a coding agent to change a dotfile on a shale machine and it will edit `~/.zshrc` — a link into
+`current/`, so the next build throws the edit away. `skills/shale/SKILL.md` is the fix: a skill that
+teaches an agent to find the owning layer with `shale which`, edit that, and build or apply, along
+with `--replace`, `.shale-modes`, `.shale-ignore` and what to ask before touching. It is written to
+the open [Agent Skills](https://agentskills.io/specification) format and names no agent's own tools,
+so any agent that reads that format can use it, and one that does not can be pointed at the file as
+ordinary instructions.
+
+Shale does not install it, any more than it installs itself. Copy the `shale` directory — the
+directory, not only the file, because the format names a skill after the directory holding it — into
+wherever your agent reads skills from; each agent's own documentation says where, and
+[agentskills.io/clients](https://agentskills.io/clients) links to it for most of them. From a clone:
+
+```sh
+mkdir -p <your agent's skills directory>
+cp -R skills/shale <your agent's skills directory>/
+```
+
+Without a clone, fetch the one file into a directory named `shale`:
+
+```sh
+mkdir -p <your agent's skills directory>/shale
+curl -fsSL -o <your agent's skills directory>/shale/SKILL.md \
+  https://raw.githubusercontent.com/bencmorrison/shale/main/skills/shale/SKILL.md
+```
+
+That URL takes the skill from `main`, which can be ahead of the released script; put the tag your
+script came from in place of `main` to match them, for any release that includes the skill.
+
+That skills directory is usually under `$HOME`, so the tidier home for it is a layer: put the `shale`
+directory at the same path inside one of your layers and `shale apply` links it into place on every
+machine that layer reaches. Either way it is a copy of one version; take a new one when you take a
+new script.
+
+An agent that reads `AGENTS.md` but not skills can be given one line in the `AGENTS.md` it reads,
+naming the path of the copy you made and saying to read it before touching a dotfile.
 
 ## Uninstalling
 
