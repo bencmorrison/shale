@@ -51,6 +51,11 @@ A new external command joins `cmd_doctor`'s tool list and the harness's `stub_pa
 absence goes unreported and nothing fails to say so. The enforcement runs the other way only: adding
 to doctor's list alone reddens doctor cases, adding to neither reddens nothing.
 
+`skills/shale/SKILL.md` teaches users' agents the command surface, doctor's verdict lines, the
+build-or-apply boundary and the refusal remedies, quoting some messages, and no test holds it to the
+script: a change to any of those updates it in the same commit, or agents go on following the old
+behaviour.
+
 The same trap runs outward. The container has GNU Stow 2.3.1 and the macOS runner 2.4.1; they differ
 in conflict wording, in whether an unmanaged file is an unstow conflict, and in whether an absolute
 layer symlink below the top level is refused. Assert version-stable fragments of stow's and chkstow's
