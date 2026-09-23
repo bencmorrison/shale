@@ -8,7 +8,7 @@ into layers, list them, apply. Both paths meet at *What a first apply refuses, a
 back out is the same for both.
 
 Every `~/.dotfiles` below is the default root; if you set `SHALE_DIR`, read it as that directory
-instead — the README's *Configuration* section says what the variable covers.
+instead — [configuration.md](configuration.md#shale_dir) says what the variable covers.
 
 Do it from a shell you can afford to lose. Either path takes `~/.zshrc`, `~/.profile` and everything
 beside them out of `$HOME` for a while — unstowed, or moved aside — and every shell opened between
@@ -60,8 +60,9 @@ one — to shale it is a directory either way.
 
 If **a layer already provides those paths**, from a repository you are adopting, then your file and
 the layer's are two versions of one path and exactly one of them can win. Write `shale.conf` and
-create the url-less layers as the README's bootstrap has it, then apply with your files still in
-place, and stow refuses the lot. On stow 2.3.1 that means every path named twice, once for the
+create the url-less layers as the
+[README's bootstrap](../README.md#bootstrap-on-a-new-machine) has it, then apply with your files
+still in place, and stow refuses the lot. On stow 2.3.1 that means every path named twice, once for the
 unstow phase and once for the stow phase:
 
 ```
