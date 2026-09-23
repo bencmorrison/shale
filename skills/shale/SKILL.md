@@ -171,8 +171,12 @@ apply, and modes for private paths must be declared before it.
 
 ## Further reading
 
-- Install, bootstrap, configuration and every command:
+- Install and bootstrap:
   https://github.com/bencmorrison/shale/blob/main/README.md
+- `shale.conf`, `SHALE_DIR`, `.shale-ignore` and `.shale-modes`:
+  https://github.com/bencmorrison/shale/blob/main/docs/configuration.md
+- Every command in depth, exit codes, and what `doctor` checks:
+  https://github.com/bencmorrison/shale/blob/main/docs/commands.md
 - Layer authoring, precedence, modes and ignores:
   https://github.com/bencmorrison/shale/blob/main/docs/layers.md
 - First apply, migrating from plain files or stow, and leaving shale:
